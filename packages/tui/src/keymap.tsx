@@ -14,6 +14,7 @@ import {
 } from "@opentui/keymap/extras"
 import { KeymapProvider, useKeymap, useKeymapSelector, useBindings } from "@opentui/keymap/solid"
 import { createMemo, type Accessor } from "solid-js"
+import { registerAstraSafeStartCommandPolicy } from "./astra/command-policy"
 import { useTuiConfig } from "./config"
 import { TuiKeybind } from "./config/keybind"
 
@@ -211,8 +212,14 @@ export function formatKeyBindings(bindings: Parameters<typeof formatCommandBindi
   return formatCommandBindingsExtra(bindings, formatOptions(config))
 }
 
-export function registerOpencodeKeymap(keymap: OpenTuiKeymap, renderer: CliRenderer, config: ResolvedKeymapConfig) {
+export function registerOpencodeKeymap(
+  keymap: OpenTuiKeymap,
+  renderer: CliRenderer,
+  config: ResolvedKeymapConfig,
+  options: { astraSafeStart?: boolean } = {},
+) {
   const modeStack = createOpencodeModeStack(keymap)
+  const offAstraCommandPolicy = options.astraSafeStart ? registerAstraSafeStartCommandPolicy(keymap) : () => {}
   const offCommaBindings = registerCommaBindings(keymap)
   const offAliasExpander = registerKeyAliases(keymap)
   const offBaseLayout = registerBaseLayoutFallback(keymap)
@@ -238,6 +245,7 @@ export function registerOpencodeKeymap(keymap: OpenTuiKeymap, renderer: CliRende
     offLeader()
     offAliasExpander()
     offBaseLayout()
+    offAstraCommandPolicy()
     offCommaBindings()
     modeStack.dispose()
   }

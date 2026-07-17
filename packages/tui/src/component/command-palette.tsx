@@ -8,12 +8,15 @@ import {
   useKeymapSelector,
   useOpencodeKeymap,
 } from "../keymap"
+import { isAstraSafeStartCommand } from "../astra/command-policy"
 import { useTuiConfig } from "../config"
 
 type PaletteCommandEntry = ReturnType<OpenTuiKeymap["getCommandEntries"]>[number]
 
-function isVisiblePaletteCommand(command: PaletteCommandEntry["command"]) {
-  return command.hidden !== true && command.name !== COMMAND_PALETTE_COMMAND
+function isVisiblePaletteCommand(command: PaletteCommandEntry["command"], astraSafeStart: boolean) {
+  if (command.hidden === true || command.name === COMMAND_PALETTE_COMMAND) return false
+  if (!astraSafeStart) return true
+  return isAstraSafeStartCommand(command.name)
 }
 
 function isSuggestedPaletteCommand(entry: PaletteCommandEntry) {
@@ -23,7 +26,7 @@ function isSuggestedPaletteCommand(entry: PaletteCommandEntry) {
   return false
 }
 
-export function CommandPaletteDialog() {
+export function CommandPaletteDialog(props: { astraSafeStart?: boolean }) {
   const config = useTuiConfig()
   const keymap = useOpencodeKeymap()
   const entries = useKeymapSelector((keymap: OpenTuiKeymap) => {
@@ -33,7 +36,7 @@ export function CommandPaletteDialog() {
     const reachable = keymap.getCommandEntries({
       ...query,
       visibility: "reachable",
-      filter: isVisiblePaletteCommand,
+      filter: (command) => isVisiblePaletteCommand(command, props.astraSafeStart === true),
     })
     const registeredBindings = keymap.getCommandBindings({
       visibility: "registered",
@@ -75,5 +78,11 @@ export function CommandPaletteDialog() {
     ]
   }
 
-  return <DialogSelect ref={(value) => (ref = value)} title="Commands" options={list()} />
+  return (
+    <DialogSelect
+      ref={(value) => (ref = value)}
+      title={props.astraSafeStart ? "Astra Commands — SAFE START" : "Commands"}
+      options={list()}
+    />
+  )
 }

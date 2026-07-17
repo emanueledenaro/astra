@@ -142,7 +142,7 @@ export function AstraGitControlPlaneView(props: {
         <box flexGrow={1} />
         <text fg={props.api.theme.current.textMuted}>i inspect esc close</text>
       </box>
-      <text fg={props.api.theme.current.warning}>HOST EXECUTION — NO SANDBOX</text>
+      <text fg={props.api.theme.current.warning}>SANDBOXED GIT OBSERVER — BOUNDED READ ONLY</text>
       <box height={1} />
       <Row label="WORKSPACE" value={Locale.truncateLeft(props.state.workspace, workspaceWidth())} api={props.api} />
       <Row label="MODE" value={props.state.mode === "read-only" ? "READ ONLY" : "ACTIVE ONCE"} api={props.api} />

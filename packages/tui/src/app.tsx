@@ -227,7 +227,9 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       win32DisableProcessedInput()
       const keymap = createDefaultOpenTuiKeymap(renderer)
       yield* Effect.acquireRelease(
-        Effect.sync(() => registerOpencodeKeymap(keymap, renderer, input.config)),
+        Effect.sync(() =>
+          registerOpencodeKeymap(keymap, renderer, input.config, { astraSafeStart: astraAuthority !== undefined }),
+        ),
         (unregister) => Effect.sync(unregister),
       )
       yield* Effect.addFinalizer(() =>
@@ -592,7 +594,7 @@ function App(props: {
         category: "System",
         hidden: true,
         run: () => {
-          dialog.replace(() => <CommandPaletteDialog />)
+          dialog.replace(() => <CommandPaletteDialog astraSafeStart={astraSession} />)
         },
       },
       {
