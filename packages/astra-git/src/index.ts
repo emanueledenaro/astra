@@ -4,6 +4,24 @@ export {
   defaultGitRepositoryBaselineLimits,
   revalidateGitRepositoryBaseline,
 } from "./baseline"
+export {
+  buildGitUnstageAllInvocation,
+  executeGitUnstageAll,
+  prepareGitUnstageAll,
+  verifyGitUnstageAll,
+} from "./unstage"
+export type {
+  GitUnstageAllBlockReason,
+  GitUnstageAllConsent,
+  GitUnstageAllDependencies,
+  GitUnstageAllDurableClaim,
+  GitUnstageAllDurableClaimResult,
+  GitUnstageAllExecutionResult,
+  GitUnstageAllPreparationResult,
+  GitUnstageAllVerificationResult,
+  GitUnstageHostInvocation,
+  GitUnstageHostObservation,
+} from "./unstage"
 export type {
   GitBranch,
   GitConflict,

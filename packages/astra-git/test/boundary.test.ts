@@ -1,15 +1,19 @@
 import { describe, expect, test } from "bun:test"
 
-describe("Git inspection capability boundary", () => {
-  test("exports inspection only and no mutation surface", async () => {
+describe("Git capability boundary", () => {
+  test("exports only bounded inspection, baseline, and unstage surfaces", async () => {
     const api = await import("../src")
 
     expect(Object.keys(api).sort()).toEqual([
+      "buildGitUnstageAllInvocation",
       "captureGitRepositoryBaseline",
       "defaultGitInspectionLimits",
       "defaultGitRepositoryBaselineLimits",
+      "executeGitUnstageAll",
       "inspectGitWorkspace",
+      "prepareGitUnstageAll",
       "revalidateGitRepositoryBaseline",
+      "verifyGitUnstageAll",
     ])
   })
 
