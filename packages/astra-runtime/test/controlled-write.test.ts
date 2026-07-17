@@ -1,5 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
+import { constants } from "node:fs"
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { open } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createControlledWritePlan, demoMarkerName } from "../src/controlled-write-plan"
@@ -24,7 +26,7 @@ describe("controlled demo write", () => {
     const root = await workspace()
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, "operation-positive")
-    const prepared = await prepareControlledWrite(plan, report, allowTestEffect)
+    const prepared = await prepareControlledWrite(plan, report, allowTestEffect, undefined, executeTestEffect)
 
     expect(prepared.prepared).toBeTrue()
     if (!prepared.prepared) throw new Error(prepared.reason)
@@ -55,6 +57,8 @@ describe("controlled demo write", () => {
       createControlledWritePlan(root, "operation-existing"),
       report,
       allowTestEffect,
+      undefined,
+      executeTestEffect,
     )
 
     expect(prepared).toEqual({ prepared: false, reason: "target_already_exists" })
@@ -132,6 +136,8 @@ describe("controlled demo write", () => {
       createControlledWritePlan(root, "operation-late-git"),
       report,
       allowTestEffect,
+      undefined,
+      executeTestEffect,
     )
     expect(prepared.prepared).toBeTrue()
     if (!prepared.prepared) throw new Error(prepared.reason)
@@ -148,4 +154,23 @@ describe("controlled demo write", () => {
 
 async function allowTestEffect() {
   return { allowed: true as const }
+}
+
+async function executeTestEffect(
+  plan: ReturnType<typeof createControlledWritePlan>,
+  target: string,
+  expectedWorkspaceIdentity: NonNullable<Awaited<ReturnType<typeof scanWorkspace>>["identity"]>,
+) {
+  const handle = await open(
+    target,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+    0o600,
+  )
+  await handle.writeFile(plan.content)
+  await handle.sync()
+  await handle.close()
+  return {
+    status: "effect_observed" as const,
+    receipt: await verifyControlledWrite(plan, target, expectedWorkspaceIdentity),
+  }
 }

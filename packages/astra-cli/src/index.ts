@@ -28,6 +28,9 @@ type DeniedLedgerModule = Readonly<{
       repositoryBaseline?: Parameters<
         NonNullable<import("./workspace-gate").WorkspaceGateDependencies["recordDeniedOperation"]>
       >[0]["repositoryBaseline"]
+      capabilityProposal: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["recordDeniedOperation"]>
+      >[0]["capabilityProposal"]
     }>,
   ) => Promise<DurableDenial>
 }>
@@ -46,6 +49,9 @@ type ApprovedCoordinatorModule = Readonly<{
       repositoryBaseline?: Parameters<
         NonNullable<import("./workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
       >[0]["repositoryBaseline"]
+      capabilityProposal: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
+      >[0]["capabilityProposal"]
       policyAskedAt: string
       approvalGrantedAt: string
       recordingStartedAt: string

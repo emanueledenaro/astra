@@ -12,6 +12,10 @@ import type { WorkspaceTrustEvent, WorkspaceTrustReport, WorkspaceTrustState } f
 import type { GitInspectionResult } from "@astra/git"
 import { createControlledWritePlan } from "@astra/runtime/controlled-write-plan"
 import {
+  proposeControlledWriteCapability,
+  type ControlledWriteCapabilityProposal,
+} from "@astra/runtime/controlled-write-capability"
+import {
   checkWorkspaceActivation,
   revalidateWorkspacePreflight,
   revalidateWorkspaceSnapshot,
@@ -83,6 +87,7 @@ export type WorkspaceGateDependencies = Readonly<{
       plan: ReturnType<typeof createControlledWritePlan>
       report: WorkspaceTrustReport
       repositoryBaseline?: GitRepositoryBaselineSnapshot
+      capabilityProposal: ControlledWriteCapabilityProposal
       policyAskedAt: string
       approvalRejectedAt: string
       recordingStartedAt: string
@@ -93,6 +98,7 @@ export type WorkspaceGateDependencies = Readonly<{
       plan: ReturnType<typeof createControlledWritePlan>
       report: WorkspaceTrustReport
       repositoryBaseline?: GitRepositoryBaselineSnapshot
+      capabilityProposal: ControlledWriteCapabilityProposal
       policyAskedAt: string
       approvalGrantedAt: string
       recordingStartedAt: string
@@ -297,10 +303,23 @@ export async function runWorkspaceGate(
   io.write("TRUST      once • bounded static preflight unchanged • current process only • nothing persisted")
 
   const plan = createControlledWritePlan(report.root)
-  let operationState = advanceOperation(null, "operation.admitted", plan.operationId, io)
   const policyAskedAt = new Date().toISOString()
+  let capabilityProposal: ControlledWriteCapabilityProposal
+  try {
+    capabilityProposal = await proposeControlledWriteCapability({
+      plan,
+      report,
+      ...(repositoryBaseline ? { repositoryBaseline } : {}),
+      policyAskedAt,
+    })
+  } catch (error) {
+    io.write(`CAPABILITY BLOCKED  ${recordingFailureMessage(error)} • no approval requested • no effect dispatched`)
+    workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
+    return { exitCode: 2, workspaceState, operationState: null, report }
+  }
+  let operationState = advanceOperation(null, "operation.admitted", plan.operationId, io)
   operationState = advanceOperation(operationState, "policy.ask", plan.operationId, io)
-  for (const line of renderControlledWritePreview(plan)) io.write(line)
+  for (const line of renderControlledWritePreview(plan, capabilityProposal.capability)) io.write(line)
 
   const approval = await io.approveControlledWrite()
   if (approval !== "approve") {
@@ -311,6 +330,7 @@ export async function runWorkspaceGate(
           plan,
           report,
           ...(repositoryBaseline ? { repositoryBaseline } : {}),
+          capabilityProposal,
           policyAskedAt,
           approvalRejectedAt,
           recordingStartedAt: new Date().toISOString(),
@@ -350,6 +370,7 @@ export async function runWorkspaceGate(
       plan,
       report,
       ...(repositoryBaseline ? { repositoryBaseline } : {}),
+      capabilityProposal,
       policyAskedAt,
       approvalGrantedAt,
       recordingStartedAt: new Date().toISOString(),

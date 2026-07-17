@@ -141,12 +141,14 @@ function initialize(db: Database): Effect.Effect<void, ReceiptSpoolError> {
         dispatch_request_id TEXT NOT NULL UNIQUE,
         executor_claim_id TEXT NOT NULL UNIQUE,
         capability_grant_id TEXT NOT NULL UNIQUE,
+        capability_digest TEXT NOT NULL,
         fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
         receipt_json TEXT NOT NULL,
         receipt_digest TEXT NOT NULL,
         received_at TEXT NOT NULL
       )
     `)
+    yield* ensureCapabilityDigestColumn(db)
     yield* db.run(sql`
       CREATE TABLE IF NOT EXISTS receipt_ingestion_ack (
         receipt_id TEXT PRIMARY KEY,
@@ -201,10 +203,11 @@ function put(
           yield* tx.run(sql`
             INSERT INTO receipt_spool (
               receipt_id, operation_id, attempt_id, dispatch_request_id, executor_claim_id,
-              capability_grant_id, fencing_token, receipt_json, receipt_digest, received_at
+              capability_grant_id, capability_digest, fencing_token, receipt_json, receipt_digest, received_at
             ) VALUES (
               ${receipt.receiptID}, ${receipt.operationID}, ${receipt.attemptID}, ${receipt.dispatchRequestID},
-              ${receipt.executorClaimID}, ${receipt.capabilityGrantID}, ${receipt.fencingToken},
+              ${receipt.executorClaimID}, ${receipt.capabilityGrantID}, ${receipt.capabilityDigest},
+              ${receipt.fencingToken},
               ${JSON.stringify(receipt)}, ${receiptDigest}, ${receivedAt}
             )
           `)
@@ -370,6 +373,7 @@ function decodeEntry(row: SpoolJoinRow): Effect.Effect<SpoolEntry, ReceiptSpoolC
         receipt.dispatchRequestID !== row.dispatch_request_id ||
         receipt.executorClaimID !== row.executor_claim_id ||
         receipt.capabilityGrantID !== row.capability_grant_id ||
+        receipt.capabilityDigest !== row.capability_digest ||
         receipt.fencingToken !== row.fencing_token
       ) {
         throw new Error("receipt_columns_mismatch")
@@ -400,6 +404,20 @@ function decodeEntry(row: SpoolJoinRow): Effect.Effect<SpoolEntry, ReceiptSpoolC
     },
     catch: (cause) => new ReceiptSpoolCorruptionError(`Receipt ${row.receipt_id} is malformed`, cause),
   })
+}
+
+function ensureCapabilityDigestColumn(db: QueryExecutor): Effect.Effect<void, ReceiptSpoolError> {
+  return Effect.gen(function* () {
+    const columns = yield* db.all<{ name: string }>(sql`PRAGMA table_info(receipt_spool)`)
+    if (columns.some((column) => column.name === "capability_digest")) return
+    const rows = yield* db.all<{ count: number }>(sql`SELECT COUNT(*) AS count FROM receipt_spool`)
+    if (!rows[0] || rows[0].count !== 0) {
+      return yield* Effect.fail(
+        new ReceiptSpoolCorruptionError("Legacy receipts have no capability binding and require manual reconciliation"),
+      )
+    }
+    yield* db.run(sql`ALTER TABLE receipt_spool ADD COLUMN capability_digest TEXT`)
+  }).pipe(Effect.mapError(mapSpoolStorageError("Failed to migrate the receipt capability binding")))
 }
 
 function requireReceipt(input: unknown): OperationReceipt {
@@ -451,6 +469,7 @@ type SpoolJoinRow = Readonly<{
   dispatch_request_id: string
   executor_claim_id: string
   capability_grant_id: string
+  capability_digest: string
   fencing_token: number
   receipt_json: string
   receipt_digest: string

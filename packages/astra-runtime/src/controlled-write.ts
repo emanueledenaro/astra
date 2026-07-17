@@ -16,13 +16,37 @@ export type ControlledWriteReceipt = Readonly<{
   targetIdentity: WorkspaceIdentity | null
 }>
 
+export type ControlledWriteExecutionEvidence = Readonly<{
+  backend: "host" | "darwin-seatbelt"
+  capabilityDigest: string
+  executionImage: Readonly<{ canonicalPath: string; device: string; inode: string; digest: string }> | null
+  termination:
+    | Readonly<{ kind: "not_started" }>
+    | Readonly<{ kind: "exited"; exitCode: number }>
+    | Readonly<{ kind: "unconfirmed" }>
+  cleanupSucceeded: boolean | null
+  stdoutDigest: string | null
+  stderrDigest: string | null
+}>
+
 export type ControlledWriteResult =
-  | Readonly<{ status: "effect_observed"; receipt: ControlledWriteReceipt }>
-  | Readonly<{ status: "failed_without_effect"; reason: string }>
+  | Readonly<{
+      status: "effect_observed"
+      receipt: ControlledWriteReceipt
+      execution?: ControlledWriteExecutionEvidence
+    }>
+  | Readonly<{ status: "failed_without_effect"; reason: string; execution?: ControlledWriteExecutionEvidence }>
   | Readonly<{
       status: "effect_observed_unverified"
       reason: string
       receipt: ControlledWriteReceipt
+      execution?: ControlledWriteExecutionEvidence
+    }>
+  | Readonly<{
+      status: "effect_unknown"
+      reason: string
+      receipt: ControlledWriteReceipt
+      execution: ControlledWriteExecutionEvidence
     }>
 
 export type PreparedControlledWrite =
@@ -37,8 +61,14 @@ export type RepositoryBaselineCheck = () => Promise<
   Readonly<{ matched: true }> | Readonly<{ matched: false; reason: string }>
 >
 
+export type ControlledWriteEffectExecutor = (
+  plan: ControlledWritePlan,
+  target: string,
+  expectedWorkspaceIdentity: WorkspaceIdentity,
+) => Promise<ControlledWriteResult>
+
 /**
- * Revalidates the exact preflight snapshot before exposing the host effect.
+ * Revalidates the exact preflight snapshot before invoking the supplied effect boundary.
  * The returned attempt is single-purpose and create-only.
  */
 export async function prepareControlledWrite(
@@ -46,6 +76,7 @@ export async function prepareControlledWrite(
   trustedReport: WorkspaceTrustReport,
   authorizeEffect: EffectAuthorityCheck,
   revalidateRepository?: RepositoryBaselineCheck,
+  executeEffect?: ControlledWriteEffectExecutor,
 ): Promise<PreparedControlledWrite> {
   if (plan.relativePath !== demoMarkerName || plan.workspaceRoot !== trustedReport.root) {
     return { prepared: false, reason: "plan_scope_mismatch" }
@@ -57,6 +88,7 @@ export async function prepareControlledWrite(
   if (!repository.matched) return { prepared: false, reason: repository.reason }
   const expectedIdentity = trustedReport.identity
   if (!expectedIdentity) return { prepared: false, reason: "workspace_identity_unavailable" }
+  if (!executeEffect) return { prepared: false, reason: "effect_executor_unavailable" }
 
   const target = join(plan.workspaceRoot, plan.relativePath)
   const targetState = await inspectTarget(target)
@@ -81,7 +113,9 @@ export async function prepareControlledWrite(
       }
       const repository = await checkRepositoryBoundary(trustedReport, revalidateRepository)
       if (!repository.matched) return { status: "failed_without_effect", reason: repository.reason }
-      return executeCreateOnlyWrite(plan, target, expectedIdentity, authorizeEffect)
+      const authority = await authorizeEffect()
+      if (!authority.allowed) return { status: "failed_without_effect", reason: authority.reason }
+      return executeEffect(plan, target, expectedIdentity)
     },
   }
 }
@@ -112,53 +146,6 @@ export async function verifyControlledWrite(
     return emptyReceipt(plan, target, false, expectedWorkspaceIdentity)
   } finally {
     await handle?.close().catch(() => {})
-  }
-}
-
-async function executeCreateOnlyWrite(
-  plan: ControlledWritePlan,
-  target: string,
-  expectedWorkspaceIdentity: WorkspaceIdentity,
-  authorizeEffect: EffectAuthorityCheck,
-): Promise<ControlledWriteResult> {
-  let handle: Awaited<ReturnType<typeof open>> | null = null
-  let created = false
-  try {
-    const authority = await authorizeEffect()
-    if (!authority.allowed) return { status: "failed_without_effect", reason: authority.reason }
-    handle = await open(target, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
-    created = true
-    const createdFacts = await handle.stat()
-    const createdIdentity = fileIdentity(createdFacts)
-    await handle.writeFile(plan.content, "utf8")
-    await handle.sync()
-
-    const receipt = await readReceiptFromHandle(plan, target, handle, expectedWorkspaceIdentity, createdIdentity)
-    await handle.close()
-    handle = null
-    const exactReadbackObserved =
-      receipt.workspaceIdentityMatched &&
-      receipt.targetIdentityMatched &&
-      receipt.observedDigest === receipt.expectedDigest &&
-      receipt.bytes === Buffer.byteLength(plan.content)
-    if (!exactReadbackObserved) return { status: "effect_observed_unverified", reason: "readback_mismatch", receipt }
-    return { status: "effect_observed", receipt }
-  } catch {
-    if (handle) await handle.close().catch(() => {})
-    if (!created) return { status: "failed_without_effect", reason: "create_rejected" }
-    return {
-      status: "effect_observed_unverified",
-      reason: "write_or_readback_failed",
-      receipt: {
-        path: target,
-        bytes: 0,
-        expectedDigest: plan.contentDigest,
-        observedDigest: null,
-        targetIdentityMatched: false,
-        workspaceIdentityMatched: false,
-        targetIdentity: null,
-      },
-    }
   }
 }
 

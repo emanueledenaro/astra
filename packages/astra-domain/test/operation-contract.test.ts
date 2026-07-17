@@ -29,6 +29,7 @@ const verificationPlanID = "0196e4cb-5d80-7b1d-8fb2-263b81670438"
 const correlationID = "0196e4cb-5d80-7b1d-8fb2-263b81670439"
 const digest = `sha256:${"a".repeat(64)}`
 const nextDigest = `sha256:${"b".repeat(64)}`
+const capabilityDigest = `sha256:${"c".repeat(64)}`
 
 describe("Operation contract decoding", () => {
   test("rejects malformed identities and keeps admission keys distinct", () => {
@@ -263,6 +264,7 @@ describe("Operation contract decoding", () => {
       parseOperationAuthority({
         decisionID,
         capabilityGrantID,
+        capabilityDigest,
         attemptID,
         baselineDigest: digest,
         expiresAt: "2026-07-17T12:00:00.000Z",
@@ -275,6 +277,7 @@ describe("Operation contract decoding", () => {
         adapterDigest: digest,
         idempotencyKey: nextDigest,
         capabilityGrantID,
+        capabilityDigest,
       }).ok,
     ).toBeTrue()
     expect(
@@ -283,6 +286,7 @@ describe("Operation contract decoding", () => {
         executor: "astra-executor:local",
         adapterDigest: digest,
         idempotencyKey: nextDigest,
+        capabilityDigest,
       }),
     ).toMatchObject({ ok: false, issue: { path: "$.capabilityGrantID" } })
   })
@@ -295,6 +299,7 @@ describe("Operation contract decoding", () => {
       operationID,
       attemptID,
       capabilityGrantID,
+      capabilityDigest,
       baselineDigest: digest,
       executor: "astra-executor:local",
       adapterDigest: digest,
@@ -307,6 +312,7 @@ describe("Operation contract decoding", () => {
       dispatchRequestID,
       operationID,
       attemptID,
+      capabilityDigest,
       executor: "astra-executor:local",
       fencingToken: 1,
       acceptedAt: "2026-07-17T10:00:02.000Z",
@@ -317,6 +323,14 @@ describe("Operation contract decoding", () => {
     expect(parseExecutorClaimID(executorClaimID)).toMatchObject({ ok: true, value: executorClaimID })
     expect(parseDispatchRequest(dispatchRequest)).toMatchObject({ ok: true, value: dispatchRequest })
     expect(parseExecutorClaim(claim)).toMatchObject({ ok: true, value: claim })
+    expect(parseDispatchRequest({ ...dispatchRequest, capabilityDigest: undefined })).toMatchObject({
+      ok: false,
+      issue: { path: "$.capabilityDigest" },
+    })
+    expect(parseExecutorClaim({ ...claim, capabilityDigest: undefined })).toMatchObject({
+      ok: false,
+      issue: { path: "$.capabilityDigest" },
+    })
     expect(
       parseDispatchRequest({ ...dispatchRequest, requestedAt: dispatchRequest.authorizationExpiresAt }),
     ).toMatchObject({
@@ -345,6 +359,7 @@ describe("Operation contract decoding", () => {
       dispatchRequestID: "0196e4cb-5d80-7b1d-8fb2-263b81670440",
       executorClaimID: "0196e4cb-5d80-7b1d-8fb2-263b81670441",
       capabilityGrantID,
+      capabilityDigest,
       fencingToken: 1,
       adapter: { identity: "controlled-write", version: "1", digest },
       effectClass: "workspace_write",

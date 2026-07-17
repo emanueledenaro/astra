@@ -26,6 +26,7 @@ export const verificationPlanID = "0196e4cb-5d80-7b1d-8fb2-263b81670438"
 export const attemptID = requireAttemptID("0196e4cb-5d80-7b1d-8fb2-263b81670432")
 export const secondAttemptID = requireAttemptID("0196e4cb-5d80-7b1d-8fb2-263b81670472")
 export const capabilityGrantID = requireCapabilityGrantID("0196e4cb-5d80-7b1d-8fb2-263b81670435")
+export const capabilityDigest = requireContentDigest(`sha256:${"8".repeat(64)}`)
 export const dispatchRequestID = requireDispatchRequestID("0196e4cb-5d80-7b1d-8fb2-263b81670440")
 export const executorClaimID = requireExecutorClaimID("0196e4cb-5d80-7b1d-8fb2-263b81670442")
 export const secondExecutorClaimID = requireExecutorClaimID("0196e4cb-5d80-7b1d-8fb2-263b81670443")
@@ -153,6 +154,7 @@ export const dispatchRequest = requireDispatchRequest({
   operationID,
   attemptID,
   capabilityGrantID,
+  capabilityDigest,
   baselineDigest: contentDigest,
   executor: "astra-executor:local",
   adapterDigest: contentDigest,
@@ -177,6 +179,7 @@ export const authorizedLifecycle = [
       ruleID: "controlled-write-explicit-consent",
       policyDigest,
       previewDigest,
+      capabilityDigest,
       approverClass: "workspace-user",
       expiresAt: "2026-07-17T10:05:00.000Z",
     },
@@ -190,6 +193,7 @@ export const authorizedLifecycle = [
     payload: {
       decisionID,
       capabilityGrantID,
+      capabilityDigest,
       attemptID,
       baselineDigest: contentDigest,
       expiresAt: "2026-07-17T10:05:00.000Z",

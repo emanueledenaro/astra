@@ -1,4 +1,5 @@
 import type { ControlledWritePlan } from "@astra/runtime/controlled-write-plan"
+import type { ExecutionCapability } from "@astra/domain/execution-capability"
 import type { WorkspaceTrustReport, WorkspaceTrustState } from "@astra/domain/workspace-trust"
 import type { OperationSemanticKey } from "@astra/domain/operation"
 
@@ -57,12 +58,18 @@ export function renderOperationState(operationId: string, semantic: OperationSem
   return `OPERATION ${sanitizeTerminalText(operationId)}  ${semantic}`
 }
 
-export function renderControlledWritePreview(plan: ControlledWritePlan) {
+export function renderControlledWritePreview(plan: ControlledWritePlan, capability: ExecutionCapability) {
+  const hostExecution = capability.manifest.isolation.backend === "host"
   return [
-    "HOST EXECUTION — NO SANDBOX",
+    `CAPABILITY PROPOSED • ${hostExecution ? "HOST PROCESS" : "DARWIN SEATBELT"} • FALLBACK DENY`,
+    hostExecution ? "HOST EXECUTION — NO SANDBOX" : "SANDBOXED EXECUTION — DARWIN SEATBELT",
     `EFFECT     create one new file: ${sanitizeTerminalText(plan.relativePath)}`,
     `BYTES      ${Buffer.byteLength(plan.content)}`,
     `DIGEST     ${plan.contentDigest}`,
-    "GUARD      create-only; existing file is never overwritten",
+    `AUTHORITY  ${capability.capabilityDigest}`,
+    hostExecution ? "NETWORK    host access is not isolated" : "NETWORK    denied by sandbox profile",
+    hostExecution
+      ? "GUARD      application-enforced create-only; host OS does not sandbox the process"
+      : "GUARD      sandbox-enforced create-only; existing file is never overwritten",
   ]
 }

@@ -12,6 +12,7 @@ export {
 
 export * as Operation from "./operation"
 export * as OperationContract from "./operation-contract"
+export * as ExecutionCapability from "./execution-capability"
 export * as GitRepositoryBaseline from "./git-repository-baseline"
 export * as SessionAuthority from "./session-authority"
 
@@ -33,6 +34,12 @@ export {
 export * as WorkspaceTrust from "./workspace-trust"
 
 export type { AstraSessionAuthority, AstraSessionAuthorityParseResult } from "./session-authority"
+
+export type {
+  ExecutionCapability as ExecutionCapabilityGrant,
+  ExecutionCapabilityManifest,
+  ExecutionCapabilityParseResult,
+} from "./execution-capability"
 
 export type {
   GitRepositoryBaselineBlockReason,

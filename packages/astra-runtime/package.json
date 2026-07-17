@@ -9,6 +9,7 @@
     "./preflight": "./src/workspace-preflight.ts",
     "./session-authority": "./src/session-authority.ts",
     "./controlled-write-plan": "./src/controlled-write-plan.ts",
+    "./controlled-write-capability": "./src/controlled-write-capability.ts",
     "./controlled-write": "./src/controlled-write.ts",
     "./operation-ledger": "./src/operation-ledger.ts",
     "./controlled-write-coordinator": "./src/controlled-write-coordinator.ts",
@@ -23,6 +24,7 @@
     "@astra/executor": "workspace:*",
     "@astra/git": "workspace:*",
     "@astra/ledger": "workspace:*",
+    "@astra/sandbox": "workspace:*",
     "@effect/sql-sqlite-bun": "catalog:",
     "effect": "catalog:"
   },

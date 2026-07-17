@@ -1,8 +1,4 @@
-import { createHash } from "node:crypto"
-import {
-  parseGitRepositoryBaselineSnapshot,
-  type GitRepositoryBaselineSnapshot,
-} from "@astra/domain/git-repository-baseline"
+import { type GitRepositoryBaselineSnapshot } from "@astra/domain/git-repository-baseline"
 import {
   parseAttemptID,
   parseCapabilityGrantID,
@@ -18,17 +14,35 @@ import {
 import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
 import type { AppendOperationEvent, OperationEventDraft } from "@astra/ledger"
 import type { ControlledWritePlan } from "./controlled-write-plan"
+import {
+  validateControlledWriteCapabilityProposal,
+  type ControlledWriteCapabilityProposal,
+} from "./controlled-write-capability"
+import {
+  canonicalJson,
+  deterministicUUID,
+  digest,
+  makeControlledWriteBaselineAuthority,
+} from "./controlled-write-authority"
+
+export {
+  canonicalJson,
+  deterministicUUID,
+  digest,
+  makeControlledWriteBaselineAuthority,
+} from "./controlled-write-authority"
 
 export const controlledWritePolicyDigest = digest("astra-policy:controlled-write-explicit-consent:v1")
-export const controlledWriteAdapterDigest = digest("astra-runtime:controlled-write:create-only:v1")
+export const controlledWriteAdapterDigest = digest("astra-runtime:controlled-write:bounded-host-process:v1")
 export const controlledWriteVerifierDigest = digest("astra-verify:exact-file-readback:v1")
-export const controlledWriteExecutor = "astra-executor:controlled-write"
+export const controlledWriteExecutor = "astra-executor:bounded-host-controlled-write"
 export const controlledWriteVerifier = "astra-verifier:exact-file-readback"
 
 export type ApprovedControlledWriteFactsInput = Readonly<{
   plan: ControlledWritePlan
   report: WorkspaceTrustReport
   repositoryBaseline?: GitRepositoryBaselineSnapshot
+  capabilityProposal: ControlledWriteCapabilityProposal
   policyAskedAt: string
   approvalGrantedAt: string
   recordingStartedAt: string
@@ -44,6 +58,7 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
   requireMonotonicTimeline(input)
 
   const repositoryAuthority = makeControlledWriteBaselineAuthority(report, input.repositoryBaseline)
+  const capability = validateControlledWriteCapabilityProposal(input, input.capabilityProposal)
 
   const operationID = requireOperationID(plan.operationId)
   const decisionID = deterministicUUID(operationID, "policy-decision")
@@ -112,12 +127,14 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
   const previewDigest = digest(
     canonicalJson({ bytes: Buffer.byteLength(plan.content), digest: plan.contentDigest, target: plan.relativePath }),
   )
-  const authorizationExpiresAt = new Date(Date.parse(input.approvalGrantedAt) + 300_000).toISOString()
+  const authorizationExpiresAt = capability.manifest.grant.expiresAt
+  const capabilityDigest = capability.capabilityDigest
   const dispatchRequest = requireDispatchRequest({
     dispatchRequestID,
     operationID,
     attemptID,
     capabilityGrantID,
+    capabilityDigest,
     baselineDigest: repositoryAuthority.baselineDigest,
     executor: controlledWriteExecutor,
     adapterDigest: controlledWriteAdapterDigest,
@@ -143,6 +160,9 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
     evidenceID,
     uncertaintyID,
     authorizationExpiresAt,
+    capability,
+    capabilityProposal: input.capabilityProposal,
+    capabilityDigest,
     baselineTrustDigest: repositoryAuthority.baselineDigest,
     repositorySnapshotDigest: repositoryAuthority.repositorySnapshotDigest,
     resources,
@@ -186,6 +206,7 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
             ruleID: "controlled-write-explicit-consent",
             policyDigest: controlledWritePolicyDigest,
             previewDigest,
+            capabilityDigest,
             approverClass: "workspace-user",
             expiresAt: authorizationExpiresAt,
           },
@@ -207,6 +228,7 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
           payload: {
             decisionID,
             capabilityGrantID,
+            capabilityDigest,
             attemptID,
             baselineDigest: repositoryAuthority.baselineDigest,
             expiresAt: authorizationExpiresAt,
@@ -237,73 +259,6 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
       },
     ] as const satisfies ReadonlyArray<AppendOperationEvent>,
   }
-}
-
-export function makeControlledWriteBaselineAuthority(
-  report: WorkspaceTrustReport,
-  repositoryBaseline: GitRepositoryBaselineSnapshot | undefined,
-) {
-  const gitWorkspace = report.surfaces.some((surface) => surface.kind === "git_metadata")
-  if (!gitWorkspace) {
-    if (repositoryBaseline) throw new TypeError("A Git baseline cannot authorize a non-Git workspace")
-    return {
-      baselineDigest: report.securityDigest!,
-      repositorySnapshotDigest: null,
-      repository: { kind: "non_git", markerDigest: report.securityDigest! } as const,
-    }
-  }
-
-  const parsed = parseGitRepositoryBaselineSnapshot(repositoryBaseline)
-  if (!parsed.ok) throw new TypeError("A complete, valid Git baseline is required before dispatch")
-  if (
-    parsed.value.root.canonicalPath !== report.root ||
-    parsed.value.root.device !== report.identity?.device ||
-    parsed.value.root.inode !== report.identity.inode
-  ) {
-    throw new TypeError("The Git baseline and preflight refer to different workspace identities")
-  }
-  const repository = {
-    kind: "git",
-    schemaVersion: 1,
-    snapshotDigest: parsed.value.snapshotDigest,
-    observationDigest: parsed.value.observer.observationDigest,
-    root: parsed.value.root,
-    head: parsed.value.head,
-    verification: parsed.value.verification,
-  } as const
-  return {
-    baselineDigest: digest(
-      canonicalJson({
-        repositorySnapshotDigest: parsed.value.snapshotDigest,
-        workspaceSecurityDigest: report.securityDigest,
-      }),
-    ),
-    repositorySnapshotDigest: parsed.value.snapshotDigest,
-    repository,
-  }
-}
-
-export function deterministicUUID(seed: string, label: string): string {
-  const bytes = createHash("sha256").update(seed).update("\0").update(label).digest().subarray(0, 16)
-  bytes[6] = (bytes.readUInt8(6) & 0x0f) | 0x80
-  bytes[8] = (bytes.readUInt8(8) & 0x3f) | 0x80
-  const hex = bytes.toString("hex")
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-}
-
-export function digest(input: string) {
-  return requireContentDigest(`sha256:${createHash("sha256").update(input).digest("hex")}`)
-}
-
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return JSON.stringify(value)
-  if (typeof value === "number" && Number.isFinite(value)) return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`
-  if (typeof value !== "object") throw new TypeError("Operation facts must be canonical JSON")
-  return `{${Object.entries(value)
-    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`)
-    .join(",")}}`
 }
 
 function eventDraft(input: {

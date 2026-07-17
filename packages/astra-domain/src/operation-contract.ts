@@ -123,6 +123,7 @@ export type OperationVerificationPlan = Readonly<{
 export type OperationAuthority = Readonly<{
   decisionID: DecisionID
   capabilityGrantID: CapabilityGrantID
+  capabilityDigest: ContentDigest
   attemptID: AttemptID
   baselineDigest: ContentDigest
   expiresAt: string
@@ -134,6 +135,7 @@ export type OperationDispatch = Readonly<{
   adapterDigest: ContentDigest
   idempotencyKey: IdempotencyKey
   capabilityGrantID: CapabilityGrantID
+  capabilityDigest: ContentDigest
 }>
 
 export type DispatchRequest = Readonly<{
@@ -141,6 +143,7 @@ export type DispatchRequest = Readonly<{
   operationID: OperationID
   attemptID: AttemptID
   capabilityGrantID: CapabilityGrantID
+  capabilityDigest: ContentDigest
   baselineDigest: ContentDigest
   executor: string
   adapterDigest: ContentDigest
@@ -154,6 +157,7 @@ export type ExecutorClaim = Readonly<{
   dispatchRequestID: DispatchRequestID
   operationID: OperationID
   attemptID: AttemptID
+  capabilityDigest: ContentDigest
   executor: string
   fencingToken: number
   acceptedAt: string
@@ -167,6 +171,7 @@ export type OperationReceipt = Readonly<{
   dispatchRequestID: DispatchRequestID
   executorClaimID: ExecutorClaimID
   capabilityGrantID: CapabilityGrantID
+  capabilityDigest: ContentDigest
   fencingToken: number
   adapter: Readonly<{ identity: string; version: string; digest: ContentDigest }>
   effectClass: string
@@ -249,6 +254,7 @@ export type OperationEffectUncertainty = Readonly<{
   dispatchRequestID: DispatchRequestID
   executorClaimID: ExecutorClaimID
   capabilityGrantID: CapabilityGrantID
+  capabilityDigest: ContentDigest
   fencingToken: number
   reason: "claimed_without_receipt"
   observedAt: string
@@ -579,7 +585,7 @@ export function parseOperationVerificationPlan(
 export function parseOperationAuthority(input: unknown, path = "$"): OperationContractParseResult<OperationAuthority> {
   const record = parseExactRecord(
     input,
-    ["decisionID", "capabilityGrantID", "attemptID", "baselineDigest", "expiresAt"],
+    ["decisionID", "capabilityGrantID", "capabilityDigest", "attemptID", "baselineDigest", "expiresAt"],
     path,
   )
   if (!record.ok) return record
@@ -587,6 +593,8 @@ export function parseOperationAuthority(input: unknown, path = "$"): OperationCo
   if (!decisionID.ok) return decisionID
   const capabilityGrantID = parseUUID<CapabilityGrantID>(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
   if (!capabilityGrantID.ok) return capabilityGrantID
+  const capabilityDigest = parseDigest<ContentDigest>(record.value.capabilityDigest, `${path}.capabilityDigest`)
+  if (!capabilityDigest.ok) return capabilityDigest
   const attemptID = parseUUID<AttemptID>(record.value.attemptID, `${path}.attemptID`)
   if (!attemptID.ok) return attemptID
   const baselineDigest = parseDigest<ContentDigest>(record.value.baselineDigest, `${path}.baselineDigest`)
@@ -596,6 +604,7 @@ export function parseOperationAuthority(input: unknown, path = "$"): OperationCo
   return parsed({
     decisionID: decisionID.value,
     capabilityGrantID: capabilityGrantID.value,
+    capabilityDigest: capabilityDigest.value,
     attemptID: attemptID.value,
     baselineDigest: baselineDigest.value,
     expiresAt: expiresAt.value,
@@ -605,7 +614,7 @@ export function parseOperationAuthority(input: unknown, path = "$"): OperationCo
 export function parseOperationDispatch(input: unknown, path = "$"): OperationContractParseResult<OperationDispatch> {
   const record = parseExactRecord(
     input,
-    ["attemptID", "executor", "adapterDigest", "idempotencyKey", "capabilityGrantID"],
+    ["attemptID", "executor", "adapterDigest", "idempotencyKey", "capabilityGrantID", "capabilityDigest"],
     path,
   )
   if (!record.ok) return record
@@ -619,12 +628,15 @@ export function parseOperationDispatch(input: unknown, path = "$"): OperationCon
   if (!idempotencyKey.ok) return idempotencyKey
   const capabilityGrantID = parseUUID<CapabilityGrantID>(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
   if (!capabilityGrantID.ok) return capabilityGrantID
+  const capabilityDigest = parseDigest<ContentDigest>(record.value.capabilityDigest, `${path}.capabilityDigest`)
+  if (!capabilityDigest.ok) return capabilityDigest
   return parsed({
     attemptID: attemptID.value,
     executor: executor.value,
     adapterDigest: adapterDigest.value,
     idempotencyKey: idempotencyKey.value,
     capabilityGrantID: capabilityGrantID.value,
+    capabilityDigest: capabilityDigest.value,
   })
 }
 
@@ -636,6 +648,7 @@ export function parseDispatchRequest(input: unknown, path = "$"): OperationContr
       "operationID",
       "attemptID",
       "capabilityGrantID",
+      "capabilityDigest",
       "baselineDigest",
       "executor",
       "adapterDigest",
@@ -654,6 +667,8 @@ export function parseDispatchRequest(input: unknown, path = "$"): OperationContr
   if (!attemptID.ok) return attemptID
   const capabilityGrantID = parseUUID<CapabilityGrantID>(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
   if (!capabilityGrantID.ok) return capabilityGrantID
+  const capabilityDigest = parseDigest<ContentDigest>(record.value.capabilityDigest, `${path}.capabilityDigest`)
+  if (!capabilityDigest.ok) return capabilityDigest
   const baselineDigest = parseDigest<ContentDigest>(record.value.baselineDigest, `${path}.baselineDigest`)
   if (!baselineDigest.ok) return baselineDigest
   const executor = parseBoundedString(record.value.executor, `${path}.executor`, 512)
@@ -677,6 +692,7 @@ export function parseDispatchRequest(input: unknown, path = "$"): OperationContr
     operationID: operationID.value,
     attemptID: attemptID.value,
     capabilityGrantID: capabilityGrantID.value,
+    capabilityDigest: capabilityDigest.value,
     baselineDigest: baselineDigest.value,
     executor: executor.value,
     adapterDigest: adapterDigest.value,
@@ -694,6 +710,7 @@ export function parseExecutorClaim(input: unknown, path = "$"): OperationContrac
       "dispatchRequestID",
       "operationID",
       "attemptID",
+      "capabilityDigest",
       "executor",
       "fencingToken",
       "acceptedAt",
@@ -710,6 +727,8 @@ export function parseExecutorClaim(input: unknown, path = "$"): OperationContrac
   if (!operationID.ok) return operationID
   const attemptID = parseUUID<AttemptID>(record.value.attemptID, `${path}.attemptID`)
   if (!attemptID.ok) return attemptID
+  const capabilityDigest = parseDigest<ContentDigest>(record.value.capabilityDigest, `${path}.capabilityDigest`)
+  if (!capabilityDigest.ok) return capabilityDigest
   const executor = parseBoundedString(record.value.executor, `${path}.executor`, 512)
   if (!executor.ok) return executor
   const fencingToken = parsePositiveInteger(record.value.fencingToken, `${path}.fencingToken`)
@@ -726,6 +745,7 @@ export function parseExecutorClaim(input: unknown, path = "$"): OperationContrac
     dispatchRequestID: dispatchRequestID.value,
     operationID: operationID.value,
     attemptID: attemptID.value,
+    capabilityDigest: capabilityDigest.value,
     executor: executor.value,
     fencingToken: fencingToken.value,
     acceptedAt: acceptedAt.value,
@@ -743,6 +763,7 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
       "dispatchRequestID",
       "executorClaimID",
       "capabilityGrantID",
+      "capabilityDigest",
       "fencingToken",
       "adapter",
       "effectClass",
@@ -768,6 +789,8 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
   if (!executorClaimID.ok) return executorClaimID
   const capabilityGrantID = parseCapabilityGrantID(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
   if (!capabilityGrantID.ok) return capabilityGrantID
+  const capabilityDigest = parseDigest<ContentDigest>(record.value.capabilityDigest, `${path}.capabilityDigest`)
+  if (!capabilityDigest.ok) return capabilityDigest
   const fencingToken = parsePositiveInteger(record.value.fencingToken, `${path}.fencingToken`)
   if (!fencingToken.ok) return fencingToken
   const adapter = parseAdapter(record.value.adapter, `${path}.adapter`)
@@ -797,6 +820,7 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
     dispatchRequestID: dispatchRequestID.value,
     executorClaimID: executorClaimID.value,
     capabilityGrantID: capabilityGrantID.value,
+    capabilityDigest: capabilityDigest.value,
     fencingToken: fencingToken.value,
     adapter: adapter.value,
     effectClass: effectClass.value,
@@ -911,6 +935,7 @@ export function parseOperationEffectUncertainty(
       "dispatchRequestID",
       "executorClaimID",
       "capabilityGrantID",
+      "capabilityDigest",
       "fencingToken",
       "reason",
       "observedAt",
@@ -931,6 +956,8 @@ export function parseOperationEffectUncertainty(
   if (!executorClaimID.ok) return executorClaimID
   const capabilityGrantID = parseCapabilityGrantID(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
   if (!capabilityGrantID.ok) return capabilityGrantID
+  const capabilityDigest = parseDigest<ContentDigest>(record.value.capabilityDigest, `${path}.capabilityDigest`)
+  if (!capabilityDigest.ok) return capabilityDigest
   const fencingToken = parsePositiveInteger(record.value.fencingToken, `${path}.fencingToken`)
   if (!fencingToken.ok) return fencingToken
   if (record.value.reason !== "claimed_without_receipt") {
@@ -956,6 +983,7 @@ export function parseOperationEffectUncertainty(
     dispatchRequestID: dispatchRequestID.value,
     executorClaimID: executorClaimID.value,
     capabilityGrantID: capabilityGrantID.value,
+    capabilityDigest: capabilityDigest.value,
     fencingToken: fencingToken.value,
     reason: record.value.reason,
     observedAt: observedAt.value,

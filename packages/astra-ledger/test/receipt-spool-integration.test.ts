@@ -13,6 +13,7 @@ import { makeOperationLedgerWithClock } from "../src/testing"
 import {
   attemptID,
   authorizedLifecycle,
+  capabilityDigest,
   capabilityGrantID,
   contentDigest,
   dispatchRequest,
@@ -34,6 +35,7 @@ const receipt = requireReceipt({
   dispatchRequestID,
   executorClaimID,
   capabilityGrantID,
+  capabilityDigest,
   fencingToken: 1,
   adapter: { identity: dispatchRequest.executor, version: "1", digest: contentDigest },
   effectClass: "workspace_write",
@@ -53,6 +55,7 @@ const claimCommand = {
   dispatchRequestID,
   operationID,
   attemptID,
+  capabilityDigest,
   executor: dispatchRequest.executor,
   executorClaimID,
   claimExpiresAt: "2026-07-17T10:04:00.000Z",

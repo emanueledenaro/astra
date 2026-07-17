@@ -15,6 +15,8 @@ import { captureGitRepositoryBaseline, revalidateGitRepositoryBaseline } from "@
 import { Effect } from "effect"
 import { prepareControlledWrite, type ControlledWriteResult } from "./controlled-write"
 import type { ControlledWritePlan } from "./controlled-write-plan"
+import type { ControlledWriteCapabilityProposal } from "./controlled-write-capability"
+import { executeHostControlledWrite } from "./controlled-write-host"
 import {
   canonicalJson,
   controlledWriteAdapterDigest,
@@ -49,6 +51,7 @@ export type ExecuteApprovedControlledWriteInput = Readonly<{
   plan: ControlledWritePlan
   report: WorkspaceTrustReport
   repositoryBaseline?: GitRepositoryBaselineSnapshot
+  capabilityProposal: ControlledWriteCapabilityProposal
   policyAskedAt: string
   approvalGrantedAt: string
   recordingStartedAt: string
@@ -120,6 +123,7 @@ export async function executeApprovedControlledWrite(
           operationID: facts.operationID,
           attemptID: facts.attemptID,
           executor: controlledWriteExecutor,
+          capabilityDigest: facts.capabilityDigest,
           executorClaimID: facts.executorClaimID,
           claimExpiresAt: new Date(
             Math.min(claimStartedAt + claimLeaseMilliseconds, Date.parse(facts.authorizationExpiresAt) - 1),
@@ -162,6 +166,7 @@ export async function executeApprovedControlledWrite(
                 dispatchRequestID: facts.dispatchRequestID,
                 attemptID: facts.attemptID,
                 capabilityGrantID: facts.capabilityGrantID,
+                capabilityDigest: facts.capabilityDigest,
                 executorClaimID: facts.executorClaimID,
                 fencingToken: claimed.claim.fencingToken,
                 executor: controlledWriteExecutor,
@@ -177,6 +182,8 @@ export async function executeApprovedControlledWrite(
           : { allowed: false as const, reason: `effect_authority_${validation.reason}` }
       },
       () => checkRepositoryBaseline(input, facts.repositorySnapshotDigest),
+      (plan, target, expectedWorkspaceIdentity) =>
+        executeHostControlledWrite(facts.capabilityProposal, plan, target, expectedWorkspaceIdentity),
     )
     const effect = prepared.prepared
       ? await prepared.execute()
@@ -321,7 +328,11 @@ async function ingestPendingReceipts(
   }
   const entry = pending[0]
   if (!entry) return
-  if (entry.receipt.operationID !== facts.operationID || entry.receipt.receiptID !== facts.receiptID) {
+  if (
+    entry.receipt.operationID !== facts.operationID ||
+    entry.receipt.receiptID !== facts.receiptID ||
+    entry.receipt.capabilityDigest !== facts.capabilityDigest
+  ) {
     throw new ControlledWriteCoordinationError(
       "recovery_unavailable",
       "The pending receipt belongs to another Operation",
@@ -378,6 +389,7 @@ async function recordUncertainty(
     dispatchRequestID: facts.dispatchRequestID,
     executorClaimID: facts.executorClaimID,
     capabilityGrantID: facts.capabilityGrantID,
+    capabilityDigest: facts.capabilityDigest,
     fencingToken,
     reason: "claimed_without_receipt",
     observedAt,
@@ -457,6 +469,7 @@ function makeReceipt(
     dispatchRequestID: facts.dispatchRequestID,
     executorClaimID: facts.executorClaimID,
     capabilityGrantID: facts.capabilityGrantID,
+    capabilityDigest: facts.capabilityDigest,
     fencingToken,
     adapter: { identity: controlledWriteExecutor, version: "1", digest: controlledWriteAdapterDigest },
     effectClass: "workspace_write",

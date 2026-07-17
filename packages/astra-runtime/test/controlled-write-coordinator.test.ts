@@ -6,6 +6,7 @@ import { captureGitRepositoryBaseline } from "@astra/git"
 import { parseOperationID, type OperationReceipt } from "@astra/domain/operation-contract"
 import { Effect } from "effect"
 import { createControlledWritePlan, demoMarkerName } from "../src/controlled-write-plan"
+import { proposeControlledWriteCapability } from "../src/controlled-write-capability"
 import {
   executeApprovedControlledWrite,
   recoverApprovedControlledWrite,
@@ -137,6 +138,7 @@ describe("durable approved controlled write coordinator", () => {
       "effect.observed",
     ])
     expect(await pendingReceiptCount(input.spoolFilename)).toBe(0)
+    expect((await operationReceipt(input))?.capabilityDigest).toBe(input.capabilityProposal.capability.capabilityDigest)
 
     const verified = await verifyRecordedControlledWrite(input)
     expect(verified).toMatchObject({ status: "verified", state: "succeeded", sequence: 8 })
@@ -153,6 +155,55 @@ describe("durable approved controlled write coordinator", () => {
       "verification.passed",
     ])
     expect(await verifyRecordedControlledWrite(input)).toEqual(verified)
+  })
+
+  test("does not load workspace Bun config, preload code, or environment during host execution", async () => {
+    const workspace = await temporaryDirectory("astra-coordinator-hostile-bun-")
+    const state = await temporaryDirectory("astra-coordinator-hostile-bun-state-")
+    const startupCanary = join(state, "workspace-startup-ran.txt")
+    await writeFile(join(workspace, "package.json"), "{}\n")
+    await writeFile(join(workspace, ".env"), "ASTRA_WORKSPACE_ENV_CANARY=loaded\n")
+    await writeFile(
+      join(workspace, "hostile-preload.ts"),
+      `await Bun.write(${JSON.stringify(startupCanary)}, process.env.ASTRA_WORKSPACE_ENV_CANARY ?? "missing")\n`,
+    )
+    await writeFile(join(workspace, "bunfig.toml"), 'preload = ["./hostile-preload.ts"]\n')
+    const report = await scanWorkspace(workspace)
+    const base = Date.now() - 1_000
+    const plan = createControlledWritePlan(workspace, crypto.randomUUID(), new Date(base).toISOString())
+    const policyAskedAt = new Date(base + 100).toISOString()
+    const input = {
+      ledgerFilename: join(state, "operations.sqlite"),
+      spoolFilename: join(state, "receipts.sqlite"),
+      plan,
+      report,
+      capabilityProposal: await proposeControlledWriteCapability({ plan, report, policyAskedAt }),
+      policyAskedAt,
+      approvalGrantedAt: new Date(base + 200).toISOString(),
+      recordingStartedAt: new Date(base + 300).toISOString(),
+    } satisfies ExecuteApprovedControlledWriteInput
+
+    expect(input.capabilityProposal.capability.manifest.process).toMatchObject({
+      arguments: ["--no-install", "--no-env-file", "--config=/dev/null", "--eval", input.capabilityProposal.program],
+      workingDirectory: "/",
+    })
+    expect(await executeApprovedControlledWrite(input)).toMatchObject({ status: "effect_observed" })
+    expect(await exists(startupCanary)).toBeFalse()
+    expect(await readFile(join(workspace, demoMarkerName), "utf8")).toBe(plan.content)
+  })
+
+  test("rejects changed capability input before durable admission or workspace effect", async () => {
+    const input = await operationInput()
+    const changed = {
+      ...input,
+      capabilityProposal: { ...input.capabilityProposal, stdin: `${input.capabilityProposal.stdin} ` },
+    }
+
+    expect(await executeApprovedControlledWrite(changed).catch((cause) => cause)).toMatchObject({
+      code: "invalid_input",
+    })
+    expect(await exists(input.ledgerFilename)).toBeFalse()
+    expect(await exists(join(input.plan.workspaceRoot, demoMarkerName))).toBeFalse()
   })
 
   test("does not replay verified evidence for a caller bound to a different workspace", async () => {
@@ -380,12 +431,14 @@ async function operationInput(): Promise<ExecuteApprovedControlledWriteInput> {
   const report = await scanWorkspace(workspace)
   const base = Date.now() - 1_000
   const plan = createControlledWritePlan(workspace, crypto.randomUUID(), new Date(base).toISOString())
+  const policyAskedAt = new Date(base + 100).toISOString()
   return {
     ledgerFilename: join(state, "operations.sqlite"),
     spoolFilename: join(state, "receipts.sqlite"),
     plan,
     report,
-    policyAskedAt: new Date(base + 100).toISOString(),
+    capabilityProposal: await proposeControlledWriteCapability({ plan, report, policyAskedAt }),
+    policyAskedAt,
     approvalGrantedAt: new Date(base + 200).toISOString(),
     recordingStartedAt: new Date(base + 300).toISOString(),
   }
@@ -402,13 +455,21 @@ async function gitOperationInput() {
   const captured = await captureGitRepositoryBaseline(workspace)
   if (captured.status !== "complete") throw new Error(`Git baseline blocked: ${captured.reason}`)
   const base = Date.now() - 1_000
+  const plan = createControlledWritePlan(workspace, crypto.randomUUID(), new Date(base).toISOString())
+  const policyAskedAt = new Date(base + 100).toISOString()
   return {
     ledgerFilename: join(state, "operations.sqlite"),
     spoolFilename: join(state, "receipts.sqlite"),
-    plan: createControlledWritePlan(workspace, crypto.randomUUID(), new Date(base).toISOString()),
+    plan,
     report,
     repositoryBaseline: captured.snapshot,
-    policyAskedAt: new Date(base + 100).toISOString(),
+    capabilityProposal: await proposeControlledWriteCapability({
+      plan,
+      report,
+      repositoryBaseline: captured.snapshot,
+      policyAskedAt,
+    }),
+    policyAskedAt,
     approvalGrantedAt: new Date(base + 200).toISOString(),
     recordingStartedAt: new Date(base + 300).toISOString(),
   } as const satisfies ExecuteApprovedControlledWriteInput & {

@@ -16,9 +16,13 @@ import {
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
 import type { ControlledWritePlan } from "./controlled-write-plan"
+import {
+  validateControlledWriteCapabilityProposal,
+  type ControlledWriteCapabilityProposal,
+} from "./controlled-write-capability"
 
 const policyDigest = digest("astra-policy:controlled-write-explicit-consent:v1")
-const adapterDigest = digest("astra-runtime:controlled-write:create-only:v1")
+const adapterDigest = digest("astra-runtime:controlled-write:bounded-host-process:v1")
 const verifierDigest = digest("astra-verify:exact-file-readback:v1")
 
 export type RecordDeniedControlledWriteInput = Readonly<{
@@ -26,6 +30,7 @@ export type RecordDeniedControlledWriteInput = Readonly<{
   plan: ControlledWritePlan
   report: WorkspaceTrustReport
   repositoryBaseline?: GitRepositoryBaselineSnapshot
+  capabilityProposal: ControlledWriteCapabilityProposal
   policyAskedAt: string
   approvalRejectedAt: string
   recordingStartedAt: string
@@ -116,6 +121,8 @@ function denialFacts(input: RecordDeniedControlledWriteInput) {
     )
   }
   const operationID = requireOperationID(plan.operationId)
+  const repository = operationRepositoryBaseline(input)
+  const capability = validateControlledWriteCapabilityProposal(input, input.capabilityProposal)
   const actor = { kind: "user", subject: "user:local-owner" } as const satisfies ActorRef
   const decisionID = deterministicUUID(operationID, "policy-decision")
   const verificationPlanID = deterministicUUID(operationID, "verification-plan")
@@ -133,7 +140,7 @@ function denialFacts(input: RecordDeniedControlledWriteInput) {
     locationID: `local:${report.root}`,
     workspaceIdentity: report.identity,
     trustDigest: report.securityDigest,
-    repository: operationRepositoryBaseline(input),
+    repository,
     policyDigest,
     adapterDigest,
   } as const
@@ -204,6 +211,7 @@ function denialFacts(input: RecordDeniedControlledWriteInput) {
             ruleID: "controlled-write-explicit-consent",
             policyDigest,
             previewDigest,
+            capabilityDigest: capability.capabilityDigest,
             approverClass: "workspace-user",
             expiresAt,
           },

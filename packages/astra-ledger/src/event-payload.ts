@@ -34,6 +34,7 @@ export type ParsedLifecyclePayload = Readonly<{
   payload: NormalizedJsonObject
   admissionKey: string | null
   decisionID: string | null
+  capabilityDigest: string | null
   authority: OperationAuthority | null
   dispatchRequest: DispatchRequest | null
   executorClaim: ExecutorClaim | null
@@ -100,6 +101,7 @@ function parseAdmittedPayload(payload: NormalizedJsonObject): ParsedLifecyclePay
   return {
     admissionKey: parsedAdmissionKey,
     decisionID: null,
+    capabilityDigest: null,
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
@@ -127,10 +129,20 @@ function parseAdmittedPayload(payload: NormalizedJsonObject): ParsedLifecyclePay
 }
 
 function parsePolicyAskPayload(payload: NormalizedJsonObject): ParsedLifecyclePayload {
-  requireExactFields(payload, ["decisionID", "ruleID", "policyDigest", "previewDigest", "approverClass", "expiresAt"])
+  requireExactFields(payload, [
+    "decisionID",
+    "ruleID",
+    "policyDigest",
+    "previewDigest",
+    "capabilityDigest",
+    "approverClass",
+    "expiresAt",
+  ])
+  const capabilityDigest = requireDigest(payload.capabilityDigest, "$.payload.capabilityDigest")
   return {
     admissionKey: null,
     decisionID: requireCanonicalUUID(payload.decisionID, "$.payload.decisionID"),
+    capabilityDigest,
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
@@ -149,6 +161,7 @@ function parsePolicyAskPayload(payload: NormalizedJsonObject): ParsedLifecyclePa
       expiresAt: requireCanonicalTimestamp(payload.expiresAt, "$.payload.expiresAt"),
       policyDigest: requireDigest(payload.policyDigest, "$.payload.policyDigest"),
       previewDigest: requireDigest(payload.previewDigest, "$.payload.previewDigest"),
+      capabilityDigest,
       ruleID: requireBoundedString(payload.ruleID, "$.payload.ruleID"),
     },
   }
@@ -159,6 +172,7 @@ function parseApprovalRejectedPayload(payload: NormalizedJsonObject): ParsedLife
   return {
     admissionKey: null,
     decisionID: requireCanonicalUUID(payload.decisionID, "$.payload.decisionID"),
+    capabilityDigest: null,
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
@@ -183,6 +197,7 @@ function parseApprovalGrantedPayload(payload: NormalizedJsonObject): ParsedLifec
   return {
     admissionKey: null,
     decisionID: authority.decisionID,
+    capabilityDigest: authority.capabilityDigest,
     authority,
     dispatchRequest: null,
     executorClaim: null,
@@ -204,6 +219,7 @@ function parseDispatchRequestedPayload(payload: NormalizedJsonObject): ParsedLif
   return {
     admissionKey: null,
     decisionID: null,
+    capabilityDigest: dispatchRequest.capabilityDigest,
     authority: null,
     dispatchRequest,
     executorClaim: null,
@@ -225,6 +241,7 @@ function parseExecutorAcceptedPayload(payload: NormalizedJsonObject): ParsedLife
   return {
     admissionKey: null,
     decisionID: null,
+    capabilityDigest: executorClaim.capabilityDigest,
     authority: null,
     dispatchRequest: null,
     executorClaim,
@@ -259,6 +276,7 @@ function parseReceiptPayload(name: OperationEvent, payload: NormalizedJsonObject
   return {
     admissionKey: null,
     decisionID: null,
+    capabilityDigest: receipt.capabilityDigest,
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
@@ -280,6 +298,7 @@ function parseUncertaintyPayload(payload: NormalizedJsonObject): ParsedLifecycle
   return {
     admissionKey: null,
     decisionID: null,
+    capabilityDigest: uncertainty.capabilityDigest,
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
@@ -301,6 +320,7 @@ function parseVerificationStartedPayload(payload: NormalizedJsonObject): ParsedL
   return {
     admissionKey: null,
     decisionID: null,
+    capabilityDigest: null,
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
@@ -337,6 +357,7 @@ function parseVerificationEvidencePayload(
   return {
     admissionKey: null,
     decisionID: null,
+    capabilityDigest: null,
     authority: null,
     dispatchRequest: null,
     executorClaim: null,

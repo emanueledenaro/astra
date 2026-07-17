@@ -61,7 +61,7 @@ import {
 import { parseLifecyclePayload, type ParsedLifecyclePayload } from "./event-payload"
 
 const eventSchemaVersion = 1
-const storageSchemaVersion = 5
+const storageSchemaVersion = 6
 const maximumReadEvents = 256
 const maximumIntegrityEvents = 100_000
 const maximumIntegrityOperations = 10_000
@@ -106,6 +106,7 @@ export type OperationRecord = Readonly<{
   baselineAdapterDigest: string
   attemptID: AttemptID | null
   capabilityGrantID: string | null
+  capabilityDigest: string | null
   authorityExpiresAt: string | null
   dispatchRequestID: DispatchRequestID | null
   dispatchExecutor: string | null
@@ -120,6 +121,7 @@ export type ClaimDispatchCommand = Readonly<{
   dispatchRequestID: DispatchRequestID
   operationID: OperationID
   attemptID: AttemptID
+  capabilityDigest: string
   executor: string
   executorClaimID: ExecutorClaimID
   claimExpiresAt: string
@@ -253,6 +255,7 @@ export type ValidateEffectAuthorityCommand = Readonly<{
   dispatchRequestID: DispatchRequestID
   attemptID: AttemptID
   capabilityGrantID: string
+  capabilityDigest: string
   executorClaimID: ExecutorClaimID
   fencingToken: number
   executor: string
@@ -421,6 +424,7 @@ function initialize(db: Database): Effect.Effect<void, OperationLedgerError> {
         baseline_adapter_digest TEXT,
         attempt_id TEXT,
         capability_grant_id TEXT,
+        capability_digest TEXT,
         authority_expires_at TEXT,
         dispatch_request_id TEXT,
         dispatch_executor TEXT,
@@ -445,8 +449,21 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
       sql`SELECT schema_version FROM ledger_meta WHERE singleton = 1 LIMIT 1`,
     )
     if (!rows[0]) return yield* Effect.fail(new LedgerNotInitializedError())
-    if (![1, 2, 3, 4, storageSchemaVersion].includes(rows[0].schema_version)) {
+    if (![1, 2, 3, 4, 5, storageSchemaVersion].includes(rows[0].schema_version)) {
       return yield* Effect.fail(new LedgerCorruptionError("Ledger metadata has an unknown storage schema"))
+    }
+    if (rows[0].schema_version < storageSchemaVersion) {
+      const unbound = yield* db.all<{ count: number }>(sql`
+        SELECT COUNT(*) AS count FROM operation_event
+        WHERE name = 'policy.ask' AND json_type(payload_json, '$.capabilityDigest') IS NULL
+      `)
+      if ((unbound[0]?.count ?? 0) > 0) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(
+            "Legacy Operations have no execution capability binding and require manual reconciliation",
+          ),
+        )
+      }
     }
 
     yield* ensureColumn(db, "ledger_meta", "last_fencing_token", "INTEGER NOT NULL DEFAULT 0")
@@ -454,6 +471,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
     yield* ensureColumn(db, "operation_projection", "baseline_trust_digest", "TEXT")
     yield* ensureColumn(db, "operation_projection", "baseline_adapter_digest", "TEXT")
     yield* ensureColumn(db, "operation_projection", "capability_grant_id", "TEXT")
+    yield* ensureColumn(db, "operation_projection", "capability_digest", "TEXT")
     yield* ensureColumn(db, "operation_projection", "authority_expires_at", "TEXT")
     yield* ensureColumn(db, "operation_projection", "dispatch_request_id", "TEXT")
     yield* ensureColumn(db, "operation_projection", "dispatch_executor", "TEXT")
@@ -502,6 +520,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
         operation_id TEXT NOT NULL UNIQUE,
         attempt_id TEXT NOT NULL UNIQUE,
         baseline_digest TEXT NOT NULL,
+        capability_digest TEXT NOT NULL,
         reserved_event_id TEXT NOT NULL UNIQUE,
         reserved_cursor INTEGER NOT NULL UNIQUE CHECK (reserved_cursor > 0),
         FOREIGN KEY (reserved_event_id) REFERENCES operation_event(event_id)
@@ -513,6 +532,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
         operation_id TEXT NOT NULL UNIQUE,
         attempt_id TEXT NOT NULL UNIQUE,
         dispatch_request_id TEXT NOT NULL UNIQUE,
+        capability_digest TEXT NOT NULL,
         consumed_event_id TEXT NOT NULL UNIQUE,
         consumed_cursor INTEGER NOT NULL UNIQUE CHECK (consumed_cursor > 0),
         FOREIGN KEY (capability_grant_id) REFERENCES capability_reservation(capability_grant_id),
@@ -528,6 +548,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
         dispatch_request_id TEXT NOT NULL UNIQUE,
         executor_claim_id TEXT NOT NULL UNIQUE,
         capability_grant_id TEXT NOT NULL UNIQUE,
+        capability_digest TEXT NOT NULL,
         fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
         receipt_json TEXT NOT NULL,
         receipt_digest TEXT NOT NULL,
@@ -578,6 +599,9 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
         FOREIGN KEY (terminal_event_id) REFERENCES operation_event(event_id)
       )
     `)
+    yield* ensureColumn(db, "capability_reservation", "capability_digest", "TEXT")
+    yield* ensureColumn(db, "capability_consumption", "capability_digest", "TEXT")
+    yield* ensureColumn(db, "operation_receipt", "capability_digest", "TEXT")
     yield* db.run(sql`
       UPDATE operation_projection SET
         baseline_trust_digest = COALESCE(baseline_trust_digest, (
@@ -589,6 +613,11 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
           SELECT json_extract(payload_json, '$.baseline.adapterDigest') FROM operation_event
           WHERE operation_event.operation_id = operation_projection.operation_id
             AND name = 'operation.admitted' LIMIT 1
+        )),
+        capability_digest = COALESCE(capability_digest, (
+          SELECT json_extract(payload_json, '$.capabilityDigest') FROM operation_event
+          WHERE operation_event.operation_id = operation_projection.operation_id
+            AND name = 'policy.ask' LIMIT 1
         ))
     `)
     if (rows[0].schema_version !== storageSchemaVersion) {
@@ -821,6 +850,7 @@ function claimDispatch(
           if (
             snapshot.request.operationID !== command.operationID ||
             snapshot.request.attemptID !== command.attemptID ||
+            snapshot.request.capabilityDigest !== command.capabilityDigest ||
             snapshot.request.executor !== command.executor
           ) {
             return yield* Effect.fail(new DispatchClaimError(command.dispatchRequestID, "request_mismatch"))
@@ -889,6 +919,7 @@ function requireClaimCandidate(
     dispatchRequestID: command.dispatchRequestID,
     operationID: command.operationID,
     attemptID: command.attemptID,
+    capabilityDigest: command.capabilityDigest,
     executor: command.executor,
     fencingToken,
     acceptedAt: trustedNow,
@@ -1000,7 +1031,7 @@ function ingestReceipt(
               AND dispatch_request_id = ${receipt.dispatchRequestID}
             LIMIT 1
           `)
-          if (!consumption[0]) {
+          if (!consumption[0] || consumption[0].capability_digest !== receipt.capabilityDigest) {
             return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "binding_mismatch"))
           }
           const replay = yield* loadAndVerifyOperation(tx, receipt.operationID, maximumReadEvents)
@@ -1482,6 +1513,8 @@ function receiptMatchesDispatch(receipt: OperationReceipt, snapshot: DispatchSna
     receipt.dispatchRequestID === snapshot.request.dispatchRequestID &&
     receipt.executorClaimID === snapshot.claim.executorClaimID &&
     receipt.capabilityGrantID === snapshot.request.capabilityGrantID &&
+    receipt.capabilityDigest === snapshot.request.capabilityDigest &&
+    receipt.capabilityDigest === snapshot.claim.capabilityDigest &&
     receipt.fencingToken === snapshot.claim.fencingToken &&
     receipt.adapter.identity === snapshot.request.executor &&
     receipt.adapter.digest === snapshot.request.adapterDigest
@@ -1496,6 +1529,8 @@ function uncertaintyMatchesDispatch(uncertainty: OperationEffectUncertainty, sna
     uncertainty.dispatchRequestID === snapshot.request.dispatchRequestID &&
     uncertainty.executorClaimID === snapshot.claim.executorClaimID &&
     uncertainty.capabilityGrantID === snapshot.request.capabilityGrantID &&
+    uncertainty.capabilityDigest === snapshot.request.capabilityDigest &&
+    uncertainty.capabilityDigest === snapshot.claim.capabilityDigest &&
     uncertainty.fencingToken === snapshot.claim.fencingToken
   )
 }
@@ -1592,16 +1627,19 @@ function validateEffectAuthority(
       snapshot.request.operationID !== command.operationID ||
       snapshot.request.attemptID !== command.attemptID ||
       snapshot.request.capabilityGrantID !== command.capabilityGrantID ||
+      snapshot.request.capabilityDigest !== command.capabilityDigest ||
       snapshot.request.executor !== command.executor ||
       snapshot.request.adapterDigest !== command.adapterDigest ||
       snapshot.request.baselineDigest !== command.baselineDigest ||
       snapshot.claim.executorClaimID !== command.executorClaimID ||
       snapshot.claim.operationID !== command.operationID ||
       snapshot.claim.attemptID !== command.attemptID ||
+      snapshot.claim.capabilityDigest !== command.capabilityDigest ||
       snapshot.claim.executor !== command.executor ||
       snapshot.claim.fencingToken !== command.fencingToken ||
       operation.attemptID !== command.attemptID ||
       operation.capabilityGrantID !== command.capabilityGrantID ||
+      operation.capabilityDigest !== command.capabilityDigest ||
       operation.dispatchRequestID !== command.dispatchRequestID ||
       operation.dispatchExecutor !== command.executor ||
       operation.dispatchAdapterDigest !== command.adapterDigest ||
@@ -1820,6 +1858,7 @@ function verifyCapabilityIntegrity(db: QueryExecutor): Effect.Effect<void, Opera
         lifecycle.authority.capabilityGrantID !== row.capability_grant_id ||
         lifecycle.authority.attemptID !== row.attempt_id ||
         lifecycle.authority.baselineDigest !== row.baseline_digest ||
+        lifecycle.authority.capabilityDigest !== row.capability_digest ||
         eventRow.operation_id !== row.operation_id
       ) {
         return yield* Effect.fail(new LedgerCorruptionError("Capability reservation facts are inconsistent"))
@@ -1841,6 +1880,8 @@ function verifyCapabilityIntegrity(db: QueryExecutor): Effect.Effect<void, Opera
         !lifecycle.executorClaim ||
         !request ||
         request.capabilityGrantID !== row.capability_grant_id ||
+        request.capabilityDigest !== row.capability_digest ||
+        lifecycle.executorClaim.capabilityDigest !== row.capability_digest ||
         lifecycle.executorClaim.attemptID !== row.attempt_id ||
         lifecycle.executorClaim.dispatchRequestID !== row.dispatch_request_id ||
         eventRow.operation_id !== row.operation_id
@@ -1924,6 +1965,7 @@ function verifyDispatchIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effec
       if (
         !projection ||
         projection.dispatch_request_id !== row.dispatch_request_id ||
+        projection.capability_digest !== snapshot.request.capabilityDigest ||
         !isOperationState(projection.state) ||
         !dispatchSnapshotStates(snapshot).includes(projection.state)
       ) {
@@ -1991,6 +2033,7 @@ function verifyReceiptIntegrity(db: QueryExecutor): Effect.Effect<void, Operatio
         row.dispatch_request_id !== receipt.dispatchRequestID ||
         row.executor_claim_id !== receipt.executorClaimID ||
         row.capability_grant_id !== receipt.capabilityGrantID ||
+        row.capability_digest !== receipt.capabilityDigest ||
         row.fencing_token !== receipt.fencingToken ||
         row.receipt_digest !== digestEvent({ ...receipt }) ||
         row.outcome_event_name !== receiptEventName(receipt) ||
@@ -2139,6 +2182,7 @@ function loadAndVerifyOperation(
     let baselineRepository: WorkspaceBaseline["repository"] | null = null
     let attemptID: AttemptID | null = null
     let capabilityGrantID: string | null = null
+    let capabilityDigest: string | null = null
     let authorityExpiresAt: string | null = null
     let dispatchRequestID: DispatchRequestID | null = null
     let dispatchExecutor: string | null = null
@@ -2184,7 +2228,10 @@ function loadAndVerifyOperation(
         resources = lifecycle.resources
         verificationPlan = lifecycle.verificationPlan
       }
-      if (event.name === "policy.ask") decision = lifecycle.decisionID
+      if (event.name === "policy.ask") {
+        decision = lifecycle.decisionID
+        capabilityDigest = lifecycle.capabilityDigest
+      }
       if (
         (event.name === "approval.rejected" || event.name === "approval.granted") &&
         lifecycle.decisionID !== decision
@@ -2194,7 +2241,10 @@ function loadAndVerifyOperation(
         )
       }
       if (lifecycle.authority) {
-        if (lifecycle.authority.baselineDigest !== baselineTrustDigest) {
+        if (
+          lifecycle.authority.baselineDigest !== baselineTrustDigest ||
+          lifecycle.authority.capabilityDigest !== capabilityDigest
+        ) {
           return yield* Effect.fail(
             new LedgerCorruptionError(`Operation ${operationID} authority baseline is inconsistent`),
           )
@@ -2213,6 +2263,7 @@ function loadAndVerifyOperation(
           lifecycle.dispatchRequest.operationID !== operationID ||
           lifecycle.dispatchRequest.attemptID !== attemptID ||
           lifecycle.dispatchRequest.capabilityGrantID !== capabilityGrantID ||
+          lifecycle.dispatchRequest.capabilityDigest !== capabilityDigest ||
           lifecycle.dispatchRequest.baselineDigest !== baselineTrustDigest ||
           lifecycle.dispatchRequest.adapterDigest !== baselineAdapterDigest ||
           lifecycle.dispatchRequest.authorizationExpiresAt !== authorityExpiresAt
@@ -2239,7 +2290,8 @@ function loadAndVerifyOperation(
         lifecycle.executorClaim &&
         (lifecycle.executorClaim.operationID !== operationID ||
           lifecycle.executorClaim.attemptID !== attemptID ||
-          lifecycle.executorClaim.dispatchRequestID !== dispatchRequestID)
+          lifecycle.executorClaim.dispatchRequestID !== dispatchRequestID ||
+          lifecycle.executorClaim.capabilityDigest !== capabilityDigest)
       ) {
         return yield* Effect.fail(new LedgerCorruptionError(`Operation ${operationID} executor claim is inconsistent`))
       }
@@ -2270,6 +2322,7 @@ function loadAndVerifyOperation(
           lifecycle.receipt.dispatchRequestID !== dispatchRequestID ||
           lifecycle.receipt.executorClaimID !== executorClaimID ||
           lifecycle.receipt.capabilityGrantID !== capabilityGrantID ||
+          lifecycle.receipt.capabilityDigest !== capabilityDigest ||
           lifecycle.receipt.fencingToken !== fencingToken ||
           lifecycle.receipt.adapter.identity !== dispatchExecutor ||
           lifecycle.receipt.adapter.digest !== dispatchAdapterDigest ||
@@ -2290,6 +2343,7 @@ function loadAndVerifyOperation(
           lifecycle.uncertainty.dispatchRequestID !== dispatchRequestID ||
           lifecycle.uncertainty.executorClaimID !== executorClaimID ||
           lifecycle.uncertainty.capabilityGrantID !== capabilityGrantID ||
+          lifecycle.uncertainty.capabilityDigest !== capabilityDigest ||
           lifecycle.uncertainty.fencingToken !== fencingToken)
       ) {
         return yield* Effect.fail(
@@ -2405,6 +2459,7 @@ function loadAndVerifyOperation(
       baselineAdapterDigest,
       attemptID,
       capabilityGrantID,
+      capabilityDigest,
       authorityExpiresAt,
       dispatchRequestID,
       dispatchExecutor,
@@ -2531,10 +2586,25 @@ function validateLifecycleLink(
     )
   }
   if (
+    lifecycle.authority &&
+    (!operation ||
+      operation.capabilityDigest === null ||
+      lifecycle.authority.capabilityDigest !== operation.capabilityDigest)
+  ) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        "Approval authority must bind the capability shown to the approver",
+        "$.payload.capabilityDigest",
+        "capability_mismatch",
+      ),
+    )
+  }
+  if (
     lifecycle.dispatchRequest &&
     (lifecycle.dispatchRequest.operationID !== operation?.operationID ||
       lifecycle.dispatchRequest.attemptID !== operation.attemptID ||
       lifecycle.dispatchRequest.capabilityGrantID !== operation.capabilityGrantID ||
+      lifecycle.dispatchRequest.capabilityDigest !== operation.capabilityDigest ||
       lifecycle.dispatchRequest.baselineDigest !== operation.baselineTrustDigest ||
       lifecycle.dispatchRequest.adapterDigest !== operation.baselineAdapterDigest ||
       lifecycle.dispatchRequest.authorizationExpiresAt !== operation.authorityExpiresAt)
@@ -2560,7 +2630,8 @@ function validateLifecycleLink(
     lifecycle.executorClaim &&
     (lifecycle.executorClaim.operationID !== operation?.operationID ||
       lifecycle.executorClaim.attemptID !== operation.attemptID ||
-      lifecycle.executorClaim.dispatchRequestID !== operation.dispatchRequestID)
+      lifecycle.executorClaim.dispatchRequestID !== operation.dispatchRequestID ||
+      lifecycle.executorClaim.capabilityDigest !== operation.capabilityDigest)
   ) {
     return Effect.fail(
       new OperationEventValidationError(
@@ -2576,6 +2647,7 @@ function validateLifecycleLink(
       lifecycle.receipt.attemptID !== operation.attemptID ||
       lifecycle.receipt.dispatchRequestID !== operation.dispatchRequestID ||
       lifecycle.receipt.capabilityGrantID !== operation.capabilityGrantID ||
+      lifecycle.receipt.capabilityDigest !== operation.capabilityDigest ||
       lifecycle.receipt.adapter.identity !== operation.dispatchExecutor ||
       lifecycle.receipt.adapter.digest !== operation.dispatchAdapterDigest)
   ) {
@@ -2592,7 +2664,8 @@ function validateLifecycleLink(
     (lifecycle.uncertainty.operationID !== operation?.operationID ||
       lifecycle.uncertainty.attemptID !== operation.attemptID ||
       lifecycle.uncertainty.dispatchRequestID !== operation.dispatchRequestID ||
-      lifecycle.uncertainty.capabilityGrantID !== operation.capabilityGrantID)
+      lifecycle.uncertainty.capabilityGrantID !== operation.capabilityGrantID ||
+      lifecycle.uncertainty.capabilityDigest !== operation.capabilityDigest)
   ) {
     return Effect.fail(
       new OperationEventValidationError(
@@ -2811,9 +2884,11 @@ function insertCapabilityReservation(
     if (existing[0]) return yield* Effect.fail(new CapabilityConflictError(authority.capabilityGrantID))
     yield* db.run(sql`
       INSERT INTO capability_reservation (
-        capability_grant_id, operation_id, attempt_id, baseline_digest, reserved_event_id, reserved_cursor
+        capability_grant_id, operation_id, attempt_id, baseline_digest, capability_digest,
+        reserved_event_id, reserved_cursor
       ) VALUES (
         ${authority.capabilityGrantID}, ${event.operationID}, ${authority.attemptID}, ${authority.baselineDigest},
+        ${authority.capabilityDigest},
         ${event.eventID}, ${event.globalCursor}
       )
     `)
@@ -2838,9 +2913,11 @@ function insertCapabilityConsumption(
     if (consumed[0]) return yield* Effect.fail(new CapabilityConflictError(request.capabilityGrantID))
     yield* db.run(sql`
       INSERT INTO capability_consumption (
-        capability_grant_id, operation_id, attempt_id, dispatch_request_id, consumed_event_id, consumed_cursor
+        capability_grant_id, operation_id, attempt_id, dispatch_request_id, capability_digest,
+        consumed_event_id, consumed_cursor
       ) VALUES (
         ${request.capabilityGrantID}, ${request.operationID}, ${request.attemptID}, ${request.dispatchRequestID},
+        ${request.capabilityDigest},
         ${event.eventID}, ${event.globalCursor}
       )
     `)
@@ -2860,7 +2937,8 @@ function validateCapabilityReservation(
       !rows[0] ||
       rows[0].operation_id !== request.operationID ||
       rows[0].attempt_id !== request.attemptID ||
-      rows[0].baseline_digest !== request.baselineDigest
+      rows[0].baseline_digest !== request.baselineDigest ||
+      rows[0].capability_digest !== request.capabilityDigest
     ) {
       return yield* Effect.fail(new CapabilityConflictError(request.capabilityGrantID))
     }
@@ -2927,11 +3005,11 @@ function insertOperationReceipt(
       sql`
       INSERT INTO operation_receipt (
         receipt_id, operation_id, attempt_id, dispatch_request_id, executor_claim_id,
-        capability_grant_id, fencing_token, receipt_json, receipt_digest,
+        capability_grant_id, capability_digest, fencing_token, receipt_json, receipt_digest,
         outcome_event_name, event_id, event_cursor
       ) VALUES (
         ${receipt.receiptID}, ${receipt.operationID}, ${receipt.attemptID}, ${receipt.dispatchRequestID},
-        ${receipt.executorClaimID}, ${receipt.capabilityGrantID}, ${receipt.fencingToken},
+        ${receipt.executorClaimID}, ${receipt.capabilityGrantID}, ${receipt.capabilityDigest}, ${receipt.fencingToken},
         ${JSON.stringify(receipt)}, ${receiptDigest}, ${outcomeEventName}, ${event.eventID}, ${event.globalCursor}
       )
     `,
@@ -3155,6 +3233,7 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
         claimResult.value.dispatchRequestID !== row.dispatch_request_id ||
         claimResult.value.operationID !== row.operation_id ||
         claimResult.value.attemptID !== row.attempt_id ||
+        claimResult.value.capabilityDigest !== requestResult.value.capabilityDigest ||
         claimResult.value.executor !== row.executor ||
         claimResult.value.fencingToken !== row.fencing_token
       ) {
@@ -3237,6 +3316,8 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
         receiptResult.value.dispatchRequestID !== requestResult.value.dispatchRequestID ||
         receiptResult.value.executorClaimID !== claimResult.value.executorClaimID ||
         receiptResult.value.capabilityGrantID !== requestResult.value.capabilityGrantID ||
+        receiptResult.value.capabilityDigest !== requestResult.value.capabilityDigest ||
+        receiptResult.value.capabilityDigest !== claimResult.value.capabilityDigest ||
         receiptResult.value.fencingToken !== claimResult.value.fencingToken
       ) {
         throw new Error("operation_receipt_columns_mismatch")
@@ -3276,6 +3357,7 @@ function projectEvent(
     }
     const attemptID = lifecycle.authority?.attemptID ?? current?.attemptID ?? null
     const capabilityGrantID = lifecycle.authority?.capabilityGrantID ?? current?.capabilityGrantID ?? null
+    const capabilityDigest = lifecycle.capabilityDigest ?? current?.capabilityDigest ?? null
     const authorityExpiresAt = lifecycle.authority?.expiresAt ?? current?.authorityExpiresAt ?? null
     const dispatchRequestID = lifecycle.dispatchRequest?.dispatchRequestID ?? current?.dispatchRequestID ?? null
     const dispatchExecutor = lifecycle.dispatchRequest?.executor ?? current?.dispatchExecutor ?? null
@@ -3285,13 +3367,13 @@ function projectEvent(
         INSERT INTO operation_projection (
           operation_id, admission_key, state, sequence, decision_id,
           baseline_trust_digest, baseline_adapter_digest,
-          attempt_id, capability_grant_id, authority_expires_at, dispatch_request_id,
+          attempt_id, capability_grant_id, capability_digest, authority_expires_at, dispatch_request_id,
           dispatch_executor, dispatch_adapter_digest,
           last_event_id, last_cursor, last_digest, updated_at
         ) VALUES (
           ${event.operationID}, ${admission}, ${state}, ${event.sequence}, ${decisionID},
           ${baselineTrustDigest}, ${baselineAdapterDigest},
-          ${attemptID}, ${capabilityGrantID}, ${authorityExpiresAt}, ${dispatchRequestID},
+          ${attemptID}, ${capabilityGrantID}, ${capabilityDigest}, ${authorityExpiresAt}, ${dispatchRequestID},
           ${dispatchExecutor}, ${dispatchAdapterDigest},
           ${event.eventID}, ${event.globalCursor}, ${event.digest}, ${event.recordedAt}
         )
@@ -3302,6 +3384,7 @@ function projectEvent(
           state = ${state}, sequence = ${event.sequence}, decision_id = ${decisionID},
           baseline_trust_digest = ${baselineTrustDigest}, baseline_adapter_digest = ${baselineAdapterDigest},
           attempt_id = ${attemptID}, capability_grant_id = ${capabilityGrantID},
+          capability_digest = ${capabilityDigest},
           authority_expires_at = ${authorityExpiresAt}, dispatch_request_id = ${dispatchRequestID},
           dispatch_executor = ${dispatchExecutor}, dispatch_adapter_digest = ${dispatchAdapterDigest},
           last_event_id = ${event.eventID}, last_cursor = ${event.globalCursor},
@@ -3340,6 +3423,7 @@ function projectionMatches(row: ProjectionRow, operation: OperationRecord) {
     row.baseline_adapter_digest === operation.baselineAdapterDigest &&
     row.attempt_id === operation.attemptID &&
     row.capability_grant_id === operation.capabilityGrantID &&
+    row.capability_digest === operation.capabilityDigest &&
     row.authority_expires_at === operation.authorityExpiresAt &&
     row.dispatch_request_id === operation.dispatchRequestID &&
     row.dispatch_executor === operation.dispatchExecutor &&
@@ -3365,6 +3449,7 @@ function projectionRowToRecord(row: ProjectionRow): OperationRecord {
     baselineAdapterDigest: requireStoredDigest(row.baseline_adapter_digest, "baseline adapter"),
     attemptID: row.attempt_id ? requireStoredAttemptID(row.attempt_id) : null,
     capabilityGrantID: row.capability_grant_id,
+    capabilityDigest: row.capability_digest ? requireStoredDigest(row.capability_digest, "capability") : null,
     authorityExpiresAt: row.authority_expires_at,
     dispatchRequestID: row.dispatch_request_id ? requireStoredDispatchRequestID(row.dispatch_request_id) : null,
     dispatchExecutor: row.dispatch_executor,
@@ -3425,6 +3510,7 @@ type ProjectionRow = Readonly<{
   baseline_adapter_digest: string | null
   attempt_id: string | null
   capability_grant_id: string | null
+  capability_digest: string | null
   authority_expires_at: string | null
   dispatch_request_id: string | null
   dispatch_executor: string | null
@@ -3487,6 +3573,7 @@ type ReceiptRow = Readonly<{
   dispatch_request_id: string
   executor_claim_id: string
   capability_grant_id: string
+  capability_digest: string
   fencing_token: number
   receipt_json: string
   receipt_digest: string
@@ -3544,6 +3631,7 @@ type CapabilityReservationRow = Readonly<{
   operation_id: string
   attempt_id: string
   baseline_digest: string
+  capability_digest: string
   reserved_event_id: string
   reserved_cursor: number
 }>
@@ -3553,6 +3641,7 @@ type CapabilityConsumptionRow = Readonly<{
   operation_id: string
   attempt_id: string
   dispatch_request_id: string
+  capability_digest: string
   consumed_event_id: string
   consumed_cursor: number
 }>

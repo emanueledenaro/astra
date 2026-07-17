@@ -16,6 +16,7 @@ import {
   attemptID,
   appendCommand,
   authorizedLifecycle,
+  capabilityDigest,
   decisionID,
   dispatchRequest,
   dispatchRequestID,
@@ -36,6 +37,7 @@ const claimCommand = {
   dispatchRequestID,
   operationID,
   attemptID,
+  capabilityDigest,
   executor: dispatchRequest.executor,
   executorClaimID,
   claimExpiresAt: "2026-07-17T10:04:00.000Z",
@@ -116,6 +118,10 @@ describe("durable dispatch outbox and one-shot executor claim", () => {
         yield* ledger.appendBatch(authorizedLifecycle)
         const wrong = yield* ledger.claimDispatch({ ...claimCommand, executor: "other-executor" }).pipe(Effect.flip)
         expect(wrong).toBeInstanceOf(DispatchClaimError)
+        const wrongCapability = yield* ledger
+          .claimDispatch({ ...claimCommand, capabilityDigest: alternateContentDigest })
+          .pipe(Effect.flip)
+        expect(wrongCapability).toBeInstanceOf(DispatchClaimError)
         const expired = yield* ledger
           .claimDispatch({
             ...claimCommand,
@@ -179,6 +185,17 @@ describe("durable dispatch outbox and one-shot executor claim", () => {
           })
           .pipe(Effect.flip)
         expect(badApproval._tag).toBe("OperationEventValidationError")
+        const badCapability = yield* ledger
+          .append({
+            ...authorizedLifecycle[2],
+            event: {
+              ...authorizedLifecycle[2].event,
+              eventID: eventIDs(67),
+              payload: { ...authorizedLifecycle[2].event.payload, capabilityDigest: alternateContentDigest },
+            },
+          })
+          .pipe(Effect.flip)
+        expect(badCapability._tag).toBe("OperationEventValidationError")
         const badAttempt = yield* ledger
           .append({
             ...authorizedLifecycle[2],
@@ -205,6 +222,11 @@ describe("durable dispatch outbox and one-shot executor claim", () => {
             ...authorizedLifecycle[3].event,
             eventID: eventIDs(74),
             payload: { ...dispatchRequest, adapterDigest: alternateContentDigest },
+          },
+          {
+            ...authorizedLifecycle[3].event,
+            eventID: eventIDs(67),
+            payload: { ...dispatchRequest, capabilityDigest: alternateContentDigest },
           },
           { ...authorizedLifecycle[3].event, eventID: eventIDs(75), attemptID: secondAttemptID },
           {
@@ -451,9 +473,57 @@ describe("durable dispatch outbox and one-shot executor claim", () => {
       await rm(directory, { recursive: true, force: true })
     }
   })
+
+  test("refuses a non-empty legacy ledger that has no execution capability binding", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "astra-unbound-migration-"))
+    const filename = join(directory, "operations.sqlite")
+    try {
+      createLegacyV1DenialLedger(
+        filename,
+        [
+          ...authorizedLifecycle.slice(0, 2),
+          appendCommand({
+            eventID: eventIDs(68),
+            name: "approval.rejected",
+            payload: { decisionID, reasonCode: "user_rejected" },
+            expectedState: "awaiting_approval",
+            expectedSequence: 2,
+          }),
+        ],
+        true,
+      )
+
+      const rejected = withDatabase(
+        filename,
+        Effect.gen(function* () {
+          const ledger = yield* makeTestLedger()
+          yield* ledger.initialize()
+        }),
+      ).catch((cause) => cause)
+
+      expect(await rejected).toMatchObject({
+        _tag: "LedgerCorruptionError",
+        message: "Legacy Operations have no execution capability binding and require manual reconciliation",
+      })
+      const native = new Database(filename, { readonly: true })
+      expect(native.query<{ schema_version: number }, []>("SELECT schema_version FROM ledger_meta").get()).toEqual({
+        schema_version: 1,
+      })
+      expect(native.query("PRAGMA table_info(operation_projection)").all()).not.toContainEqual(
+        expect.objectContaining({ name: "capability_digest" }),
+      )
+      native.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
 })
 
-function createLegacyV1DenialLedger(filename: string, commands: ReadonlyArray<AppendOperationEvent>) {
+function createLegacyV1DenialLedger(
+  filename: string,
+  commands: ReadonlyArray<AppendOperationEvent>,
+  stripCapabilityDigest = false,
+) {
   const native = new Database(filename, { create: true })
   native.exec(`
     PRAGMA foreign_keys = ON;
@@ -503,7 +573,9 @@ function createLegacyV1DenialLedger(filename: string, commands: ReadonlyArray<Ap
   let previousDigest: string | null = null
   const events = commands.map((command, index) => {
     const sequence = index + 1
-    const unsigned = { ...command.event, sequence, previousDigest, digest: `sha256:${"0".repeat(64)}` }
+    const payload = { ...command.event.payload }
+    if (stripCapabilityDigest && command.event.name === "policy.ask") delete payload.capabilityDigest
+    const unsigned = { ...command.event, payload, sequence, previousDigest, digest: `sha256:${"0".repeat(64)}` }
     const { digest: _, ...withoutDigest } = unsigned
     const digest = digestEvent({ globalCursor: sequence, ...withoutDigest })
     previousDigest = digest

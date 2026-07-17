@@ -10,6 +10,7 @@ import {
 } from "@astra/domain/git-repository-baseline"
 import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
 import { createControlledWritePlan, demoMarkerName } from "../src/controlled-write-plan"
+import { proposeControlledWriteCapability } from "../src/controlled-write-capability"
 import {
   DeniedOperationRecordingError,
   readDurableOperation,
@@ -37,8 +38,9 @@ describe("durable denied controlled write", () => {
     const filename = join(await temporaryDirectory("astra-runtime-state-"), "operations.sqlite")
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, operationID, createdAt)
+    const capabilityProposal = await proposedCapability(plan, report)
 
-    const first = await recordDeniedControlledWrite({ filename, plan, report, ...observation })
+    const first = await recordDeniedControlledWrite({ filename, plan, report, capabilityProposal, ...observation })
     expect(first).toMatchObject({ operationID, state: "denied", sequence: 3, lastCursor: 3 })
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
 
@@ -54,7 +56,9 @@ describe("durable denied controlled write", () => {
     const filesBeforeRead = await readdir(join(filename, ".."))
     expect(await readDurableOperation(filename, operationID)).toEqual(first)
     expect(await readdir(join(filename, ".."))).toEqual(filesBeforeRead)
-    expect(await recordDeniedControlledWrite({ filename, plan, report, ...observation })).toEqual(first)
+    expect(await recordDeniedControlledWrite({ filename, plan, report, capabilityProposal, ...observation })).toEqual(
+      first,
+    )
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
   })
 
@@ -65,8 +69,8 @@ describe("durable denied controlled write", () => {
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, operationID, createdAt)
 
-    const rejection = recordDeniedControlledWrite({ filename, plan, report, ...observation }).catch((error) => error)
-    expect(await rejection).toMatchObject({ _tag: "DeniedOperationRecordingError", code: "git_baseline_unavailable" })
+    const rejection = proposedCapability(plan, report).catch((error) => error)
+    expect(await rejection).toBeInstanceOf(TypeError)
     expect(await exists(filename)).toBeFalse()
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
   })
@@ -78,12 +82,14 @@ describe("durable denied controlled write", () => {
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, operationID, createdAt)
     const repositoryBaseline = await gitRepositoryBaseline(report)
+    const capabilityProposal = await proposedCapability(plan, report, repositoryBaseline)
 
     const operation = await recordDeniedControlledWrite({
       filename,
       plan,
       report,
       repositoryBaseline,
+      capabilityProposal,
       ...observation,
     })
 
@@ -117,6 +123,7 @@ describe("durable denied controlled write", () => {
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, operationID, createdAt)
     const repositoryBaseline = await gitRepositoryBaseline(report)
+    const capabilityProposal = await proposedCapability(plan, report, repositoryBaseline)
     const { snapshotDigest: _snapshotDigest, ...currentAuthority } = repositoryBaseline
     const authority = {
       ...currentAuthority,
@@ -132,6 +139,7 @@ describe("durable denied controlled write", () => {
       plan,
       report,
       repositoryBaseline: mismatched,
+      capabilityProposal,
       ...observation,
     }).catch((error) => error)
 
@@ -148,8 +156,11 @@ describe("durable denied controlled write", () => {
     const filename = join(linkedParent, "operations.sqlite")
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, operationID, createdAt)
+    const capabilityProposal = await proposedCapability(plan, report)
 
-    const rejection = recordDeniedControlledWrite({ filename, plan, report, ...observation }).catch((error) => error)
+    const rejection = recordDeniedControlledWrite({ filename, plan, report, capabilityProposal, ...observation }).catch(
+      (error) => error,
+    )
     expect(await rejection).toMatchObject({ code: "ledger_inside_workspace" })
     expect(await exists(join(root, "operations.sqlite"))).toBeFalse()
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
@@ -171,6 +182,19 @@ async function workspace() {
   const root = await temporaryDirectory("astra-runtime-ledger-")
   await writeFile(join(root, "package.json"), "{}\n")
   return root
+}
+
+async function proposedCapability(
+  plan: ReturnType<typeof createControlledWritePlan>,
+  report: WorkspaceTrustReport,
+  repositoryBaseline?: GitRepositoryBaselineSnapshot,
+) {
+  return proposeControlledWriteCapability({
+    plan,
+    report,
+    ...(repositoryBaseline ? { repositoryBaseline } : {}),
+    policyAskedAt: observation.policyAskedAt,
+  })
 }
 
 async function gitRepositoryBaseline(report: WorkspaceTrustReport): Promise<GitRepositoryBaselineSnapshot> {

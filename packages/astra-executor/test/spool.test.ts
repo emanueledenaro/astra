@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
 import { parseOperationReceipt, type OperationReceipt } from "@astra/domain/operation-contract"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
@@ -19,6 +20,7 @@ const receipt = requireReceipt({
   dispatchRequestID: "0196e4cb-5d80-7b1d-8fb2-263b81670440",
   executorClaimID: "0196e4cb-5d80-7b1d-8fb2-263b81670442",
   capabilityGrantID: "0196e4cb-5d80-7b1d-8fb2-263b81670435",
+  capabilityDigest: `sha256:${"8".repeat(64)}`,
   fencingToken: 1,
   adapter: {
     identity: "astra-executor:local",
@@ -101,6 +103,11 @@ describe("durable executor receipt spool", () => {
           output: { ...receipt.output, preview: "different" },
         })
         expect((yield* spool.put(divergent).pipe(Effect.flip))._tag).toBe("ReceiptSpoolConflictError")
+        const differentCapability = requireReceipt({
+          ...receipt,
+          capabilityDigest: `sha256:${"9".repeat(64)}`,
+        })
+        expect((yield* spool.put(differentCapability).pipe(Effect.flip))._tag).toBe("ReceiptSpoolConflictError")
         expect(yield* spool.listPending({ limit: 10 })).toHaveLength(1)
         expect((yield* spool.listPending({ limit: 0 }).pipe(Effect.flip))._tag).toBe("ReceiptSpoolReadLimitError")
       }),
@@ -164,6 +171,77 @@ describe("durable executor receipt spool", () => {
             busyTimeoutMilliseconds: 5000,
             synchronous: "FULL",
           })
+        }),
+      )
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("fails closed when the normalized capability digest is corrupted", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "astra-receipt-capability-"))
+    const filename = join(directory, "receipts.sqlite")
+    try {
+      await withDatabase(
+        filename,
+        Effect.gen(function* () {
+          const spool = yield* makeReceiptSpool()
+          yield* spool.initialize()
+          yield* spool.put(receipt)
+        }),
+      )
+      const native = new Database(filename)
+      native.run("UPDATE receipt_spool SET capability_digest = ?", [`sha256:${"9".repeat(64)}`])
+      native.close()
+      await withDatabase(
+        filename,
+        Effect.gen(function* () {
+          const spool = yield* makeReceiptSpool()
+          expect((yield* spool.initialize().pipe(Effect.flip))._tag).toBe("ReceiptSpoolCorruptionError")
+        }),
+      )
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("does not invent capability authority for a non-empty legacy spool", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "astra-receipt-legacy-"))
+    const filename = join(directory, "receipts.sqlite")
+    try {
+      const native = new Database(filename)
+      native.run(`
+        CREATE TABLE receipt_spool (
+          receipt_id TEXT PRIMARY KEY,
+          operation_id TEXT NOT NULL,
+          attempt_id TEXT NOT NULL UNIQUE,
+          dispatch_request_id TEXT NOT NULL UNIQUE,
+          executor_claim_id TEXT NOT NULL UNIQUE,
+          capability_grant_id TEXT NOT NULL UNIQUE,
+          fencing_token INTEGER NOT NULL,
+          receipt_json TEXT NOT NULL,
+          receipt_digest TEXT NOT NULL,
+          received_at TEXT NOT NULL
+        )
+      `)
+      native.run(`INSERT INTO receipt_spool VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+        receipt.receiptID,
+        receipt.operationID,
+        receipt.attemptID,
+        receipt.dispatchRequestID,
+        receipt.executorClaimID,
+        receipt.capabilityGrantID,
+        receipt.fencingToken,
+        JSON.stringify(receipt),
+        `sha256:${"7".repeat(64)}`,
+        "2026-07-17T10:00:06.000Z",
+      ])
+      native.close()
+      await withDatabase(
+        filename,
+        Effect.gen(function* () {
+          const spool = yield* makeReceiptSpool()
+          expect((yield* spool.initialize().pipe(Effect.flip))._tag).toBe("ReceiptSpoolCorruptionError")
         }),
       )
     } finally {
