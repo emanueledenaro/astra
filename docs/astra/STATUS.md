@@ -93,6 +93,7 @@ This is a verified safe-opening checkpoint, not a release candidate. The next de
 - OpenCode safe-boundary subset: 148 tests, 288 expectations; typecheck passes.
 - Current verified total: 609 passing tests, 1 skipped test, and 3,613 expectations across the declared checkpoint.
 - `git diff --check` passes; changed files pass Prettier after formatting.
+- The developer demo matrix was rerun after integration: hostile read-only open produced zero effects, denial was durable with no dispatch, one approved create-only effect reached independent exact verification, the network canary received zero requests, and no trust was persisted.
 - Real fixture: `G -> A` opened `ACTIVE ONCE • EFFECTS BLOCKED`; typed input did not submit; the complete fixture fingerprint stayed `a9fb1d24358e0d08776d051f2e63fd12b81d292b2e98d4147cc9d767bacc5f28`; no workspace file or authority directory remained.
 - Real large-repository diagnosis proved that the earlier false `STALE` result was a timeout. With realistic bounded limits, two captures produced the same digest.
 - Independent security review confirmed closure of the three safe-opening P1 findings: inherited project/Git startup, child authority replacement, and nested-symlink read escape.
