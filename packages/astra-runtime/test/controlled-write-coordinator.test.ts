@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { parseOperationID } from "@astra/domain/operation-contract"
+import { captureGitRepositoryBaseline } from "@astra/git"
+import { parseOperationID, type OperationReceipt } from "@astra/domain/operation-contract"
 import { Effect } from "effect"
 import { createControlledWritePlan, demoMarkerName } from "../src/controlled-write-plan"
 import {
@@ -16,12 +17,111 @@ import { runWithLedger, runWithReceiptSpool } from "../src/operation-storage"
 import { scanWorkspace } from "../src/workspace-preflight"
 
 const roots: Array<string> = []
+const gitTestTimeout = 20_000
 
 afterAll(async () => {
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })))
 })
 
 describe("durable approved controlled write coordinator", () => {
+  test(
+    "executes and independently verifies a Git workspace against distinct pre- and post-effect snapshots",
+    async () => {
+      const input = await gitOperationInput()
+      const executed = await executeApprovedControlledWrite(input)
+
+      expect(executed).toMatchObject({ status: "effect_observed", state: "effect_observed" })
+      const receipt = await operationReceipt(input)
+      expect(receipt?.verificationContext).toMatchObject({
+        schemaVersion: 2,
+        admittedRepositorySnapshotDigest: input.repositoryBaseline.snapshotDigest,
+        activationGuard: "allowed",
+      })
+      if (!receipt || !("schemaVersion" in receipt.verificationContext)) {
+        throw new Error("Expected a Git-aware receipt")
+      }
+      expect(receipt.verificationContext.postEffectRepositorySnapshotDigest).not.toBe(
+        receipt.verificationContext.admittedRepositorySnapshotDigest,
+      )
+      expect(await verifyRecordedControlledWrite(input)).toMatchObject({ status: "verified", state: "succeeded" })
+    },
+    gitTestTimeout,
+  )
+
+  test(
+    "rejects a stale Git baseline before durable admission or host effect",
+    async () => {
+      const input = await gitOperationInput()
+      await writeFile(join(input.plan.workspaceRoot, "drift.txt"), "drift before admission\n")
+
+      expect(await executeApprovedControlledWrite(input).catch((cause) => cause)).toMatchObject({
+        code: "invalid_input",
+        message: "git_baseline_stale",
+      })
+      expect(await exists(input.ledgerFilename)).toBeFalse()
+      expect(await exists(join(input.plan.workspaceRoot, demoMarkerName))).toBeFalse()
+    },
+    gitTestTimeout,
+  )
+
+  test(
+    "revalidates the Git baseline again at the immediate effect boundary",
+    async () => {
+      const input = await gitOperationInput()
+      const result = await executeApprovedControlledWrite(input, {
+        async beforeEffectBoundary() {
+          await writeFile(join(input.plan.workspaceRoot, "drift.txt"), "drift at effect boundary\n")
+        },
+      })
+
+      expect(result).toMatchObject({ status: "failed_without_effect", state: "failed" })
+      expect(await exists(join(input.plan.workspaceRoot, demoMarkerName))).toBeFalse()
+    },
+    gitTestTimeout,
+  )
+
+  test(
+    "records unknown verification when a Git workspace changes after the observed receipt",
+    async () => {
+      const input = await gitOperationInput()
+      expect(await executeApprovedControlledWrite(input)).toMatchObject({ status: "effect_observed" })
+      await writeFile(join(input.plan.workspaceRoot, "after-receipt.txt"), "later drift\n")
+
+      expect(await verifyRecordedControlledWrite(input)).toMatchObject({
+        status: "unknown",
+        state: "reconciliation_required",
+      })
+    },
+    gitTestTimeout,
+  )
+
+  test(
+    "recovers an admitted Git operation after the effect without requiring the pre-effect baseline to remain current",
+    async () => {
+      const input = await gitOperationInput()
+      expect(
+        await executeApprovedControlledWrite(input, faultAt("after_spool_before_ledger")).catch((cause) => cause),
+      ).toMatchObject({ code: "state_unavailable" })
+      const marker = await readFile(join(input.plan.workspaceRoot, demoMarkerName), "utf8")
+      expect(await pendingReceiptCount(input.spoolFilename)).toBe(1)
+
+      const recovered = await executeApprovedControlledWrite(input)
+
+      expect(recovered).toMatchObject({ status: "effect_observed", state: "effect_observed", sequence: 6 })
+      expect(await readFile(join(input.plan.workspaceRoot, demoMarkerName), "utf8")).toBe(marker)
+      expect(await pendingReceiptCount(input.spoolFilename)).toBe(0)
+      expect(await eventNames(input.ledgerFilename, input.plan.operationId)).toEqual([
+        "operation.admitted",
+        "policy.ask",
+        "approval.granted",
+        "dispatch.requested",
+        "executor.accepted",
+        "effect.observed",
+      ])
+    },
+    gitTestTimeout,
+  )
+
   test("keeps observation separate from independent durable verification", async () => {
     const input = await operationInput()
     const executed = await executeApprovedControlledWrite(input)
@@ -53,6 +153,23 @@ describe("durable approved controlled write coordinator", () => {
       "verification.passed",
     ])
     expect(await verifyRecordedControlledWrite(input)).toEqual(verified)
+  })
+
+  test("does not replay verified evidence for a caller bound to a different workspace", async () => {
+    const input = await operationInput()
+    expect(await executeApprovedControlledWrite(input)).toMatchObject({ status: "effect_observed" })
+    expect(await verifyRecordedControlledWrite(input)).toMatchObject({ status: "verified", state: "succeeded" })
+    const decoy = await temporaryDirectory("astra-coordinator-verified-decoy-")
+    await writeFile(join(decoy, "package.json"), "{}\n")
+    await writeFile(join(decoy, demoMarkerName), input.plan.content)
+
+    expect(
+      verifyRecordedControlledWrite({
+        ...input,
+        plan: { ...input.plan, workspaceRoot: decoy },
+        report: await scanWorkspace(decoy),
+      }),
+    ).rejects.toMatchObject({ code: "invalid_input" })
   })
 
   for (const point of ["after_claim_before_effect", "after_effect_before_spool"] as const) {
@@ -190,7 +307,7 @@ describe("durable approved controlled write coordinator", () => {
     expect(verified).toMatchObject({ status: "unknown", state: "reconciliation_required", sequence: 8 })
   })
 
-  test("records unknown verification for a decoy workspace with the same operation and content", async () => {
+  test("rejects a decoy workspace with the same operation and content", async () => {
     const input = await operationInput()
     expect(await executeApprovedControlledWrite(input)).toMatchObject({ status: "effect_observed" })
     const decoy = await temporaryDirectory("astra-coordinator-decoy-")
@@ -198,12 +315,13 @@ describe("durable approved controlled write coordinator", () => {
     await writeFile(join(decoy, demoMarkerName), input.plan.content)
     const report = await scanWorkspace(decoy)
 
-    const verified = await verifyRecordedControlledWrite({
-      ...input,
-      plan: { ...input.plan, workspaceRoot: decoy },
-      report,
-    })
-    expect(verified).toMatchObject({ status: "unknown", state: "reconciliation_required", sequence: 8 })
+    expect(
+      await verifyRecordedControlledWrite({
+        ...input,
+        plan: { ...input.plan, workspaceRoot: decoy },
+        report,
+      }).catch((cause) => cause),
+    ).toMatchObject({ _tag: "ControlledWriteVerificationError", code: "invalid_input" })
   })
 
   test("does not start the host effect without a safe remaining claim lease", async () => {
@@ -273,6 +391,31 @@ async function operationInput(): Promise<ExecuteApprovedControlledWriteInput> {
   }
 }
 
+async function gitOperationInput() {
+  const workspace = await temporaryDirectory("astra-coordinator-git-workspace-")
+  const state = await temporaryDirectory("astra-coordinator-git-state-")
+  await git(workspace, "init", "-q", "--initial-branch=main")
+  await writeFile(join(workspace, "package.json"), "{}\n")
+  await git(workspace, "add", "package.json")
+  await git(workspace, "-c", "user.name=Astra", "-c", "user.email=astra@example.invalid", "commit", "-qm", "initial")
+  const report = await scanWorkspace(workspace)
+  const captured = await captureGitRepositoryBaseline(workspace)
+  if (captured.status !== "complete") throw new Error(`Git baseline blocked: ${captured.reason}`)
+  const base = Date.now() - 1_000
+  return {
+    ledgerFilename: join(state, "operations.sqlite"),
+    spoolFilename: join(state, "receipts.sqlite"),
+    plan: createControlledWritePlan(workspace, crypto.randomUUID(), new Date(base).toISOString()),
+    report,
+    repositoryBaseline: captured.snapshot,
+    policyAskedAt: new Date(base + 100).toISOString(),
+    approvalGrantedAt: new Date(base + 200).toISOString(),
+    recordingStartedAt: new Date(base + 300).toISOString(),
+  } as const satisfies ExecuteApprovedControlledWriteInput & {
+    repositoryBaseline: NonNullable<ExecuteApprovedControlledWriteInput["repositoryBaseline"]>
+  }
+}
+
 function faultAt(expected: ControlledWriteFaultPoint) {
   return {
     async injectFault(point: ControlledWriteFaultPoint) {
@@ -301,8 +444,32 @@ async function pendingReceiptCount(filename: string) {
   )
 }
 
+async function operationReceipt(input: ExecuteApprovedControlledWriteInput): Promise<OperationReceipt | null> {
+  return runWithLedger(input.ledgerFilename, (ledger) =>
+    Effect.gen(function* () {
+      yield* ledger.initialize()
+      const parsed = parseOperationID(input.plan.operationId)
+      if (!parsed.ok) return yield* Effect.die("Invalid test Operation ID")
+      const operation = yield* ledger.getOperation(parsed.value)
+      if (!operation?.dispatchRequestID) return null
+      return (yield* ledger.getDispatchSnapshot(operation.dispatchRequestID))?.receipt ?? null
+    }),
+  )
+}
+
+async function git(root: string, ...arguments_: ReadonlyArray<string>) {
+  const child = Bun.spawn(["/Applications/Xcode.app/Contents/Developer/usr/bin/git", "-C", root, ...arguments_], {
+    env: { PATH: "/usr/bin:/bin", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+  if (exitCode !== 0) throw new Error(`Git fixture command failed: ${stderr}`)
+}
+
 async function temporaryDirectory(prefix: string) {
-  const root = await mkdtemp(join(tmpdir(), prefix))
+  const root = await realpath(await mkdtemp(join(tmpdir(), prefix)))
   roots.push(root)
   return root
 }

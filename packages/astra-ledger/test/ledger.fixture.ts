@@ -33,8 +33,11 @@ export const alternateContentDigest = requireContentDigest(`sha256:${"9".repeat(
 export const secondDecisionID = "0196e4cb-5d80-7b1d-8fb2-263b81670474"
 export const idempotencyKey = `sha256:${"b".repeat(64)}`
 export const receiptVerificationContext = {
+  schemaVersion: 2,
   admittedBaselineDigest: contentDigest,
+  admittedRepositorySnapshotDigest: contentDigest,
   postEffectWorkspaceDigest: contentDigest,
+  postEffectRepositorySnapshotDigest: contentDigest,
   workspaceIdentity: { device: "16777233", inode: "42" },
   targetIdentity: { device: "16777233", inode: "43" },
   preflightLimits: { maxEntries: 128, maxFileBytes: 65536, maxTotalBytes: 262144, maxDurationMs: 1000 },
@@ -60,11 +63,12 @@ export const admittedPayload = {
     trustDigest: contentDigest,
     repository: {
       kind: "git",
-      repositoryIdentity: "repo:fixture",
-      head: "453b61e27b2f6c2752a60dd7d8412bdcf4e0aa3d",
-      indexTreeDigest: contentDigest,
-      trackedWorktreeDigest: contentDigest,
-      untrackedDigest: contentDigest,
+      schemaVersion: 1,
+      snapshotDigest: contentDigest,
+      observationDigest: contentDigest,
+      root: { canonicalPath: "/fixture", device: "16777233", inode: "42" },
+      head: { kind: "symbolic", symbolicRef: "refs/heads/main", oid: "453b61e27b2f6c2752a60dd7d8412bdcf4e0aa3d" },
+      verification: "not_verified",
     },
     policyDigest,
     adapterDigest: contentDigest,

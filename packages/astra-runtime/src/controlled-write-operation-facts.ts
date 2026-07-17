@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto"
 import {
+  parseGitRepositoryBaselineSnapshot,
+  type GitRepositoryBaselineSnapshot,
+} from "@astra/domain/git-repository-baseline"
+import {
   parseAttemptID,
   parseCapabilityGrantID,
   parseContentDigest,
@@ -24,6 +28,7 @@ export const controlledWriteVerifier = "astra-verifier:exact-file-readback"
 export type ApprovedControlledWriteFactsInput = Readonly<{
   plan: ControlledWritePlan
   report: WorkspaceTrustReport
+  repositoryBaseline?: GitRepositoryBaselineSnapshot
   policyAskedAt: string
   approvalGrantedAt: string
   recordingStartedAt: string
@@ -36,10 +41,9 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
     throw new TypeError("A complete preflight is required for a controlled write Operation")
   }
   if (plan.workspaceRoot !== report.root) throw new TypeError("The plan and preflight workspace do not match")
-  if (report.surfaces.some((surface) => surface.kind === "git_metadata")) {
-    throw new TypeError("A complete Git baseline is required before dispatch")
-  }
   requireMonotonicTimeline(input)
+
+  const repositoryAuthority = makeControlledWriteBaselineAuthority(report, input.repositoryBaseline)
 
   const operationID = requireOperationID(plan.operationId)
   const decisionID = deterministicUUID(operationID, "policy-decision")
@@ -65,8 +69,8 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
     kind: "workspace",
     locationID: `local:${report.root}`,
     workspaceIdentity: report.identity,
-    trustDigest: report.securityDigest,
-    repository: { kind: "non_git", markerDigest: report.securityDigest },
+    trustDigest: repositoryAuthority.baselineDigest,
+    repository: repositoryAuthority.repository,
     policyDigest: controlledWritePolicyDigest,
     adapterDigest: controlledWriteAdapterDigest,
   } as const
@@ -114,7 +118,7 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
     operationID,
     attemptID,
     capabilityGrantID,
-    baselineDigest: report.securityDigest,
+    baselineDigest: repositoryAuthority.baselineDigest,
     executor: controlledWriteExecutor,
     adapterDigest: controlledWriteAdapterDigest,
     idempotencyKey: digest(canonicalJson({ operationID, attemptID, effect: admittedPayload.effectSpecification })),
@@ -139,6 +143,8 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
     evidenceID,
     uncertaintyID,
     authorizationExpiresAt,
+    baselineTrustDigest: repositoryAuthority.baselineDigest,
+    repositorySnapshotDigest: repositoryAuthority.repositorySnapshotDigest,
     resources,
     eventIDs: {
       admitted: admittedEventID,
@@ -202,7 +208,7 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
             decisionID,
             capabilityGrantID,
             attemptID,
-            baselineDigest: report.securityDigest,
+            baselineDigest: repositoryAuthority.baselineDigest,
             expiresAt: authorizationExpiresAt,
           },
           recordedAt: input.recordingStartedAt,
@@ -230,6 +236,50 @@ export function makeApprovedControlledWriteFacts(input: ApprovedControlledWriteF
         }),
       },
     ] as const satisfies ReadonlyArray<AppendOperationEvent>,
+  }
+}
+
+export function makeControlledWriteBaselineAuthority(
+  report: WorkspaceTrustReport,
+  repositoryBaseline: GitRepositoryBaselineSnapshot | undefined,
+) {
+  const gitWorkspace = report.surfaces.some((surface) => surface.kind === "git_metadata")
+  if (!gitWorkspace) {
+    if (repositoryBaseline) throw new TypeError("A Git baseline cannot authorize a non-Git workspace")
+    return {
+      baselineDigest: report.securityDigest!,
+      repositorySnapshotDigest: null,
+      repository: { kind: "non_git", markerDigest: report.securityDigest! } as const,
+    }
+  }
+
+  const parsed = parseGitRepositoryBaselineSnapshot(repositoryBaseline)
+  if (!parsed.ok) throw new TypeError("A complete, valid Git baseline is required before dispatch")
+  if (
+    parsed.value.root.canonicalPath !== report.root ||
+    parsed.value.root.device !== report.identity?.device ||
+    parsed.value.root.inode !== report.identity.inode
+  ) {
+    throw new TypeError("The Git baseline and preflight refer to different workspace identities")
+  }
+  const repository = {
+    kind: "git",
+    schemaVersion: 1,
+    snapshotDigest: parsed.value.snapshotDigest,
+    observationDigest: parsed.value.observer.observationDigest,
+    root: parsed.value.root,
+    head: parsed.value.head,
+    verification: parsed.value.verification,
+  } as const
+  return {
+    baselineDigest: digest(
+      canonicalJson({
+        repositorySnapshotDigest: parsed.value.snapshotDigest,
+        workspaceSecurityDigest: report.securityDigest,
+      }),
+    ),
+    repositorySnapshotDigest: parsed.value.snapshotDigest,
+    repository,
   }
 }
 

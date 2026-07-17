@@ -14,6 +14,8 @@ import {
   makeOperationLedgerWithFault,
 } from "../src/testing"
 import {
+  alternateContentDigest,
+  admittedPayload,
   attemptID,
   authorizedLifecycle,
   capabilityGrantID,
@@ -169,6 +171,24 @@ describe("specialized operation receipt ingestion", () => {
           { ...valid, attemptID: "0196e4cb-5d80-7b1d-8fb2-263b81670445" },
           { ...valid, effectClass: "process_execution" },
           { ...valid, resources: ["workspace:other.txt"] },
+          {
+            ...valid,
+            verificationContext: {
+              ...valid.verificationContext,
+              admittedRepositorySnapshotDigest: alternateContentDigest,
+            },
+          },
+          {
+            ...valid,
+            verificationContext: {
+              admittedBaselineDigest: valid.verificationContext.admittedBaselineDigest,
+              postEffectWorkspaceDigest: valid.verificationContext.postEffectWorkspaceDigest,
+              workspaceIdentity: valid.verificationContext.workspaceIdentity,
+              targetIdentity: valid.verificationContext.targetIdentity,
+              preflightLimits: valid.verificationContext.preflightLimits,
+              activationGuard: valid.verificationContext.activationGuard,
+            },
+          },
         ].map(requireReceipt)
         for (const candidate of forged) {
           const error = yield* ledger.ingestReceipt({ receipt: candidate, event: receiptEvent }).pipe(Effect.flip)
@@ -188,6 +208,43 @@ describe("specialized operation receipt ingestion", () => {
           receipt: null,
           recoveryStatus: "claimed_no_receipt",
         })
+      }),
+    )
+  })
+
+  test("rejects a Git-aware receipt context for a non-Git admitted baseline", async () => {
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        let now = "2026-07-17T10:00:04.000Z"
+        const ledger = yield* makeOperationLedgerWithClock(() => now)
+        yield* ledger.initialize()
+        const nonGitAdmission = {
+          ...authorizedLifecycle[0],
+          event: {
+            ...authorizedLifecycle[0].event,
+            payload: {
+              ...admittedPayload,
+              baseline: {
+                ...admittedPayload.baseline,
+                repository: { kind: "non_git" as const, markerDigest: contentDigest },
+              },
+            },
+          },
+        }
+        yield* ledger.appendBatch([nonGitAdmission, ...authorizedLifecycle.slice(1)])
+        yield* ledger.claimDispatch(claimCommand)
+        now = "2026-07-17T10:00:06.000Z"
+
+        const error = yield* ledger
+          .ingestReceipt({
+            receipt: makeReceipt({ kind: "effect_observed", beforeDigest: null, afterDigest: contentDigest }),
+            event: receiptEvent,
+          })
+          .pipe(Effect.flip)
+
+        expect(error).toMatchObject({ _tag: "ReceiptIngestionError", code: "binding_mismatch" })
+        expect(yield* ledger.readGlobalCursor()).toBe(5)
       }),
     )
   })

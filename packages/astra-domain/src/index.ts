@@ -13,6 +13,7 @@ export {
 export * as Operation from "./operation"
 export * as OperationContract from "./operation-contract"
 export * as GitRepositoryBaseline from "./git-repository-baseline"
+export * as SessionAuthority from "./session-authority"
 
 export {
   computeGitRepositoryBaselineSnapshotDigest,
@@ -30,6 +31,8 @@ export {
 } from "./workspace-trust"
 
 export * as WorkspaceTrust from "./workspace-trust"
+
+export type { AstraSessionAuthority, AstraSessionAuthorityParseResult } from "./session-authority"
 
 export type {
   GitRepositoryBaselineBlockReason,

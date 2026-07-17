@@ -1,4 +1,5 @@
 import { join } from "node:path"
+import type { GitRepositoryBaselineSnapshot } from "@astra/domain/git-repository-baseline"
 import {
   parseOperationEvidence,
   parseOperationID,
@@ -6,6 +7,7 @@ import {
   type OperationReceipt,
 } from "@astra/domain/operation-contract"
 import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
+import { captureGitRepositoryBaseline } from "@astra/git"
 import { Effect } from "effect"
 import { verifyControlledWrite } from "./controlled-write"
 import type { ControlledWritePlan } from "./controlled-write-plan"
@@ -15,6 +17,7 @@ import {
   controlledWriteVerifierDigest,
   deterministicUUID,
   digest,
+  makeControlledWriteBaselineAuthority,
 } from "./controlled-write-operation-facts"
 import { assertSafeStateFile, runWithLedger, runWithVerificationLedger } from "./operation-storage"
 import { checkWorkspaceActivation, scanWorkspace } from "./workspace-preflight"
@@ -23,6 +26,7 @@ export type VerifyControlledWriteInput = Readonly<{
   ledgerFilename: string
   plan: ControlledWritePlan
   report: WorkspaceTrustReport
+  repositoryBaseline?: GitRepositoryBaselineSnapshot
 }>
 
 export type DurableVerificationResult = Readonly<{
@@ -68,24 +72,16 @@ export async function verifyRecordedControlledWrite(
         yield* ledger.initialize()
         const operation = yield* ledger.getOperation(operationID)
         const existing = yield* ledger.getVerification(operationID)
-        if (existing) return { operation, existing, dispatch: null }
         const dispatch = operation?.dispatchRequestID
           ? yield* ledger.getDispatchSnapshot(operation.dispatchRequestID)
           : null
-        return { operation, existing: null, dispatch }
+        return { operation, existing, dispatch }
       }),
     )
     if (!durable.operation) {
       throw new ControlledWriteVerificationError("receipt_unavailable", "The durable Operation is missing")
     }
-    if (durable.existing) {
-      return verificationResult(durable.operation, durable.existing.evidence)
-    }
-    if (
-      durable.operation.state !== "effect_observed" ||
-      !durable.dispatch?.receipt ||
-      durable.dispatch.receipt.observation.kind !== "effect_observed"
-    ) {
+    if (!durable.dispatch?.receipt || durable.dispatch.receipt.observation.kind !== "effect_observed") {
       throw new ControlledWriteVerificationError(
         "receipt_unavailable",
         "An independently verifiable observed-effect receipt is required",
@@ -94,23 +90,42 @@ export async function verifyRecordedControlledWrite(
 
     const receipt = durable.dispatch.receipt
     const context = receipt.verificationContext
+    const baselineAuthority = makeControlledWriteBaselineAuthority(input.report, input.repositoryBaseline)
+    const gitContext = "schemaVersion" in context && context.schemaVersion === 2 ? context : null
     const observedAt = new Date().toISOString()
     const callerBindingMatched =
       input.report.completeness === "complete" &&
-      input.report.securityDigest === durable.operation.baselineTrustDigest &&
-      input.report.securityDigest === durable.dispatch.request.baselineDigest &&
-      input.report.securityDigest === context.admittedBaselineDigest &&
+      baselineAuthority.baselineDigest === durable.operation.baselineTrustDigest &&
+      baselineAuthority.baselineDigest === durable.dispatch.request.baselineDigest &&
+      baselineAuthority.baselineDigest === context.admittedBaselineDigest &&
       sameIdentity(input.report.identity, context.workspaceIdentity) &&
       input.report.root === input.plan.workspaceRoot &&
+      (gitContext === null ||
+        (input.repositoryBaseline !== undefined &&
+          gitContext.admittedRepositorySnapshotDigest === input.repositoryBaseline.snapshotDigest)) &&
       receipt.observation.kind === "effect_observed" &&
       receipt.observation.afterDigest === input.plan.contentDigest
+    if (!callerBindingMatched) {
+      throw new ControlledWriteVerificationError(
+        "invalid_input",
+        "The current verification input does not match the admitted Operation",
+      )
+    }
+    if (durable.existing) return verificationResult(durable.operation, durable.existing.evidence)
+    if (durable.operation.state !== "effect_observed") {
+      throw new ControlledWriteVerificationError(
+        "receipt_unavailable",
+        "An observed-effect Operation is required before verification",
+      )
+    }
     const contextReady =
       context.postEffectWorkspaceDigest !== null &&
       context.targetIdentity !== null &&
-      context.activationGuard === "allowed"
+      context.activationGuard === "allowed" &&
+      (gitContext === null || gitContext.postEffectRepositorySnapshotDigest !== null)
     const beforeRead =
       callerBindingMatched && contextReady
-        ? await inspectWorkspace(input.plan.workspaceRoot, context)
+        ? await inspectWorkspace(input.plan.workspaceRoot, context, input.repositoryBaseline)
         : unmatchedWorkspaceCheck("caller_or_receipt_binding_mismatch")
     const firstRead =
       beforeRead.matched && context.targetIdentity
@@ -122,7 +137,7 @@ export async function verifyRecordedControlledWrite(
           )
         : null
     const afterRead = beforeRead.matched
-      ? await inspectWorkspace(input.plan.workspaceRoot, context)
+      ? await inspectWorkspace(input.plan.workspaceRoot, context, input.repositoryBaseline)
       : unmatchedWorkspaceCheck("pre_read_workspace_mismatch")
     const secondRead =
       afterRead.matched && context.targetIdentity
@@ -134,7 +149,7 @@ export async function verifyRecordedControlledWrite(
           )
         : null
     const beforeIngestion = afterRead.matched
-      ? await inspectWorkspace(input.plan.workspaceRoot, context)
+      ? await inspectWorkspace(input.plan.workspaceRoot, context, input.repositoryBaseline)
       : unmatchedWorkspaceCheck("post_read_workspace_mismatch")
     const snapshot = {
       callerBindingMatched,
@@ -212,20 +227,32 @@ export async function verifyRecordedControlledWrite(
 
 type ReceiptVerificationContext = OperationReceipt["verificationContext"]
 
-async function inspectWorkspace(root: string, context: ReceiptVerificationContext) {
+async function inspectWorkspace(
+  root: string,
+  context: ReceiptVerificationContext,
+  admittedRepositoryBaseline: GitRepositoryBaselineSnapshot | undefined,
+) {
   const report = await scanWorkspace(root, context.preflightLimits)
-  const activation = checkWorkspaceActivation(report)
+  const gitContext = "schemaVersion" in context && context.schemaVersion === 2 ? context : null
+  const repository = gitContext ? await captureGitRepositoryBaseline(root, admittedRepositoryBaseline?.limits) : null
+  const repositoryMatched =
+    gitContext === null ||
+    (repository?.status === "complete" &&
+      repository.snapshot.snapshotDigest === gitContext.postEffectRepositorySnapshotDigest)
+  const activation = gitContext ? { allowed: repositoryMatched } : checkWorkspaceActivation(report)
   const matched =
     report.completeness === "complete" &&
     report.securityDigest === context.postEffectWorkspaceDigest &&
     report.identity !== null &&
     sameIdentity(report.identity, context.workspaceIdentity) &&
-    activation.allowed
+    activation.allowed &&
+    repositoryMatched
   return {
     matched,
     securityDigest: report.securityDigest,
     identity: report.identity,
     activationGuard: activation.allowed ? ("allowed" as const) : ("blocked" as const),
+    repositorySnapshotDigest: repository?.status === "complete" ? repository.snapshot.snapshotDigest : null,
     blockers: report.blockers,
   }
 }
@@ -236,6 +263,7 @@ function unmatchedWorkspaceCheck(reason: string) {
     securityDigest: null,
     identity: null,
     activationGuard: "blocked" as const,
+    repositorySnapshotDigest: null,
     blockers: [reason],
   }
 }

@@ -7,6 +7,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./preflight": "./src/workspace-preflight.ts",
+    "./session-authority": "./src/session-authority.ts",
     "./controlled-write-plan": "./src/controlled-write-plan.ts",
     "./controlled-write": "./src/controlled-write.ts",
     "./operation-ledger": "./src/operation-ledger.ts",
@@ -20,6 +21,7 @@
   "dependencies": {
     "@astra/domain": "workspace:*",
     "@astra/executor": "workspace:*",
+    "@astra/git": "workspace:*",
     "@astra/ledger": "workspace:*",
     "@effect/sql-sqlite-bun": "catalog:",
     "effect": "catalog:"

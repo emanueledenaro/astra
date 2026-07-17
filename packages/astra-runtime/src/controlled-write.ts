@@ -4,7 +4,7 @@ import { constants } from "node:fs"
 import { lstat, open, type FileHandle } from "node:fs/promises"
 import { join } from "node:path"
 import { demoMarkerName, type ControlledWritePlan } from "./controlled-write-plan"
-import { revalidateWorkspaceSnapshot } from "./workspace-preflight"
+import { revalidateWorkspacePreflight } from "./workspace-preflight"
 
 export type ControlledWriteReceipt = Readonly<{
   path: string
@@ -33,6 +33,10 @@ export type EffectAuthorityCheck = () => Promise<
   Readonly<{ allowed: true }> | Readonly<{ allowed: false; reason: string }>
 >
 
+export type RepositoryBaselineCheck = () => Promise<
+  Readonly<{ matched: true }> | Readonly<{ matched: false; reason: string }>
+>
+
 /**
  * Revalidates the exact preflight snapshot before exposing the host effect.
  * The returned attempt is single-purpose and create-only.
@@ -41,13 +45,16 @@ export async function prepareControlledWrite(
   plan: ControlledWritePlan,
   trustedReport: WorkspaceTrustReport,
   authorizeEffect: EffectAuthorityCheck,
+  revalidateRepository?: RepositoryBaselineCheck,
 ): Promise<PreparedControlledWrite> {
   if (plan.relativePath !== demoMarkerName || plan.workspaceRoot !== trustedReport.root) {
     return { prepared: false, reason: "plan_scope_mismatch" }
   }
 
-  const current = await revalidateWorkspaceSnapshot(trustedReport)
+  const current = await revalidateWorkspacePreflight(trustedReport)
   if (!current.matched) return { prepared: false, reason: current.reason }
+  const repository = await checkRepositoryBoundary(trustedReport, revalidateRepository)
+  if (!repository.matched) return { prepared: false, reason: repository.reason }
   const expectedIdentity = trustedReport.identity
   if (!expectedIdentity) return { prepared: false, reason: "workspace_identity_unavailable" }
 
@@ -62,17 +69,31 @@ export async function prepareControlledWrite(
     async execute() {
       if (consumed) return { status: "failed_without_effect", reason: "attempt_already_consumed" }
       consumed = true
-      const revalidation = await revalidateWorkspaceSnapshot(trustedReport)
+      const revalidation = await revalidateWorkspacePreflight(trustedReport)
       if (!revalidation.matched) {
-        const gitMetadataAppeared = revalidation.report.surfaces.some((surface) => surface.kind === "git_metadata")
+        const gitMetadataAppeared =
+          !trustedReport.surfaces.some((surface) => surface.kind === "git_metadata") &&
+          revalidation.report.surfaces.some((surface) => surface.kind === "git_metadata")
         return {
           status: "failed_without_effect",
           reason: gitMetadataAppeared ? "git_baseline_not_inspected" : revalidation.reason,
         }
       }
+      const repository = await checkRepositoryBoundary(trustedReport, revalidateRepository)
+      if (!repository.matched) return { status: "failed_without_effect", reason: repository.reason }
       return executeCreateOnlyWrite(plan, target, expectedIdentity, authorizeEffect)
     },
   }
+}
+
+async function checkRepositoryBoundary(
+  report: WorkspaceTrustReport,
+  revalidateRepository: RepositoryBaselineCheck | undefined,
+) {
+  const gitWorkspace = report.surfaces.some((surface) => surface.kind === "git_metadata")
+  if (!gitWorkspace) return { matched: true as const }
+  if (!revalidateRepository) return { matched: false as const, reason: "git_baseline_not_inspected" }
+  return revalidateRepository()
 }
 
 export async function verifyControlledWrite(

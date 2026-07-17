@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { constants } from "node:fs"
 import { access, lstat, open } from "node:fs/promises"
 import { join } from "node:path"
+import type { GitRepositoryBaselineSnapshot } from "@astra/domain/git-repository-baseline"
 import {
   parseOperationEffectUncertainty,
   parseOperationReceipt,
@@ -10,6 +11,7 @@ import {
 } from "@astra/domain/operation-contract"
 import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
 import type { OperationRecord } from "@astra/ledger"
+import { captureGitRepositoryBaseline, revalidateGitRepositoryBaseline } from "@astra/git"
 import { Effect } from "effect"
 import { prepareControlledWrite, type ControlledWriteResult } from "./controlled-write"
 import type { ControlledWritePlan } from "./controlled-write-plan"
@@ -46,6 +48,7 @@ export type ExecuteApprovedControlledWriteInput = Readonly<{
   spoolFilename: string
   plan: ControlledWritePlan
   report: WorkspaceTrustReport
+  repositoryBaseline?: GitRepositoryBaselineSnapshot
   policyAskedAt: string
   approvalGrantedAt: string
   recordingStartedAt: string
@@ -88,8 +91,22 @@ export async function executeApprovedControlledWrite(
   dependencies: ControlledWriteCoordinatorDependencies = {},
 ): Promise<DurableControlledWriteResult> {
   try {
-    await prepareOperationStateFiles(input.report.root, input.ledgerFilename, input.spoolFilename)
     const facts = makeApprovedControlledWriteFacts(input)
+    if (await exists(input.ledgerFilename)) {
+      await prepareOperationStateFiles(input.report.root, input.ledgerFilename, input.spoolFilename)
+      const existingClaim = await runWithLedger(input.ledgerFilename, (ledger) =>
+        Effect.gen(function* () {
+          yield* ledger.initialize()
+          return (yield* ledger.getDispatchSnapshot(facts.dispatchRequestID))?.claim ?? null
+        }),
+      )
+      if (existingClaim) return recoverApprovedControlledWrite(input, dependencies)
+    }
+    const admissionBaseline = await checkRepositoryBaseline(input, facts.repositorySnapshotDigest)
+    if (!admissionBaseline.matched) {
+      throw new ControlledWriteCoordinationError("invalid_input", admissionBaseline.reason)
+    }
+    await prepareOperationStateFiles(input.report.root, input.ledgerFilename, input.spoolFilename)
     const now = dependencies.now ?? Date.now
     const claimStartedAt = now()
     const claimed = await runWithLedger(input.ledgerFilename, (ledger) =>
@@ -128,32 +145,39 @@ export async function executeApprovedControlledWrite(
     await dependencies.injectFault?.("after_claim_before_effect")
 
     const startedAt = new Date(now()).toISOString()
-    const prepared = await prepareControlledWrite(input.plan, input.report, async () => {
-      await dependencies.beforeEffectBoundary?.()
-      const validation = await runWithCoordinatorLedger(
-        input.ledgerFilename,
-        (ledger) =>
-          Effect.gen(function* () {
-            yield* ledger.initialize()
-            return yield* ledger.validateEffectAuthority({
-              operationID: facts.operationID,
-              dispatchRequestID: facts.dispatchRequestID,
-              attemptID: facts.attemptID,
-              capabilityGrantID: facts.capabilityGrantID,
-              executorClaimID: facts.executorClaimID,
-              fencingToken: claimed.claim.fencingToken,
-              executor: controlledWriteExecutor,
-              adapterDigest: controlledWriteAdapterDigest,
-              baselineDigest: input.report.securityDigest!,
-              minimumRemainingLeaseMilliseconds: minimumEffectLeaseMilliseconds,
-            })
-          }),
-        () => new Date(now()).toISOString(),
-      )
-      return validation.allowed
-        ? { allowed: true as const }
-        : { allowed: false as const, reason: `effect_authority_${validation.reason}` }
-    })
+    const prepared = await prepareControlledWrite(
+      input.plan,
+      input.report,
+      async () => {
+        await dependencies.beforeEffectBoundary?.()
+        const repository = await checkRepositoryBaseline(input, facts.repositorySnapshotDigest)
+        if (!repository.matched) return { allowed: false as const, reason: repository.reason }
+        const validation = await runWithCoordinatorLedger(
+          input.ledgerFilename,
+          (ledger) =>
+            Effect.gen(function* () {
+              yield* ledger.initialize()
+              return yield* ledger.validateEffectAuthority({
+                operationID: facts.operationID,
+                dispatchRequestID: facts.dispatchRequestID,
+                attemptID: facts.attemptID,
+                capabilityGrantID: facts.capabilityGrantID,
+                executorClaimID: facts.executorClaimID,
+                fencingToken: claimed.claim.fencingToken,
+                executor: controlledWriteExecutor,
+                adapterDigest: controlledWriteAdapterDigest,
+                baselineDigest: facts.baselineTrustDigest,
+                minimumRemainingLeaseMilliseconds: minimumEffectLeaseMilliseconds,
+              })
+            }),
+          () => new Date(now()).toISOString(),
+        )
+        return validation.allowed
+          ? { allowed: true as const }
+          : { allowed: false as const, reason: `effect_authority_${validation.reason}` }
+      },
+      () => checkRepositoryBaseline(input, facts.repositorySnapshotDigest),
+    )
     const effect = prepared.prepared
       ? await prepared.execute()
       : ({ status: "failed_without_effect", reason: prepared.reason } as const)
@@ -172,6 +196,7 @@ export async function executeApprovedControlledWrite(
     }
 
     const postEffectReport = await scanWorkspace(input.report.root, input.report.limits)
+    const postEffectRepositoryBaseline = await capturePostEffectRepositoryBaseline(input)
     const receipt = makeReceipt(
       input.plan,
       input.report,
@@ -181,6 +206,8 @@ export async function executeApprovedControlledWrite(
       startedAt,
       endedAt,
       effect,
+      facts.repositorySnapshotDigest,
+      postEffectRepositoryBaseline,
     )
     await runWithReceiptSpool(input.spoolFilename, (spool) =>
       Effect.gen(function* () {
@@ -391,11 +418,16 @@ function makeReceipt(
   startedAt: string,
   endedAt: string,
   effect: ControlledWriteResult,
+  admittedRepositorySnapshotDigest: string | null,
+  postEffectRepositoryBaseline: GitRepositoryBaselineSnapshot | null,
 ) {
   if (!admittedReport.identity || !admittedReport.securityDigest) {
     throw new TypeError("The admitted workspace baseline is incomplete")
   }
-  const activation = checkWorkspaceActivation(postEffectReport)
+  const gitWorkspace = isGitWorkspace(admittedReport)
+  const activation = gitWorkspace
+    ? { allowed: postEffectRepositoryBaseline !== null }
+    : checkWorkspaceActivation(postEffectReport)
   const targetIdentity = "receipt" in effect ? effect.receipt.targetIdentity : null
   const contextReady =
     postEffectReport.completeness === "complete" &&
@@ -403,6 +435,7 @@ function makeReceipt(
     postEffectReport.identity !== null &&
     sameIdentity(admittedReport.identity, postEffectReport.identity) &&
     activation.allowed &&
+    (!gitWorkspace || admittedRepositorySnapshotDigest !== null) &&
     (effect.status !== "effect_observed" || targetIdentity !== null)
   const observation: OperationReceipt["observation"] =
     effect.status === "effect_observed" && contextReady
@@ -431,14 +464,27 @@ function makeReceipt(
     startedAt,
     endedAt,
     observation,
-    verificationContext: {
-      admittedBaselineDigest: admittedReport.securityDigest,
-      postEffectWorkspaceDigest: postEffectReport.securityDigest,
-      workspaceIdentity: admittedReport.identity,
-      targetIdentity,
-      preflightLimits: admittedReport.limits,
-      activationGuard: activation.allowed ? "allowed" : "blocked",
-    },
+    verificationContext:
+      gitWorkspace && admittedRepositorySnapshotDigest
+        ? {
+            schemaVersion: 2,
+            admittedBaselineDigest: facts.baselineTrustDigest,
+            admittedRepositorySnapshotDigest,
+            postEffectWorkspaceDigest: postEffectReport.securityDigest,
+            postEffectRepositorySnapshotDigest: postEffectRepositoryBaseline?.snapshotDigest ?? null,
+            workspaceIdentity: admittedReport.identity,
+            targetIdentity,
+            preflightLimits: admittedReport.limits,
+            activationGuard: activation.allowed ? "allowed" : "blocked",
+          }
+        : {
+            admittedBaselineDigest: facts.baselineTrustDigest,
+            postEffectWorkspaceDigest: postEffectReport.securityDigest,
+            workspaceIdentity: admittedReport.identity,
+            targetIdentity,
+            preflightLimits: admittedReport.limits,
+            activationGuard: activation.allowed ? "allowed" : "blocked",
+          },
     output: {
       digest: digest(canonicalJson(effect)),
       bytes,
@@ -448,6 +494,40 @@ function makeReceipt(
           : `Controlled write ${effect.status}`,
     },
   })
+}
+
+async function checkRepositoryBaseline(
+  input: ExecuteApprovedControlledWriteInput,
+  admittedRepositorySnapshotDigest: string | null,
+) {
+  if (!isGitWorkspace(input.report)) return { matched: true as const }
+  if (!input.repositoryBaseline) return { matched: false as const, reason: "git_baseline_not_inspected" }
+  if (input.repositoryBaseline.snapshotDigest !== admittedRepositorySnapshotDigest) {
+    return { matched: false as const, reason: "git_baseline_binding_mismatch" }
+  }
+  const result = await revalidateGitRepositoryBaseline(input.report.root, input.repositoryBaseline)
+  if (
+    result.status === "current" &&
+    result.expectedSnapshotDigest === input.repositoryBaseline.snapshotDigest &&
+    result.currentSnapshotDigest === input.repositoryBaseline.snapshotDigest
+  ) {
+    return { matched: true as const }
+  }
+  if (result.status === "stale") return { matched: false as const, reason: "git_baseline_stale" }
+  if (result.status === "blocked") {
+    return { matched: false as const, reason: `git_baseline_blocked:${result.reason}` }
+  }
+  return { matched: false as const, reason: "git_baseline_binding_mismatch" }
+}
+
+async function capturePostEffectRepositoryBaseline(input: ExecuteApprovedControlledWriteInput) {
+  if (!isGitWorkspace(input.report)) return null
+  const result = await captureGitRepositoryBaseline(input.report.root, input.repositoryBaseline?.limits)
+  return result.status === "complete" ? result.snapshot : null
+}
+
+function isGitWorkspace(report: WorkspaceTrustReport) {
+  return report.surfaces.some((surface) => surface.kind === "git_metadata")
 }
 
 async function observeRecoveryTarget(

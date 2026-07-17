@@ -372,6 +372,31 @@ describe("Operation contract decoding", () => {
       ok: false,
       issue: { path: "$.verified", reason: "unexpected_field" },
     })
+
+    const gitReceipt = {
+      ...receipt,
+      verificationContext: {
+        schemaVersion: 2,
+        admittedBaselineDigest: digest,
+        admittedRepositorySnapshotDigest: digest,
+        postEffectWorkspaceDigest: nextDigest,
+        postEffectRepositorySnapshotDigest: nextDigest,
+        workspaceIdentity: { device: "1", inode: "2" },
+        targetIdentity: { device: "1", inode: "3" },
+        preflightLimits: { maxEntries: 128, maxFileBytes: 65536, maxTotalBytes: 262144, maxDurationMs: 1000 },
+        activationGuard: "allowed",
+      },
+    }
+    expect(parseOperationReceipt(gitReceipt)).toMatchObject({ ok: true, value: gitReceipt })
+    expect(
+      parseOperationReceipt({
+        ...gitReceipt,
+        verificationContext: { ...gitReceipt.verificationContext, schemaVersion: 1 },
+      }),
+    ).toMatchObject({
+      ok: false,
+      issue: { path: "$.verificationContext.schemaVersion", reason: "unsupported_schema_version" },
+    })
   })
 
   test("requires snapshot-bound criterion evidence and never accepts verified as a criterion", () => {

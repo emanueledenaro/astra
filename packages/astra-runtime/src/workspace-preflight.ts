@@ -155,6 +155,18 @@ export async function scanWorkspace(
 }
 
 export async function revalidateWorkspaceSnapshot(report: WorkspaceTrustReport): Promise<WorkspaceRevalidation> {
+  const current = await revalidateWorkspacePreflight(report)
+  if (!current.matched) return current
+  const activation = checkWorkspaceActivation(current.report)
+  if (!activation.allowed) {
+    const reason = activation.reason === "preflight_incomplete" ? "preflight_blocked" : activation.reason
+    return { matched: false, reason, report: current.report }
+  }
+  return current
+}
+
+/** Revalidates bounded static facts without granting workspace activation. */
+export async function revalidateWorkspacePreflight(report: WorkspaceTrustReport): Promise<WorkspaceRevalidation> {
   const current = await scanWorkspace(report.root, report.limits)
   if (current.completeness !== "complete" || !current.identity || !current.securityDigest) {
     return { matched: false, reason: "preflight_blocked", report: current }
@@ -164,11 +176,6 @@ export async function revalidateWorkspaceSnapshot(report: WorkspaceTrustReport):
   }
   if (report.securityDigest !== current.securityDigest) {
     return { matched: false, reason: "security_digest_changed", report: current }
-  }
-  const activation = checkWorkspaceActivation(current)
-  if (!activation.allowed) {
-    const reason = activation.reason === "preflight_incomplete" ? "preflight_blocked" : activation.reason
-    return { matched: false, reason, report: current }
   }
   return { matched: true, report: current }
 }

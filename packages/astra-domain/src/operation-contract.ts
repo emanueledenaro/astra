@@ -177,20 +177,41 @@ export type OperationReceipt = Readonly<{
     | Readonly<{ kind: "effect_observed"; beforeDigest: ContentDigest | null; afterDigest: ContentDigest }>
     | Readonly<{ kind: "no_effect_proved"; proofDigest: ContentDigest }>
     | Readonly<{ kind: "effect_unknown"; observationDigest: ContentDigest }>
-  verificationContext: Readonly<{
-    admittedBaselineDigest: ContentDigest
-    postEffectWorkspaceDigest: ContentDigest | null
-    workspaceIdentity: Readonly<{ device: string; inode: string }>
-    targetIdentity: Readonly<{ device: string; inode: string }> | null
-    preflightLimits: Readonly<{
-      maxEntries: number
-      maxFileBytes: number
-      maxTotalBytes: number
-      maxDurationMs: number
-    }>
-    activationGuard: "allowed" | "blocked"
-  }>
+  verificationContext: ReceiptVerificationContext
   output: Readonly<{ digest: ContentDigest; bytes: number; preview: string }>
+}>
+
+export type ReceiptVerificationContext = LegacyReceiptVerificationContext | GitReceiptVerificationContext
+
+export type LegacyReceiptVerificationContext = Readonly<{
+  admittedBaselineDigest: ContentDigest
+  postEffectWorkspaceDigest: ContentDigest | null
+  workspaceIdentity: Readonly<{ device: string; inode: string }>
+  targetIdentity: Readonly<{ device: string; inode: string }> | null
+  preflightLimits: Readonly<{
+    maxEntries: number
+    maxFileBytes: number
+    maxTotalBytes: number
+    maxDurationMs: number
+  }>
+  activationGuard: "allowed" | "blocked"
+}>
+
+export type GitReceiptVerificationContext = Readonly<{
+  schemaVersion: 2
+  admittedBaselineDigest: ContentDigest
+  admittedRepositorySnapshotDigest: ContentDigest
+  postEffectWorkspaceDigest: ContentDigest | null
+  postEffectRepositorySnapshotDigest: ContentDigest | null
+  workspaceIdentity: Readonly<{ device: string; inode: string }>
+  targetIdentity: Readonly<{ device: string; inode: string }> | null
+  preflightLimits: Readonly<{
+    maxEntries: number
+    maxFileBytes: number
+    maxTotalBytes: number
+    maxDurationMs: number
+  }>
+  activationGuard: "allowed" | "blocked"
 }>
 
 export type OperationEvidence = Readonly<{
@@ -1300,6 +1321,24 @@ function parseReceiptVerificationContext(
   input: unknown,
   path: string,
 ): OperationContractParseResult<OperationReceipt["verificationContext"]> {
+  const broad = parseExactRecord(
+    input,
+    [
+      "schemaVersion",
+      "admittedBaselineDigest",
+      "admittedRepositorySnapshotDigest",
+      "postEffectWorkspaceDigest",
+      "postEffectRepositorySnapshotDigest",
+      "workspaceIdentity",
+      "targetIdentity",
+      "preflightLimits",
+      "activationGuard",
+    ],
+    path,
+  )
+  if (!broad.ok) return broad
+  if (Object.hasOwn(broad.value, "schemaVersion")) return parseGitReceiptVerificationContext(input, path)
+
   const record = parseExactRecord(
     input,
     [
@@ -1350,6 +1389,89 @@ function parseReceiptVerificationContext(
   return parsed({
     admittedBaselineDigest: admittedBaselineDigest.value,
     postEffectWorkspaceDigest: postEffectWorkspaceDigest.value,
+    workspaceIdentity: workspaceIdentity.value,
+    targetIdentity: targetIdentity.value,
+    preflightLimits: {
+      maxEntries: maxEntries.value,
+      maxFileBytes: maxFileBytes.value,
+      maxTotalBytes: maxTotalBytes.value,
+      maxDurationMs: maxDurationMs.value,
+    },
+    activationGuard: record.value.activationGuard,
+  })
+}
+
+function parseGitReceiptVerificationContext(
+  input: unknown,
+  path: string,
+): OperationContractParseResult<GitReceiptVerificationContext> {
+  const record = parseExactRecord(
+    input,
+    [
+      "schemaVersion",
+      "admittedBaselineDigest",
+      "admittedRepositorySnapshotDigest",
+      "postEffectWorkspaceDigest",
+      "postEffectRepositorySnapshotDigest",
+      "workspaceIdentity",
+      "targetIdentity",
+      "preflightLimits",
+      "activationGuard",
+    ],
+    path,
+  )
+  if (!record.ok) return record
+  if (record.value.schemaVersion !== 2) return rejected(`${path}.schemaVersion`, "unsupported_schema_version")
+  const admittedBaselineDigest = parseDigest<ContentDigest>(
+    record.value.admittedBaselineDigest,
+    `${path}.admittedBaselineDigest`,
+  )
+  if (!admittedBaselineDigest.ok) return admittedBaselineDigest
+  const admittedRepositorySnapshotDigest = parseDigest<ContentDigest>(
+    record.value.admittedRepositorySnapshotDigest,
+    `${path}.admittedRepositorySnapshotDigest`,
+  )
+  if (!admittedRepositorySnapshotDigest.ok) return admittedRepositorySnapshotDigest
+  const postEffectWorkspaceDigest = parseNullableDigest(
+    record.value.postEffectWorkspaceDigest,
+    `${path}.postEffectWorkspaceDigest`,
+  )
+  if (!postEffectWorkspaceDigest.ok) return postEffectWorkspaceDigest
+  const postEffectRepositorySnapshotDigest = parseNullableDigest(
+    record.value.postEffectRepositorySnapshotDigest,
+    `${path}.postEffectRepositorySnapshotDigest`,
+  )
+  if (!postEffectRepositorySnapshotDigest.ok) return postEffectRepositorySnapshotDigest
+  const workspaceIdentity = parseWorkspaceIdentity(record.value.workspaceIdentity, `${path}.workspaceIdentity`)
+  if (!workspaceIdentity.ok) return workspaceIdentity
+  const targetIdentity =
+    record.value.targetIdentity === null
+      ? parsed(null)
+      : parseWorkspaceIdentity(record.value.targetIdentity, `${path}.targetIdentity`)
+  if (!targetIdentity.ok) return targetIdentity
+  const limitsRecord = parseExactRecord(
+    record.value.preflightLimits,
+    ["maxEntries", "maxFileBytes", "maxTotalBytes", "maxDurationMs"],
+    `${path}.preflightLimits`,
+  )
+  if (!limitsRecord.ok) return limitsRecord
+  const maxEntries = parsePositiveInteger(limitsRecord.value.maxEntries, `${path}.preflightLimits.maxEntries`)
+  if (!maxEntries.ok) return maxEntries
+  const maxFileBytes = parsePositiveInteger(limitsRecord.value.maxFileBytes, `${path}.preflightLimits.maxFileBytes`)
+  if (!maxFileBytes.ok) return maxFileBytes
+  const maxTotalBytes = parsePositiveInteger(limitsRecord.value.maxTotalBytes, `${path}.preflightLimits.maxTotalBytes`)
+  if (!maxTotalBytes.ok) return maxTotalBytes
+  const maxDurationMs = parsePositiveInteger(limitsRecord.value.maxDurationMs, `${path}.preflightLimits.maxDurationMs`)
+  if (!maxDurationMs.ok) return maxDurationMs
+  if (record.value.activationGuard !== "allowed" && record.value.activationGuard !== "blocked") {
+    return rejected(`${path}.activationGuard`, "unsupported_activation_guard")
+  }
+  return parsed({
+    schemaVersion: 2,
+    admittedBaselineDigest: admittedBaselineDigest.value,
+    admittedRepositorySnapshotDigest: admittedRepositorySnapshotDigest.value,
+    postEffectWorkspaceDigest: postEffectWorkspaceDigest.value,
+    postEffectRepositorySnapshotDigest: postEffectRepositorySnapshotDigest.value,
     workspaceIdentity: workspaceIdentity.value,
     targetIdentity: targetIdentity.value,
     preflightLimits: {

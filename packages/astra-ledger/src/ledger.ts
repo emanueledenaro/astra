@@ -24,6 +24,7 @@ import {
   type OperationReceipt,
   type OperationVerificationPlan,
   type OperationVerificationStart,
+  type WorkspaceBaseline,
 } from "@astra/domain/operation-contract"
 import {
   operationStates,
@@ -1022,7 +1023,8 @@ function ingestReceipt(
             receipt.verificationContext.admittedBaselineDigest !== admittedBaseline.value.trustDigest ||
             receipt.verificationContext.admittedBaselineDigest !== snapshot.request.baselineDigest ||
             receipt.verificationContext.workspaceIdentity.device !== admittedBaseline.value.workspaceIdentity.device ||
-            receipt.verificationContext.workspaceIdentity.inode !== admittedBaseline.value.workspaceIdentity.inode
+            receipt.verificationContext.workspaceIdentity.inode !== admittedBaseline.value.workspaceIdentity.inode ||
+            !receiptRepositoryBindingMatches(receipt.verificationContext, admittedBaseline.value.repository, false)
           ) {
             return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "binding_mismatch"))
           }
@@ -2134,6 +2136,7 @@ function loadAndVerifyOperation(
     let baselineTrustDigest: string | null = null
     let baselineAdapterDigest: string | null = null
     let baselineWorkspaceIdentity: Readonly<{ device: string; inode: string }> | null = null
+    let baselineRepository: WorkspaceBaseline["repository"] | null = null
     let attemptID: AttemptID | null = null
     let capabilityGrantID: string | null = null
     let authorityExpiresAt: string | null = null
@@ -2176,6 +2179,7 @@ function loadAndVerifyOperation(
         baselineTrustDigest = lifecycle.baselineTrustDigest
         baselineAdapterDigest = lifecycle.baselineAdapterDigest
         baselineWorkspaceIdentity = decodedBaseline.value.workspaceIdentity
+        baselineRepository = decodedBaseline.value.repository
         effectClass = lifecycle.effectClass
         resources = lifecycle.resources
         verificationPlan = lifecycle.verificationPlan
@@ -2273,7 +2277,8 @@ function loadAndVerifyOperation(
           digestEvent({ resources: lifecycle.receipt.resources }) !== digestEvent({ resources }) ||
           lifecycle.receipt.verificationContext.admittedBaselineDigest !== baselineTrustDigest ||
           lifecycle.receipt.verificationContext.workspaceIdentity.device !== baselineWorkspaceIdentity?.device ||
-          lifecycle.receipt.verificationContext.workspaceIdentity.inode !== baselineWorkspaceIdentity?.inode)
+          lifecycle.receipt.verificationContext.workspaceIdentity.inode !== baselineWorkspaceIdentity?.inode ||
+          !receiptRepositoryBindingMatches(lifecycle.receipt.verificationContext, baselineRepository, true))
       ) {
         return yield* Effect.fail(new LedgerCorruptionError(`Operation ${operationID} receipt binding is inconsistent`))
       }
@@ -2414,6 +2419,18 @@ function loadAndVerifyOperation(
     }
     return { operation, events }
   }).pipe(Effect.mapError(mapStorageError("Failed to replay operation events")))
+}
+
+function receiptRepositoryBindingMatches(
+  context: OperationReceipt["verificationContext"],
+  repository: WorkspaceBaseline["repository"] | null,
+  allowLegacyGit: boolean,
+) {
+  if (!repository) return false
+  const gitContext = "schemaVersion" in context && context.schemaVersion === 2
+  if (repository.kind === "non_git") return !gitContext
+  if (!("snapshotDigest" in repository)) return allowLegacyGit && !gitContext
+  return gitContext && context.admittedRepositorySnapshotDigest === repository.snapshotDigest
 }
 
 function parseAndDigestEvent(
