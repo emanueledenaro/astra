@@ -46,6 +46,7 @@ test("selects by opaque candidate ID and renders exact parent-authorized resourc
     const initial = await app.render.waitForFrame((frame) => frame.includes("IDLE • NO REQUEST • NO EFFECT"))
     expect(initial).toContain("HOST EXECUTION — NO SANDBOX")
     expect(initial).toContain("Stage selected")
+    expect(app.command("astra.git.stage.open")?.slashName).toBe("git-stage")
 
     app.dispatch("astra.git.stage.inventory")
     const inventory = await app.render.waitForFrame((frame) => frame.includes("SELECT CANDIDATES • NO EFFECT"))
@@ -174,6 +175,59 @@ test("requires a local reject gesture and reports no Git effect", async () => {
   }
 })
 
+test("escape from a prepared proposal durably rejects before leaving", async () => {
+  let resolveDenial!: (value: ReturnType<typeof deniedResult>) => void
+  const denial = new Promise<ReturnType<typeof deniedResult>>((resolve) => {
+    resolveDenial = resolve
+  })
+  const calls: string[] = []
+  const client = {
+    inventory: () => Promise.resolve(inventoryResult()),
+    prepare: () => Promise.resolve(preparedResult()),
+    decide(id, decision) {
+      calls.push(`${id}:${decision}`)
+      return denial
+    },
+    dispose() {},
+  } satisfies AstraGitStageClient
+  const app = await renderSurface(activeAuthority, client)
+  try {
+    await app.render.waitForFrame((frame) => frame.includes("IDLE • NO REQUEST • NO EFFECT"))
+    app.dispatch("astra.git.stage.inventory")
+    await app.render.waitForFrame((frame) => frame.includes("SELECT CANDIDATES • NO EFFECT"))
+    app.pressLocal(" ")
+    app.pressLocal("p")
+    await app.render.waitForFrame((frame) => frame.includes("AWAITING APPROVE OR REJECT"))
+    app.dispatch("astra.git.stage.close")
+    await app.render.waitForFrame((frame) => frame.includes("DECISION QUEUED • NOT VERIFIED"))
+    expect(app.route().name).toBe("astra-git-stage")
+    expect(calls).toEqual([`${proposalID}:reject`])
+    resolveDenial(deniedResult())
+    await waitUntil(() => app.route().name === "session")
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
+function deniedResult() {
+  return {
+    schemaVersion: 1,
+    requestId: "b0000000-0000-4000-8000-00000000000b",
+    proposalID,
+    proposalDigest: stagePreview.proposalDigest,
+    status: "denied_without_git_effect",
+    operationID: "60000000-0000-4000-8000-000000000006",
+  } as const
+}
+
+async function waitUntil(predicate: () => boolean) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return
+    await Bun.sleep(5)
+  }
+  throw new Error("Timed out waiting for the route transition")
+}
+
 async function renderSurface(authority: AstraSessionAuthority, client: AstraGitStageClient) {
   const commands = new Map<
     string,
@@ -228,5 +282,7 @@ async function renderSurface(authority: AstraSessionAuthority, client: AstraGitS
     pressLocal: (key: string) => render.mockInput.pressKey(key),
     pressArrow: (direction: "up" | "down") => render.mockInput.pressArrow(direction),
     hasCommand: (command: string) => commands.has(command),
+    command: (command: string) => commands.get(command),
+    route: () => current,
   }
 }

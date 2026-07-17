@@ -7,6 +7,7 @@ import { expect, test } from "bun:test"
 import { parseGitControlInspectionSummary } from "@astra/domain/git-control-inspection"
 import type { AstraControlledWriteControl } from "../src/controlled-write-control"
 import type { AstraGitUnstageControl } from "../src/git-unstage-control"
+import type { AstraGitStageControl } from "../src/git-stage-control"
 import type { AstraSkillActivationControl } from "../src/skill-activation-control"
 import { startAstraTuiControlServer, type AstraTuiControlServer } from "../src/tui-control-server"
 
@@ -597,6 +598,48 @@ test("routes Git Unstage through its dedicated authenticated handler exactly onc
   }
 })
 
+test("routes Git Stage through its dedicated authenticated handler before acceptance", async () => {
+  const fixture = await makeFixture()
+  let inventories = 0
+  const gitStageControl = {
+    async inventory(requestId) {
+      inventories++
+      return { schemaVersion: 1, requestId, status: "blocked", reason: "test_complete" }
+    },
+    async prepare(requestId) {
+      return { schemaVersion: 1, requestId, status: "blocked", reason: "not_used" }
+    },
+    async decide(requestId, proposalID) {
+      return { schemaVersion: 1, requestId, proposalID, status: "blocked", reason: "not_used" }
+    },
+  } satisfies AstraGitStageControl
+  const control = await startAstraTuiControlServer({ ...fixture.input, gitStageControl })
+  const firstRequest = gitStageRequest(control)
+
+  try {
+    expect(await sendRequest(control, { ...gitStageRequest(control), token: "x".repeat(43) })).toEqual([])
+    expect(await sendRequest(control, { ...gitStageRequest(control), workspaceRoot: fixture.root })).toEqual([])
+    expect(inventories).toBe(0)
+
+    const first = await sendRequest(control, firstRequest)
+    expect(first.map((message) => message.type)).toEqual(["accepted", "git-stage.terminal"])
+    expect(first.filter((message) => message.type === "accepted")).toHaveLength(1)
+    expect(first[1]).toMatchObject({
+      requestId: firstRequest.requestId,
+      result: { status: "blocked", reason: "test_complete" },
+    })
+    expect(inventories).toBe(1)
+
+    const replay = await sendRequest(control, firstRequest)
+    expect(replay.map((message) => message.type)).toEqual(["accepted", "git-stage.terminal"])
+    expect(replay[1]).toMatchObject({ result: { status: "blocked", reason: "request_replayed" } })
+    expect(inventories).toBe(1)
+  } finally {
+    await control.close()
+    await fixture.close()
+  }
+})
+
 async function makeFixture() {
   const directory = await mkdtemp(join(tmpdir(), "astra-control-test-"))
   const root = join(directory, "workspace")
@@ -645,6 +688,16 @@ function gitUnstageRequest(control: AstraTuiControlServer) {
   return {
     schemaVersion: 1,
     method: "git-unstage.prepare",
+    requestId: randomUUID(),
+    sessionID: control.sessionID,
+    token: control.token,
+  } as const
+}
+
+function gitStageRequest(control: AstraTuiControlServer) {
+  return {
+    schemaVersion: 1,
+    method: "git-stage.inventory",
     requestId: randomUUID(),
     sessionID: control.sessionID,
     token: control.token,

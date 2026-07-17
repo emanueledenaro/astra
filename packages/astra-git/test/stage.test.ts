@@ -191,6 +191,64 @@ describe("bounded Git stage selected adapter", () => {
     expect(await gitText(fixture.root, "diff", "--name-only")).toBe("tracked.txt\n")
   }, 45_000)
 
+  test("stages a file whose blob already exists in the repository object store", async () => {
+    const fixture = await preparedFixture("untracked.txt", { existingObjectReuse: true })
+    const execution = await executeGitStageSelected(
+      {
+        preview: fixture.preview,
+        inventory: fixture.inventory,
+        expectedBaseline: fixture.baseline,
+        decision: decision(fixture.preview, "approved"),
+      },
+      productionDependencies(),
+    )
+    expect(execution.status).toBe("effect_observed")
+    expect(await gitText(fixture.root, "diff", "--cached", "--name-only")).toBe("untracked.txt\n")
+  }, 45_000)
+
+  test("never observes success for a corrupt existing destination object", async () => {
+    const fixture = await preparedFixture("untracked.txt", { existingObjectReuse: true })
+    const selected = fixture.preview.candidates[0]
+    if (!selected?.objectPath) throw new Error("Missing selected object path")
+    const objectPath = join(fixture.root, selected.objectPath)
+    await chmod(objectPath, 0o600)
+    await writeFile(objectPath, "corrupt loose object")
+
+    const execution = await executeGitStageSelected(
+      {
+        preview: fixture.preview,
+        inventory: fixture.inventory,
+        expectedBaseline: fixture.baseline,
+        decision: decision(fixture.preview, "approved"),
+      },
+      productionDependencies(),
+    )
+
+    expect(execution.status).not.toBe("effect_observed")
+    expect(await gitText(fixture.root, "diff", "--cached", "--name-only")).toBe("")
+    expect(await exists(join(fixture.root, ".git", "index.lock"))).toBeFalse()
+  }, 45_000)
+
+  test("stages a file whose existing blob is available only from a packfile", async () => {
+    const fixture = await preparedFixture("untracked.txt", { existingObjectReuse: true, packExistingObject: true })
+    const selected = fixture.preview.candidates[0]
+    if (!selected?.objectPath) throw new Error("Missing selected object path")
+    expect(await exists(join(fixture.root, selected.objectPath))).toBeFalse()
+
+    const execution = await executeGitStageSelected(
+      {
+        preview: fixture.preview,
+        inventory: fixture.inventory,
+        expectedBaseline: fixture.baseline,
+        decision: decision(fixture.preview, "approved"),
+      },
+      productionDependencies(),
+    )
+
+    expect(execution.status).toBe("effect_observed")
+    expect(await gitText(fixture.root, "diff", "--cached", "--name-only")).toBe("untracked.txt\n")
+  }, 45_000)
+
   test("stages one tracked deletion", async () => {
     const fixture = await preparedFixture("tracked.txt", { deleteTracked: true })
     const dependencies = productionDependencies()
@@ -419,7 +477,10 @@ describe("bounded Git stage selected adapter", () => {
   }, 45_000)
 })
 
-async function preparedFixture(path: string, options: Readonly<{ deleteTracked?: boolean }> = {}) {
+async function preparedFixture(
+  path: string,
+  options: Readonly<{ deleteTracked?: boolean; existingObjectReuse?: boolean; packExistingObject?: boolean }> = {},
+) {
   const fixture = await changedRepository(options)
   const captured = await captureGitStageInventory(fixture.root, fixture.baseline, fixture.inspection)
   if (captured.status !== "ready") throw new Error(captured.reason)
@@ -436,6 +497,8 @@ async function changedRepository(
     attributeSymlink?: boolean
     deleteTracked?: boolean
     hostileFilter?: boolean
+    existingObjectReuse?: boolean
+    packExistingObject?: boolean
     renameTracked?: boolean
     specialTracked?: boolean
   }> = {},
@@ -443,10 +506,14 @@ async function changedRepository(
   const root = await realpath(await mkdtemp(join(tmpdir(), "astra-git-stage-")))
   roots.push(root)
   await git(root, "init", "-b", "main")
-  await writeFile(join(root, "tracked.txt"), "initial\n")
+  await writeFile(join(root, "tracked.txt"), options.existingObjectReuse ? "" : "initial\n")
   if (options.attributes) await writeFile(join(root, ".gitattributes"), options.attributes)
   await git(root, "add", ".")
   await git(root, "-c", "user.name=Astra Test", "-c", "user.email=astra@example.invalid", "commit", "-m", "initial")
+  if (options.packExistingObject) {
+    await git(root, "repack", "-ad")
+    await git(root, "prune-packed")
+  }
   const sentinel = join(root, "filter-ran")
   if (options.hostileFilter) {
     const script = join(root, ".git", "hostile-filter")
@@ -466,8 +533,8 @@ async function changedRepository(
     await rm(join(root, "tracked.txt"))
     await symlink(join(root, ".git", "attribute-target"), join(root, "tracked.txt"))
   } else if (options.deleteTracked) await rm(join(root, "tracked.txt"))
-  else await writeFile(join(root, "tracked.txt"), "selected change\n")
-  await writeFile(join(root, "untracked.txt"), "leave unstaged\n")
+  else if (!options.existingObjectReuse) await writeFile(join(root, "tracked.txt"), "selected change\n")
+  await writeFile(join(root, "untracked.txt"), options.existingObjectReuse ? "" : "leave unstaged\n")
   const captured = await captureGitRepositoryBaseline(root, { timeoutMs })
   const inspection = await inspectGitWorkspace(root, { timeoutMs })
   if (captured.status !== "complete") throw new Error(captured.reason)

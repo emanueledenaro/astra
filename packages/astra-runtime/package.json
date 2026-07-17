@@ -15,6 +15,8 @@
     "./controlled-write-coordinator": "./src/controlled-write-coordinator.ts",
     "./controlled-write-verifier": "./src/controlled-write-verifier.ts",
     "./host-command": "./src/host-command.ts",
+    "./git-stage-coordinator": "./src/git-stage-coordinator.ts",
+    "./git-stage-operation-facts": "./src/git-stage-operation-facts.ts",
     "./git-unstage-coordinator": "./src/git-unstage-coordinator.ts",
     "./extension-inventory-operation": "./src/extension-inventory-operation.ts",
     "./governed-workspace-search": "./src/governed-workspace-search.ts",

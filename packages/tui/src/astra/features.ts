@@ -11,6 +11,8 @@ import { createAstraSkillActivationClient, type AstraSkillActivationClient } fro
 import { registerAstraSkillActivation } from "../feature-plugins/system/astra-skill-activation"
 import { createAstraGitUnstageClient, type AstraGitUnstageClient } from "./git-unstage-client"
 import { registerAstraGitUnstage } from "../feature-plugins/system/astra-git-unstage"
+import { createAstraGitStageClient, type AstraGitStageClient } from "./git-stage-client"
+import { registerAstraGitStage } from "../feature-plugins/system/astra-git-stage"
 import {
   createAstraGovernedWorkspaceSearchClient,
   type AstraGovernedWorkspaceSearchClient,
@@ -29,6 +31,7 @@ export function registerAstraAppFeatures(
   gitUnstageClient?: AstraGitUnstageClient,
   governedWorkspaceSearchClient?: AstraGovernedWorkspaceSearchClient,
   extensionInventoryClient?: AstraExtensionInventoryClient,
+  gitStageClient?: AstraGitStageClient,
 ) {
   registerAstraChat(api, authority, providerClient)
   registerAstraGitControlPlane(
@@ -51,6 +54,17 @@ export function registerAstraAppFeatures(
     authority,
     gitUnstageClient ??
       createAstraGitUnstageClient(process.env, authority.sessionID, {
+        expectedWorkspaceRoot: authority.workspace.root,
+        ...(authority.repositoryBaseline
+          ? { expectedBaselineSnapshotDigest: authority.repositoryBaseline.snapshotDigest }
+          : {}),
+      }),
+  )
+  registerAstraGitStage(
+    api,
+    authority,
+    gitStageClient ??
+      createAstraGitStageClient(process.env, authority.sessionID, {
         expectedWorkspaceRoot: authority.workspace.root,
         ...(authority.repositoryBaseline
           ? { expectedBaselineSnapshotDigest: authority.repositoryBaseline.snapshotDigest }

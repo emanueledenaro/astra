@@ -8,6 +8,7 @@ import {
   type GitControlInspectionSummary,
 } from "@astra/domain/git-control-inspection"
 import { parseGitUnstageControlRequest, type GitUnstageControlRequest } from "@astra/domain/git-unstage-control"
+import { parseGitStageControlRequest, type GitStageControlRequest } from "@astra/domain/git-stage-control"
 import {
   parseWorkspaceSearchControlRequest,
   type WorkspaceSearchControlRequest,
@@ -53,6 +54,9 @@ import { createAstraSkillActivationRegistration, type AstraSkillActivationContro
 import type { AstraGitUnstageControl } from "./git-unstage-control"
 import { createAstraGitUnstageControlHandler } from "./git-unstage-control-handler"
 import { serveAstraGitUnstageControlRequest } from "./git-unstage-control-server-hook"
+import type { AstraGitStageControl } from "./git-stage-control"
+import { createAstraGitStageControlHandler } from "./git-stage-control-handler"
+import { serveAstraGitStageControlRequest } from "./git-stage-control-server-hook"
 import type { AstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
 import { createAstraGovernedWorkspaceSearchControlHandler } from "./governed-workspace-search-control-handler"
 import { serveAstraGovernedWorkspaceSearchControlRequest } from "./governed-workspace-search-control-server-hook"
@@ -60,7 +64,7 @@ import type { AstraExtensionInventoryControl } from "./extension-inventory-contr
 import { createAstraExtensionInventoryControlHandler } from "./extension-inventory-control-handler"
 import { serveAstraExtensionInventoryControlRequest } from "./extension-inventory-control-server-hook"
 
-const requestLimitBytes = 2_048
+const requestLimitBytes = 32 * 1_024
 const maximumRequestsPerSession = 1_024
 const maximumObservedEntries = 10_000
 const defaultInspectionTimeoutMs = 30_000
@@ -82,6 +86,7 @@ type GitInspectRequest = Readonly<{
 
 type ControlRequest =
   | GitInspectRequest
+  | GitStageControlRequest
   | GitUnstageControlRequest
   | WorkspaceSearchControlRequest
   | ControlledWritePrepareRequest
@@ -101,6 +106,7 @@ export type AstraTuiControlServerInput = Readonly<{
   workspaceRoot: string
   sessionID: string
   controlledWriteControl?: AstraControlledWriteControl
+  gitStageControl?: AstraGitStageControl
   gitUnstageControl?: AstraGitUnstageControl
   skillActivationControl?: AstraSkillActivationControl
   governedWorkspaceSearchControl?: AstraGovernedWorkspaceSearchControl
@@ -145,6 +151,9 @@ export async function startAstraTuiControlServer(
     : undefined
   const gitUnstageHandler = input.gitUnstageControl
     ? createAstraGitUnstageControlHandler({ sessionID: input.sessionID, token, control: input.gitUnstageControl })
+    : undefined
+  const gitStageHandler = input.gitStageControl
+    ? createAstraGitStageControlHandler({ sessionID: input.sessionID, token, control: input.gitStageControl })
     : undefined
   const workspaceSearchHandler = input.governedWorkspaceSearchControl
     ? createAstraGovernedWorkspaceSearchControlHandler({
@@ -193,6 +202,15 @@ export async function startAstraTuiControlServer(
           }
           socket.setTimeout(0)
           await serveAstraGitUnstageControlRequest(socket, request, gitUnstageHandler)
+          return
+        }
+        if (isGitStageRequest(request)) {
+          if (!gitStageHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraGitStageControlRequest(socket, request, gitStageHandler)
           return
         }
         if (isExtensionInventoryRequest(request)) {
@@ -339,6 +357,8 @@ function parseRequest(input: string): ControlRequest | null {
   if (!input.endsWith("\n") || input.slice(0, -1).includes("\n")) return null
   try {
     const value: unknown = JSON.parse(input.slice(0, -1))
+    const gitStage = parseGitStageControlRequest(value)
+    if (gitStage.ok) return gitStage.value
     const workspaceSearch = parseWorkspaceSearchControlRequest(value)
     if (workspaceSearch.ok) return workspaceSearch.value
     const extensionInventory = parseExtensionInventoryControlRequest(value)
@@ -383,6 +403,14 @@ function authorized(request: ControlRequest, sessionID: string, token: string) {
 
 function isGitUnstageRequest(request: ControlRequest): request is GitUnstageControlRequest {
   return request.method === "git-unstage.prepare" || request.method === "git-unstage.decide"
+}
+
+function isGitStageRequest(request: ControlRequest): request is GitStageControlRequest {
+  return (
+    request.method === "git-stage.inventory" ||
+    request.method === "git-stage.prepare" ||
+    request.method === "git-stage.decide"
+  )
 }
 
 function isWorkspaceSearchRequest(request: ControlRequest): request is WorkspaceSearchControlRequest {
@@ -939,6 +967,7 @@ function encodeBlockedTerminal(request: ControlRequest, reason: string) {
   if (isWorkspaceSearchRequest(request))
     throw new Error("Workspace search requests are owned by their dedicated handler")
   if (isGitUnstageRequest(request)) throw new Error("Git Unstage requests are owned by their dedicated handler")
+  if (isGitStageRequest(request)) throw new Error("Git Stage requests are owned by their dedicated handler")
   if (isExtensionInventoryRequest(request)) {
     throw new Error("Extension inventory requests are owned by their dedicated handler")
   }

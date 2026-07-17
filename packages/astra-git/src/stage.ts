@@ -498,9 +498,10 @@ async function performPreparedStage(
   }
   for (const candidate of input.preview.candidates) {
     if (candidate.after.state !== "object") continue
-    const installed = await installQuarantinedObject(input.preview, candidate.after.oid)
-    if (!installed) return installedObjects > 0 ? unknown("object_install_partial") : unknown("post_state_mismatch")
-    installedObjects++
+    const installation = await installQuarantinedObject(input.preview, candidate.after.oid)
+    if (installation === "failed")
+      return installedObjects > 0 ? unknown("object_install_partial") : unknown("post_state_mismatch")
+    if (installation === "installed") installedObjects++
   }
   if (!(await verifyRepositoryObjects(binaries.gitPath, input.preview, dependencies))) {
     return installedObjects > 0 ? unknown("object_install_partial") : unknown("post_state_mismatch")
@@ -1031,15 +1032,16 @@ async function installQuarantinedObject(preview: GitStagePreview, oid: string) {
   const relative = join(oid.slice(0, 2), oid.slice(2))
   const source = join(preview.runtimeScratch, "objects", relative)
   const destination = join(preview.workspaceRoot, ".git", "objects", relative)
-  const sourceFacts = await lstat(source).catch(() => null)
-  if (!sourceFacts?.isFile() || sourceFacts.isSymbolicLink()) return false
   const existing = await lstat(destination).catch(() => null)
-  if (existing) return existing.isFile() && !existing.isSymbolicLink()
+  if (existing) return existing.isFile() && !existing.isSymbolicLink() ? "existing" : "failed"
+  const sourceFacts = await lstat(source).catch(() => null)
+  if (!sourceFacts) return "existing"
+  if (!sourceFacts.isFile() || sourceFacts.isSymbolicLink()) return "failed"
   try {
     const directory = dirname(destination)
     await mkdir(directory, { mode: 0o755 })
     const directoryFacts = await lstat(directory)
-    if (!directoryFacts.isDirectory() || directoryFacts.isSymbolicLink()) return false
+    if (!directoryFacts.isDirectory() || directoryFacts.isSymbolicLink()) return "failed"
     await link(source, destination)
     const handle = await open(destination, constants.O_RDONLY | constants.O_NOFOLLOW)
     await handle.sync()
@@ -1047,11 +1049,11 @@ async function installQuarantinedObject(preview: GitStagePreview, oid: string) {
     const directoryHandle = await open(directory, constants.O_RDONLY | constants.O_NOFOLLOW)
     await directoryHandle.sync()
     await directoryHandle.close()
-    return true
+    return "installed"
   } catch (error) {
-    if (fileSystemCode(error) !== "EEXIST") return false
+    if (fileSystemCode(error) !== "EEXIST") return "failed"
     const raced = await lstat(destination).catch(() => null)
-    return raced?.isFile() === true && !raced.isSymbolicLink()
+    return raced?.isFile() === true && !raced.isSymbolicLink() ? "existing" : "failed"
   }
 }
 

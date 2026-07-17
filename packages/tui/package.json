@@ -51,6 +51,7 @@
     "./astra/workspace-gate": "./src/astra/workspace-gate.tsx",
     "./astra/workspace-gate-contract": "./src/astra/workspace-gate-contract.ts",
     "./astra/git-unstage-client": "./src/astra/git-unstage-client.ts",
+    "./astra/git-stage-client": "./src/astra/git-stage-client.ts",
     "./astra/governed-workspace-search-client": "./src/astra/governed-workspace-search-client.ts"
   },
   "dependencies": {

@@ -19,6 +19,8 @@ import {
   type AstraGitStageControlDependencies,
 } from "../src/git-stage-control"
 import { createAstraGitStageControlHandler } from "../src/git-stage-control-handler"
+import { createAstraGitStageClient } from "@opencode-ai/tui/astra/git-stage-client"
+import { startAstraTuiControlServer } from "../src/tui-control-server"
 
 const roots: string[] = []
 
@@ -135,6 +137,55 @@ test("selected Stage reaches an exact receipt-bound independently verified termi
   expect(await stagedFiles(fixture.workspace)).toEqual(["tracked.txt"])
   expect(await untrackedFiles(fixture.workspace)).toContain("untracked.txt")
 }, 120_000)
+
+test("TUI client rejects without effect then stages one exact path through the private server", async () => {
+  const fixture = await makeFixture()
+  const sessionID = randomUUID()
+  const stageControl = createAstraGitStageControl(fixture.session, fixture.state)
+  const server = await startAstraTuiControlServer({
+    directory: fixture.root,
+    workspaceRoot: fixture.workspace,
+    sessionID,
+    gitStageControl: stageControl,
+  })
+  const client = createAstraGitStageClient(
+    { ASTRA_CONTROL_SOCKET: server.socketPath, ASTRA_CONTROL_TOKEN: server.token },
+    sessionID,
+    {
+      expectedWorkspaceRoot: fixture.workspace,
+      expectedBaselineSnapshotDigest: fixture.session.repositoryBaseline.snapshotDigest,
+    },
+  )
+
+  try {
+    const firstInventory = await client.inventory()
+    if (firstInventory.status !== "inventory") throw new Error(firstInventory.reason)
+    const firstCandidate = firstInventory.inventory.candidates.find((candidate) => candidate.path === "tracked.txt")
+    if (!firstCandidate) throw new Error("Missing tracked candidate")
+    const rejectedPreview = await client.prepare(firstInventory.inventory.inventoryID, [firstCandidate.candidateID])
+    if (rejectedPreview.status !== "prepared") throw new Error(rejectedPreview.reason)
+    expect(await client.decide(rejectedPreview.preview.proposalID, "reject")).toMatchObject({
+      status: "denied_without_git_effect",
+    })
+    expect(await stagedFiles(fixture.workspace)).toEqual([])
+
+    const secondInventory = await client.inventory()
+    if (secondInventory.status !== "inventory") throw new Error(secondInventory.reason)
+    const selected = secondInventory.inventory.candidates.find((candidate) => candidate.path === "tracked.txt")
+    if (!selected) throw new Error("Missing tracked candidate after rejection")
+    const approvedPreview = await client.prepare(secondInventory.inventory.inventoryID, [selected.candidateID])
+    if (approvedPreview.status !== "prepared") throw new Error(approvedPreview.reason)
+    expect(await client.decide(approvedPreview.preview.proposalID, "approve")).toMatchObject({
+      status: "verified",
+      verification: "independent_selected_index_and_preservation",
+    })
+    expect(await stagedFiles(fixture.workspace)).toEqual(["tracked.txt"])
+    expect(await untrackedFiles(fixture.workspace)).toContain("untracked.txt")
+  } finally {
+    client.dispose()
+    await server.close()
+  }
+}, 180_000)
 
 test("handler rejects path injection and binds single-flight terminals", async () => {
   let finish!: (value: Awaited<ReturnType<AstraGitStageControl["inventory"]>>) => void

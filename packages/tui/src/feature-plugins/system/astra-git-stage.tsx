@@ -54,14 +54,23 @@ export function AstraGitStageView(props: {
   let generation = 0
   let abort: AbortController | undefined
 
-  const close = () => {
-    if (decisionInFlight(state())) return
+  const navigateBack = () => {
     generation++
     abort?.abort()
     props.api.route.navigate(
       props.returnRoute?.name ?? "home",
       props.returnRoute && "params" in props.returnRoute ? props.returnRoute.params : undefined,
     )
+  }
+
+  const close = () => {
+    const current = state()
+    if (decisionInFlight(current)) return
+    if (current.status === "prepared") {
+      decide("reject", true)
+      return
+    }
+    navigateBack()
   }
 
   const loadInventory = () => {
@@ -125,7 +134,7 @@ export function AstraGitStageView(props: {
       })
   }
 
-  const decide = (decision: "approve" | "reject") => {
+  function decide(decision: "approve" | "reject", closeAfterDenial = false) {
     const current = state()
     if (current.status !== "prepared") return
     const currentGeneration = ++generation
@@ -146,6 +155,10 @@ export function AstraGitStageView(props: {
         if (generation !== currentGeneration) return
         if (decision === "reject" && result.status !== "denied_without_git_effect") {
           setState({ status: "blocked", reason: "durable_rejection_unavailable" })
+          return
+        }
+        if (decision === "reject" && closeAfterDenial) {
+          navigateBack()
           return
         }
         setState({ status: "terminal", result })
@@ -196,8 +209,14 @@ export function AstraGitStageView(props: {
   })
 
   onCleanup(() => {
+    const current = state()
     generation++
     abort?.abort()
+    if (current.status === "prepared") {
+      void props.client.decide(current.preview.proposalID, "reject").finally(() => props.client.dispose())
+      return
+    }
+    props.client.dispose()
   })
 
   useBindings(() => ({
@@ -351,6 +370,7 @@ export function registerAstraGitStage(
         title: "Git — Stage selected",
         category: "Astra",
         namespace: "palette",
+        slashName: "git-stage",
         run() {
           api.route.navigate(routeName, { returnRoute: api.route.current })
           api.ui.dialog.clear()

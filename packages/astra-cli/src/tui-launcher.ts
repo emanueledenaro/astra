@@ -17,6 +17,7 @@ import { startAstraProviderControlServer, type AstraProviderControlServer } from
 import { createParentProviderCredentialBroker, type ParentProviderCredentialBroker } from "./provider-credential-broker"
 import { createAstraSkillActivationControl, type AstraSkillActivationControl } from "./skill-activation-control"
 import { createAstraGitUnstageControl } from "./git-unstage-control"
+import { createAstraGitStageControl } from "./git-stage-control"
 import { createAstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
 import { createAstraExtensionInventoryControl } from "./extension-inventory-control"
 import { inspectTrustedExtensionInventoryHelper } from "@astra/runtime/extension-inventory-operation"
@@ -160,6 +161,10 @@ export async function launchAstraTui(session: OpenedWorkspace) {
       workspaceRoot: authority.authority.workspace.root,
       sessionID: authority.authority.sessionID,
       controlledWriteControl: createAstraControlledWriteControl(session, {
+        ledgerFilename: operationLedgerPath(),
+        spoolFilename: receiptSpoolPath(),
+      }),
+      gitStageControl: createAstraGitStageControl(session, {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),
       }),
