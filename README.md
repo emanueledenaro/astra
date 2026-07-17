@@ -4,6 +4,21 @@
 
 Astra is being designed so a developer can always see what the AI intends to do, which authority it has, what changed, what was independently verified, what remains uncertain, and how to recover. The Git Control Plane, Codex-compatible skills and plugins, and animated pixel Lynx will be delivered as later vertical slices.
 
+## Command experience
+
+The intended product entrypoint is simply `astra`:
+
+```bash
+astra             # Start Astra in No Workspace mode
+astra .           # Propose the current directory as a workspace
+astra /path       # Propose a specific directory as a workspace
+astra system      # Start directly in System Mode
+```
+
+Selecting a directory never activates it automatically. Astra must first show the bounded preflight and require the appropriate trust and effect decisions. `astra open <path>` remains an explicit compatibility alias for scripts and automation.
+
+This command surface is a product contract, not current implementation status. The local demo currently requires the internal `open` command and an explicit workspace path; No Workspace and System Mode are not implemented yet.
+
 ## Current local demo
 
 The first macOS product slice now includes:
