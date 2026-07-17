@@ -13,6 +13,7 @@ export {
 } from "./unstage"
 export {
   captureGitStageInventory,
+  executeClaimedGitStageSelected,
   executeGitStageSelected,
   prepareGitStageSelected,
   verifyGitStageSelected,

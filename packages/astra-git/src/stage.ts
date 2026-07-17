@@ -350,6 +350,15 @@ export async function executeGitStageSelected(
   return (await binaries.cleanup().catch(() => false)) ? result : unknown("trusted_git_cleanup_failed")
 }
 
+/** Executes through the production adapter after a durable coordinator has
+ * supplied the one-shot proposal claim bridge. */
+export function executeClaimedGitStageSelected(
+  input: Parameters<typeof executeGitStageSelected>[0],
+  claimProposal: GitStageDependencies["claimProposal"],
+) {
+  return executeGitStageSelected(input, { ...productionDependencies, claimProposal })
+}
+
 export async function verifyGitStageSelected(
   input: Readonly<{
     preview: GitStagePreview
