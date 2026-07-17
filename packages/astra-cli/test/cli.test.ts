@@ -79,11 +79,7 @@ describe("Astra CLI durable state", () => {
   })
 
   test("inspect-git explicitly runs the bounded adapter without creating app state or trust", async () => {
-    const root = await realpath(await temporaryDirectory("astra-cli-git-workspace-"))
-    await runGit(root, "init", "-q", "--initial-branch=main")
-    await writeFile(join(root, "tracked.txt"), "initial\n")
-    await runGit(root, "add", "tracked.txt")
-    await runGit(root, "-c", "user.name=Astra", "-c", "user.email=astra@example.invalid", "commit", "-qm", "initial")
+    const root = await gitWorkspace()
     await writeFile(join(root, "tracked.txt"), "changed\n")
     const dataDirectory = join(await temporaryDirectory("astra-cli-git-data-parent-"), "not-created")
     const run = await runCliCommand(dataDirectory, "inspect-git", root)
@@ -102,11 +98,47 @@ describe("Astra CLI durable state", () => {
     expect(run.stdout).not.toContain("VERIFIED   independent verifier matched")
     expect(await exists(dataDirectory)).toBeFalse()
   })
+
+  test("a Git denial follows G then A and records no host effect", async () => {
+    const root = await gitWorkspace()
+    const dataDirectory = join(await temporaryDirectory("astra-cli-git-denial-data-"), "state")
+    const run = await runInteractiveCli(root, dataDirectory, "DENY")
+
+    expect(run.exitCode).toBe(0)
+    expect(run.stderr).toBe("")
+    expect(run.stdout).toContain("GIT BASELINE  CURRENT")
+    expect(run.stdout).toContain("AWAITING_DECISION • Git baseline current")
+    expect(run.stdout).toContain("DENIED     no dispatch • no host effect")
+    expect(await exists(join(root, ".astra-demo-marker"))).toBeFalse()
+  })
+
+  test("a Git approval follows G then A through observed and independently verified state", async () => {
+    const root = await gitWorkspace()
+    const dataDirectory = join(await temporaryDirectory("astra-cli-git-approval-data-"), "state")
+    const run = await runInteractiveCli(root, dataDirectory, "APPROVE")
+
+    expect(run.exitCode).toBe(0)
+    expect(run.stderr).toBe("")
+    expect(run.stdout).toContain("GIT BASELINE  CURRENT")
+    expect(run.stdout).toContain("HOST EXECUTION — NO SANDBOX")
+    expect(run.stdout).toContain("EFFECT OBSERVED — NOT VERIFIED")
+    expect(run.stdout).toContain("VERIFIED   independent verifier matched")
+    expect(await readFile(join(root, ".astra-demo-marker"), "utf8")).toContain("Astra controlled host write")
+  }, 20_000)
 })
 
 async function workspace() {
   const root = await temporaryDirectory("astra-cli-process-workspace-")
   await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "touch must-not-run" } }))
+  return root
+}
+
+async function gitWorkspace() {
+  const root = await realpath(await temporaryDirectory("astra-cli-git-workspace-"))
+  await runGit(root, "init", "-q", "--initial-branch=main")
+  await writeFile(join(root, "tracked.txt"), "initial\n")
+  await runGit(root, "add", "tracked.txt")
+  await runGit(root, "-c", "user.name=Astra", "-c", "user.email=astra@example.invalid", "commit", "-qm", "initial")
   return root
 }
 
@@ -142,6 +174,47 @@ async function runCliCommand(dataDirectory: string, ...arguments_: ReadonlyArray
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
   ])
+  return { exitCode, stdout, stderr }
+}
+
+async function runInteractiveCli(root: string, dataDirectory: string, approval: string) {
+  const child = Bun.spawn([process.execPath, "src/index.ts", "open", root, "--developer-demo"], {
+    cwd: packageRoot,
+    env: {
+      ASTRA_DATA_DIR: dataDirectory,
+      HOME: join(dataDirectory, "..", "isolated-home"),
+      NO_COLOR: "1",
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      TMPDIR: process.env.TMPDIR ?? tmpdir(),
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const reader = child.stdout.getReader()
+  const decoder = new TextDecoder()
+  let stdout = ""
+  const readUntil = async (expected: string) => {
+    while (!stdout.includes(expected)) {
+      const chunk = await reader.read()
+      if (chunk.done) throw new Error(`CLI closed before prompt: ${expected}\n${stdout}`)
+      stdout += decoder.decode(chunk.value, { stream: true })
+    }
+  }
+
+  await child.stdin.write("g\n")
+  await readUntil("Choose [R] read-only, [A] activate once, [Q] exit:")
+  await child.stdin.write("a\n")
+  await readUntil("Type APPROVE to create the exact demo marker")
+  await child.stdin.write(`${approval}\n`)
+  await child.stdin.end()
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    stdout += decoder.decode(chunk.value, { stream: true })
+  }
+  stdout += decoder.decode()
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
   return { exitCode, stdout, stderr }
 }
 

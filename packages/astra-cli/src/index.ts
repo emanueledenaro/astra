@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import { fileURLToPath } from "node:url"
 import {
   runWorkspaceGate,
   type DurableDenial,
@@ -11,6 +12,8 @@ import {
 } from "./workspace-gate"
 import { operationLedgerPath, receiptSpoolPath } from "./app-state"
 import { createTerminalIO } from "./terminal-io"
+import { openAstraWorkspaceSession } from "./workspace-session"
+import { launchAstraTui } from "./tui-launcher"
 
 type DeniedLedgerModule = Readonly<{
   recordDeniedControlledWrite: (
@@ -22,6 +25,9 @@ type DeniedLedgerModule = Readonly<{
       report: Parameters<
         NonNullable<import("./workspace-gate").WorkspaceGateDependencies["recordDeniedOperation"]>
       >[0]["report"]
+      repositoryBaseline?: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["recordDeniedOperation"]>
+      >[0]["repositoryBaseline"]
     }>,
   ) => Promise<DurableDenial>
 }>
@@ -37,6 +43,9 @@ type ApprovedCoordinatorModule = Readonly<{
       report: Parameters<
         NonNullable<import("./workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
       >[0]["report"]
+      repositoryBaseline?: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
+      >[0]["repositoryBaseline"]
       policyAskedAt: string
       approvalGrantedAt: string
       recordingStartedAt: string
@@ -54,6 +63,9 @@ type ApprovedVerifierModule = Readonly<{
       report: Parameters<
         NonNullable<import("./workspace-gate").WorkspaceGateDependencies["verifyApprovedOperation"]>
       >[0]["report"]
+      repositoryBaseline?: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["verifyApprovedOperation"]>
+      >[0]["repositoryBaseline"]
     }>,
   ) => Promise<DurableVerification>
 }>
@@ -70,6 +82,7 @@ type GitInspectionModule = Readonly<{
 
 type Arguments = Readonly<{
   workspace: string
+  experience: "product" | "demo"
   decision?: WorkspaceDecision
   approval?: EffectApproval
 }>
@@ -80,55 +93,130 @@ if (!parsed.ok) {
   printUsage()
   process.exitCode = parsed.help ? 0 : 1
 } else {
-  const terminal = createTerminalIO(parsed.arguments)
-  try {
-    process.exitCode = (
-      await runWorkspaceGate(parsed.arguments.workspace, terminal.io, {
-        async inspectGitWorkspace(workspaceRoot) {
-          const moduleName = ["@astra", "git"].join("/")
-          const loaded: unknown = await import(moduleName)
-          if (!isGitInspectionModule(loaded)) throw new Error("Astra Git inspection adapter is unavailable")
-          return loaded.inspectGitWorkspace(workspaceRoot)
-        },
-        async captureGitRepositoryBaseline(workspaceRoot) {
-          const moduleName = ["@astra", "git"].join("/")
-          const loaded: unknown = await import(moduleName)
-          if (!isGitInspectionModule(loaded)) throw new Error("Astra Git baseline adapter is unavailable")
-          return loaded.captureGitRepositoryBaseline(workspaceRoot)
-        },
-        async revalidateGitRepositoryBaseline(workspaceRoot, snapshot) {
-          const moduleName = ["@astra", "git"].join("/")
-          const loaded: unknown = await import(moduleName)
-          if (!isGitInspectionModule(loaded)) throw new Error("Astra Git baseline adapter is unavailable")
-          return loaded.revalidateGitRepositoryBaseline(workspaceRoot, snapshot)
-        },
-        async recordDeniedOperation(input) {
-          const moduleName = ["@astra/runtime", "operation-ledger"].join("/")
-          const loaded: unknown = await import(moduleName)
-          if (!isOperationLedgerModule(loaded)) throw new Error("Astra Operation ledger adapter is unavailable")
-          return loaded.recordDeniedControlledWrite({ filename: operationLedgerPath(), ...input })
-        },
-        async executeApprovedOperation(input) {
-          const moduleName = ["@astra/runtime", "controlled-write-coordinator"].join("/")
-          const loaded: unknown = await import(moduleName)
-          if (!isApprovedCoordinatorModule(loaded)) throw new Error("Astra durable executor is unavailable")
-          return loaded.executeApprovedControlledWrite({
-            ledgerFilename: operationLedgerPath(),
-            spoolFilename: receiptSpoolPath(),
-            ...input,
-          })
-        },
-        async verifyApprovedOperation(input) {
-          const moduleName = ["@astra/runtime", "controlled-write-verifier"].join("/")
-          const loaded: unknown = await import(moduleName)
-          if (!isApprovedVerifierModule(loaded)) throw new Error("Astra independent verifier is unavailable")
-          return loaded.verifyRecordedControlledWrite({ ledgerFilename: operationLedgerPath(), ...input })
-        },
-      })
-    ).exitCode
-  } finally {
-    terminal.close()
+  if (parsed.arguments.experience === "product") {
+    process.exitCode =
+      process.env.ASTRA_BROWSER_RUNTIME === "1"
+        ? await runProduct(parsed.arguments.workspace)
+        : await relaunchProductWithBrowserRuntime(Bun.argv.slice(2))
+  } else {
+    const terminal = createTerminalIO(parsed.arguments)
+    try {
+      process.exitCode = (
+        await runWorkspaceGate(parsed.arguments.workspace, terminal.io, {
+          async inspectGitWorkspace(workspaceRoot) {
+            return (await loadGitModule()).inspectGitWorkspace(workspaceRoot)
+          },
+          async captureGitRepositoryBaseline(workspaceRoot) {
+            return (await loadGitModule()).captureGitRepositoryBaseline(workspaceRoot)
+          },
+          async revalidateGitRepositoryBaseline(workspaceRoot, snapshot) {
+            return (await loadGitModule()).revalidateGitRepositoryBaseline(workspaceRoot, snapshot)
+          },
+          async recordDeniedOperation(input) {
+            const moduleName = ["@astra/runtime", "operation-ledger"].join("/")
+            const loaded: unknown = await import(moduleName)
+            if (!isOperationLedgerModule(loaded)) throw new Error("Astra Operation ledger adapter is unavailable")
+            return loaded.recordDeniedControlledWrite({ filename: operationLedgerPath(), ...input })
+          },
+          async executeApprovedOperation(input) {
+            const moduleName = ["@astra/runtime", "controlled-write-coordinator"].join("/")
+            const loaded: unknown = await import(moduleName)
+            if (!isApprovedCoordinatorModule(loaded)) throw new Error("Astra durable executor is unavailable")
+            return loaded.executeApprovedControlledWrite({
+              ledgerFilename: operationLedgerPath(),
+              spoolFilename: receiptSpoolPath(),
+              ...input,
+            })
+          },
+          async verifyApprovedOperation(input) {
+            const moduleName = ["@astra/runtime", "controlled-write-verifier"].join("/")
+            const loaded: unknown = await import(moduleName)
+            if (!isApprovedVerifierModule(loaded)) throw new Error("Astra independent verifier is unavailable")
+            return loaded.verifyRecordedControlledWrite({ ledgerFilename: operationLedgerPath(), ...input })
+          },
+        })
+      ).exitCode
+    } finally {
+      terminal.close()
+    }
   }
+}
+
+async function relaunchProductWithBrowserRuntime(arguments_: ReadonlyArray<string>) {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--conditions=browser",
+      fileURLToPath(import.meta.url),
+      ...arguments_.filter((value) => value !== "--"),
+    ],
+    {
+      env: { ...process.env, ASTRA_BROWSER_RUNTIME: "1" },
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    },
+  )
+  return await child.exited
+}
+
+async function runProduct(workspace: string) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error("The Astra workspace interface requires an interactive terminal.")
+    return 1
+  }
+  const workspaceGate = await loadWorkspaceGateModule()
+  const result = await openAstraWorkspaceSession(workspace, {
+    async present(view) {
+      return workspaceGate.chooseAstraWorkspaceMode(view)
+    },
+    async withProgress(view, operation) {
+      return workspaceGate.withAstraWorkspaceProgress(view, operation)
+    },
+    async inspectGitWorkspace(workspaceRoot) {
+      return (await loadGitModule()).inspectGitWorkspace(workspaceRoot)
+    },
+    async captureGitRepositoryBaseline(workspaceRoot) {
+      return (await loadGitModule()).captureGitRepositoryBaseline(workspaceRoot)
+    },
+    async revalidateGitRepositoryBaseline(workspaceRoot, snapshot) {
+      return (await loadGitModule()).revalidateGitRepositoryBaseline(workspaceRoot, snapshot)
+    },
+  })
+  if (result.status === "exited") return 0
+  return launchAstraTui(result)
+}
+
+async function loadWorkspaceGateModule() {
+  const moduleName = ["@opencode-ai/tui", "astra/workspace-gate"].join("/")
+  const loaded: unknown = await import(moduleName)
+  if (!isWorkspaceGateModule(loaded)) throw new Error("The Astra visual workspace gate is unavailable")
+  return loaded
+}
+
+async function loadGitModule() {
+  const moduleName = ["@astra", "git"].join("/")
+  const loaded: unknown = await import(moduleName)
+  if (!isGitInspectionModule(loaded)) throw new Error("Astra Git adapter is unavailable")
+  return loaded
+}
+
+type WorkspaceGateModule = Readonly<{
+  chooseAstraWorkspaceMode: NonNullable<import("./workspace-session").AstraWorkspaceSessionDependencies["present"]>
+  withAstraWorkspaceProgress: NonNullable<
+    import("./workspace-session").AstraWorkspaceSessionDependencies["withProgress"]
+  >
+}>
+
+function isWorkspaceGateModule(value: unknown): value is WorkspaceGateModule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "chooseAstraWorkspaceMode" in value &&
+    typeof value.chooseAstraWorkspaceMode === "function" &&
+    "withAstraWorkspaceProgress" in value &&
+    typeof value.withAstraWorkspaceProgress === "function"
+  )
 }
 
 function parseArguments(
@@ -139,13 +227,22 @@ function parseArguments(
     if (values.length !== 2 || !values[1] || values[1].startsWith("--")) {
       return { ok: false, help: false, message: "The `inspect-git` command requires exactly one workspace path." }
     }
-    return { ok: true, arguments: { workspace: values[1], decision: "inspect-git" } }
+    return { ok: true, arguments: { workspace: values[1], experience: "demo", decision: "inspect-git" } }
   }
-  if (values[0] !== "open") return { ok: false, help: false, message: "Expected the `open` or `inspect-git` command." }
+  if (values[0] !== "open") {
+    if (values.length === 1 && values[0] && !values[0].startsWith("--") && values[0] !== "system") {
+      return { ok: true, arguments: { workspace: values[0], experience: "product" } }
+    }
+    return { ok: false, help: false, message: "Expected a workspace path, `open`, or `inspect-git`." }
+  }
 
   const workspace = values[1]
   if (!workspace || workspace.startsWith("--")) {
     return { ok: false, help: false, message: "A workspace path is required." }
+  }
+
+  if (values.length === 3 && values[2] === "--developer-demo") {
+    return { ok: true, arguments: { workspace, experience: "demo" } }
   }
 
   let decision: WorkspaceDecision | undefined
@@ -172,6 +269,7 @@ function parseArguments(
     ok: true,
     arguments: {
       workspace,
+      experience: decision || approval ? "demo" : "product",
       ...(decision ? { decision } : {}),
       ...(approval ? { approval } : {}),
     },
@@ -227,8 +325,8 @@ function isEffectApproval(value: string): value is EffectApproval {
 }
 
 function printUsage() {
-  console.log(
-    "Usage: astra open <workspace> [--decision read-only|inspect-git|activate-once|exit] [--approval approve|deny]",
-  )
-  console.log("       astra inspect-git <workspace>")
+  console.log("Usage: astra .")
+  console.log("       astra /path/to/workspace")
+  console.log("       astra open <workspace>")
+  console.log("       astra inspect-git <workspace>  # developer diagnostics")
 }

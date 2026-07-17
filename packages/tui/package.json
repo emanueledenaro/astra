@@ -45,9 +45,14 @@
     "./ui/spinner": "./src/ui/spinner.ts",
     "./ui/toast": "./src/ui/toast.tsx",
     "./component/spinner": "./src/component/spinner.tsx",
-    "./component/register-spinner": "./src/component/register-spinner.ts"
+    "./component/register-spinner": "./src/component/register-spinner.ts",
+    "./component/lynx": "./src/component/lynx.tsx",
+    "./astra/workspace-gate": "./src/astra/workspace-gate.tsx",
+    "./astra/workspace-gate-contract": "./src/astra/workspace-gate-contract.ts"
   },
   "dependencies": {
+    "@astra/domain": "workspace:*",
+    "@astra/runtime": "workspace:*",
     "@opencode-ai/core": "workspace:*",
     "@opencode-ai/plugin": "workspace:*",
     "@opencode-ai/sdk": "workspace:*",

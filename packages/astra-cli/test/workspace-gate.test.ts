@@ -7,6 +7,7 @@ import {
   type GitRepositoryBaselineSnapshot,
   type GitRepositoryBaselineSnapshotAuthority,
 } from "@astra/domain/git-repository-baseline"
+import { parseOperationEvidence } from "@astra/domain/operation-contract"
 import { demoMarkerName } from "@astra/runtime/controlled-write-plan"
 import { createMaliciousWorkspace, directoryDigest, sentinelNames } from "../../astra-runtime/test/support"
 import {
@@ -30,22 +31,31 @@ async function workspace() {
   return root
 }
 
-function scriptedIO(decision: WorkspaceDecision, approval: EffectApproval = "deny", onDecision?: () => Promise<void>) {
+function scriptedIO(
+  decision: WorkspaceDecision | ReadonlyArray<WorkspaceDecision>,
+  approval: EffectApproval = "deny",
+  onDecision?: () => Promise<void>,
+) {
   const lines: Array<string> = []
+  const decisions = typeof decision === "string" ? [decision] : [...decision]
+  let decisionCalls = 0
   const io: WorkspaceGateIO = {
     write: (line) => lines.push(line),
+    continueAfterGitInspection: decisions.length > 1,
     async chooseWorkspaceDecision() {
+      decisionCalls += 1
       await onDecision?.()
-      return decision
+      return decisions.shift() ?? "exit"
     },
     async approveControlledWrite() {
       return approval
     },
   }
-  return { io, lines }
+  return { io, lines, decisionCalls: () => decisionCalls }
 }
 
 function approvedDependencies() {
+  const receipts = new Map<string, string>()
   return {
     async executeApprovedOperation({
       plan,
@@ -53,12 +63,14 @@ function approvedDependencies() {
       NonNullable<import("../src/workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
     >[0]) {
       await writeFile(join(plan.workspaceRoot, plan.relativePath), plan.content, { flag: "wx" })
+      const receiptID = crypto.randomUUID()
+      receipts.set(plan.operationId, receiptID)
       return {
         operationID: plan.operationId,
         state: "effect_observed" as const,
         sequence: 6,
         lastCursor: 6,
-        receiptID: crypto.randomUUID(),
+        receiptID,
         status: "effect_observed" as const,
       }
     },
@@ -67,16 +79,31 @@ function approvedDependencies() {
     }: Parameters<
       NonNullable<import("../src/workspace-gate").WorkspaceGateDependencies["verifyApprovedOperation"]>
     >[0]) {
+      const evidence = parseOperationEvidence({
+        evidenceID: crypto.randomUUID(),
+        operationID: plan.operationId,
+        receiptID: receipts.get(plan.operationId)!,
+        verificationPlanID: crypto.randomUUID(),
+        verifier: { identity: "astra-test-verifier", version: "1", digest: plan.contentDigest },
+        snapshotDigest: plan.contentDigest,
+        observedAt: new Date().toISOString(),
+        criteria: [
+          {
+            criterionID: "marker_exact_bytes",
+            result: "passed",
+            observationDigest: plan.contentDigest,
+          },
+        ],
+        limitations: [],
+      })
+      if (!evidence.ok) throw new Error("test evidence must be valid")
       return {
         operationID: plan.operationId,
         state: "succeeded" as const,
         sequence: 8,
         lastCursor: 8,
         status: "verified" as const,
-        evidence: {
-          snapshotDigest: plan.contentDigest,
-          criteria: [{ result: "passed" as const, observationDigest: plan.contentDigest }],
-        },
+        evidence: evidence.value,
       }
     },
   }
@@ -285,6 +312,132 @@ describe("workspace gate", () => {
     expect(output).not.toContain("HOST EXECUTION")
     expect(output).not.toContain("VERIFIED   independent verifier matched")
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
+    expect(terminal.decisionCalls()).toBe(1)
+  })
+
+  test("continues from a current Git baseline to Activate once and persists denial with the same authority", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO(["inspect-git", "activate-once"], "deny")
+    let capturedBaseline: GitRepositoryBaselineSnapshot | undefined
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      ...gitBaselineDependencies(),
+      async inspectGitWorkspace(workspaceRoot) {
+        return completeGitInspection(workspaceRoot)
+      },
+      async recordDeniedOperation({ plan, repositoryBaseline }) {
+        capturedBaseline = repositoryBaseline
+        return { operationID: plan.operationId, state: "denied", sequence: 3, lastCursor: 3 }
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 0, workspaceState: "UNTRUSTED", operationState: "denied" })
+    expect(capturedBaseline?.root.canonicalPath).toBe(root)
+    expect(terminal.decisionCalls()).toBe(2)
+    expect(terminal.lines.join("\n")).toContain("AWAITING_DECISION • Git baseline current")
+    expect(terminal.lines.join("\n")).toContain("DENIED     no dispatch • no host effect")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("carries one Git authority through approved execution and independent verification", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO(["inspect-git", "activate-once"], "approve")
+    const approved = approvedDependencies()
+    const baselines: Array<GitRepositoryBaselineSnapshot | undefined> = []
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      ...gitBaselineDependencies(),
+      async inspectGitWorkspace(workspaceRoot) {
+        return completeGitInspection(workspaceRoot)
+      },
+      async executeApprovedOperation(input) {
+        baselines.push(input.repositoryBaseline)
+        return approved.executeApprovedOperation(input)
+      },
+      async verifyApprovedOperation(input) {
+        baselines.push(input.repositoryBaseline)
+        return approved.verifyApprovedOperation(input)
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 0, operationState: "succeeded" })
+    expect(baselines).toHaveLength(2)
+    expect(baselines[0]?.snapshotDigest).toBe(baselines[1]?.snapshotDigest)
+    expect(baselines[0]?.root.canonicalPath).toBe(root)
+    expect(await readFile(join(root, demoMarkerName), "utf8")).toContain("Astra controlled host write")
+  })
+
+  test("blocks activation when the Git baseline changes after inspection", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO(["inspect-git", "activate-once"], "approve")
+    let revalidations = 0
+    let executions = 0
+    const baselineDependencies = gitBaselineDependencies()
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      ...baselineDependencies,
+      async inspectGitWorkspace(workspaceRoot) {
+        return completeGitInspection(workspaceRoot)
+      },
+      async revalidateGitRepositoryBaseline(workspaceRoot, snapshot) {
+        revalidations += 1
+        if (revalidations === 1) return baselineDependencies.revalidateGitRepositoryBaseline(workspaceRoot, snapshot)
+        return {
+          status: "stale",
+          expectedSnapshotDigest: snapshot.snapshotDigest,
+          currentSnapshotDigest: `sha256:${"9".repeat(64)}`,
+        }
+      },
+      async executeApprovedOperation() {
+        executions += 1
+        throw new Error("must not execute")
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 2, workspaceState: "STALE", operationState: null })
+    expect(revalidations).toBe(2)
+    expect(executions).toBe(0)
+    expect(terminal.lines.join("\n")).toContain("Git baseline changed")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("fails closed when Git changes while the displayed inspection is being produced", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO(["inspect-git", "activate-once"], "approve")
+    const baselineDependencies = gitBaselineDependencies()
+    let inspectionCompleted = false
+    let executions = 0
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      ...baselineDependencies,
+      async inspectGitWorkspace(workspaceRoot) {
+        inspectionCompleted = true
+        return completeGitInspection(workspaceRoot)
+      },
+      async revalidateGitRepositoryBaseline(workspaceRoot, snapshot) {
+        if (!inspectionCompleted) return baselineDependencies.revalidateGitRepositoryBaseline(workspaceRoot, snapshot)
+        return {
+          status: "stale",
+          expectedSnapshotDigest: snapshot.snapshotDigest,
+          currentSnapshotDigest: `sha256:${"9".repeat(64)}`,
+        }
+      },
+      async executeApprovedOperation() {
+        executions += 1
+        throw new Error("must not execute")
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: null })
+    expect(terminal.decisionCalls()).toBe(1)
+    expect(executions).toBe(0)
+    expect(terminal.lines.join("\n")).toContain("GIT BASELINE  STALE")
+    expect(terminal.lines.join("\n")).not.toContain("AWAITING_DECISION • Git baseline current")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
   })
 
   test("shows a blocked baseline without treating Git inspection as activation", async () => {
@@ -320,13 +473,14 @@ describe("workspace gate", () => {
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
   })
 
-  test("does not capture a baseline after Git inspection is blocked", async () => {
+  test("captures the authority before a blocked Git inspection and does not revalidate it", async () => {
     const root = await workspace()
     await mkdir(join(root, ".git"))
     const terminal = scriptedIO("inspect-git")
     let captures = 0
 
     const result = await runWorkspaceGate(root, terminal.io, {
+      ...gitBaselineDependencies(),
       async inspectGitWorkspace(workspaceRoot) {
         return {
           status: "blocked",
@@ -341,14 +495,17 @@ describe("workspace gate", () => {
       },
       async captureGitRepositoryBaseline() {
         captures += 1
-        throw new Error("must not capture after blocked inspection")
+        return { status: "complete", snapshot: await gitRepositoryBaseline(root) }
+      },
+      async revalidateGitRepositoryBaseline() {
+        throw new Error("must not revalidate a blocked inspection")
       },
     })
 
     expect(result.exitCode).toBe(2)
-    expect(captures).toBe(0)
+    expect(captures).toBe(1)
     expect(terminal.lines.join("\n")).toContain("GIT INSPECTION BLOCKED  git_process_failed")
-    expect(terminal.lines.join("\n")).not.toContain("GIT BASELINE  CAPTURING")
+    expect(terminal.lines.join("\n")).toContain("GIT BASELINE  CAPTURING")
   })
 
   test("fails closed for a malformed Git inspection result", async () => {
@@ -357,6 +514,7 @@ describe("workspace gate", () => {
     const terminal = scriptedIO("inspect-git")
 
     const result = await runWorkspaceGate(root, terminal.io, {
+      ...gitBaselineDependencies(),
       async inspectGitWorkspace() {
         return null
       },
@@ -388,9 +546,7 @@ describe("workspace gate", () => {
     })
 
     expect(result.exitCode).toBe(2)
-    expect(terminal.lines.join("\n")).toContain(
-      "GIT BASELINE  BLOCKED • revalidation snapshot mismatch • NOT VERIFIED",
-    )
+    expect(terminal.lines.join("\n")).toContain("GIT BASELINE  BLOCKED • revalidation snapshot mismatch • NOT VERIFIED")
     expect(terminal.lines.join("\n")).not.toContain("GIT BASELINE  CURRENT")
   })
 
@@ -400,6 +556,7 @@ describe("workspace gate", () => {
     const terminal = scriptedIO("inspect-git")
 
     const result = await runWorkspaceGate(root, terminal.io, {
+      ...gitBaselineDependencies(),
       async inspectGitWorkspace(workspaceRoot) {
         const inspection = completeGitInspection(workspaceRoot)
         if (inspection.status !== "complete") return inspection
@@ -547,6 +704,27 @@ describe("workspace gate", () => {
     expect(output).not.toContain("VERIFIED   demo marker")
   })
 
+  test("treats every malformed approval value as a denial without effects", async () => {
+    const root = await workspace()
+    const terminal = scriptedIO("activate-once", "unexpected" as EffectApproval)
+    let executions = 0
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async executeApprovedOperation() {
+        executions += 1
+        throw new Error("must not execute")
+      },
+      async recordDeniedOperation({ plan }) {
+        return { operationID: plan.operationId, state: "denied", sequence: 3, lastCursor: 3 }
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 0, workspaceState: "UNTRUSTED", operationState: "denied" })
+    expect(executions).toBe(0)
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+    expect(terminal.lines.join("\n")).toContain("DENIED     no dispatch • no host effect")
+  })
+
   test("fails closed when a denial cannot be recorded durably", async () => {
     const root = await workspace()
     const terminal = scriptedIO("activate-once", "deny")
@@ -620,6 +798,45 @@ describe("workspace gate", () => {
     expect(output).toContain("independent verifier matched the exact expected bytes and SHA-256")
   })
 
+  test("refuses to print VERIFIED when the evidence criterion failed", async () => {
+    const root = await workspace()
+    const terminal = scriptedIO("activate-once", "approve")
+    const approved = approvedDependencies()
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      ...approved,
+      async verifyApprovedOperation(input) {
+        const verified = await approved.verifyApprovedOperation(input)
+        const criterion = verified.evidence.criteria[0]
+        if (!criterion) throw new Error("test evidence criterion must exist")
+        return {
+          ...verified,
+          evidence: {
+            ...verified.evidence,
+            criteria: [
+              {
+                criterionID: criterion.criterionID,
+                observationDigest: criterion.observationDigest,
+                result: "failed" as const,
+              },
+            ],
+          },
+        }
+      },
+    })
+
+    expect(result).toMatchObject({
+      exitCode: 2,
+      workspaceState: "UNTRUSTED",
+      operationState: "reconciliation_required",
+    })
+    expect(await exists(join(root, demoMarkerName))).toBeTrue()
+    expect(terminal.lines.join("\n")).toContain(
+      "RECONCILIATION REQUIRED  independent verification evidence is unavailable",
+    )
+    expect(terminal.lines.join("\n")).not.toContain("VERIFIED   independent verifier matched")
+  })
+
   test("invalidates activate-once when bounded static facts change after preview", async () => {
     const root = await workspace()
     const terminal = scriptedIO("activate-once", "approve", () =>
@@ -662,7 +879,7 @@ describe("workspace gate", () => {
 
     expect(source).not.toContain('from "@astra/runtime/controlled-write"')
     expect(source).not.toContain('import("@astra/runtime/controlled-write")')
-    expect(source.indexOf('if (approval === "deny")')).toBeLessThan(
+    expect(source.indexOf('if (approval !== "approve")')).toBeLessThan(
       source.indexOf("dependencies.executeApprovedOperation"),
     )
   })

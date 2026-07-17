@@ -1,0 +1,42 @@
+/** @jsxImportSource @opentui/solid */
+
+import type { AstraSessionAuthority } from "@astra/domain/session-authority"
+import { inspectAstraSessionAuthority } from "../astra/session-authority"
+
+export type AstraWorkspaceMode = "read-only" | "activate-once"
+
+export type AstraWorkspaceStatusView = Readonly<{
+  mode: AstraWorkspaceMode
+  label: string
+  color: string
+}>
+
+export function getAstraWorkspaceStatus(
+  authority: AstraSessionAuthority | undefined,
+): AstraWorkspaceStatusView | undefined {
+  if (authority?.mode === "read-only") {
+    return { mode: "read-only", label: "ASTRA  •  READ ONLY  •  EFFECTS DENIED", color: "#55e6c1" }
+  }
+  if (authority?.mode === "activate-once") {
+    return {
+      mode: "activate-once",
+      label: "ASTRA  •  ACTIVE ONCE  •  EFFECTS BLOCKED",
+      color: "#f0bd6a",
+    }
+  }
+  return undefined
+}
+
+export function AstraWorkspaceStatus(props: { authority?: AstraSessionAuthority }) {
+  const inspected = props.authority
+    ? { status: "valid" as const, authority: props.authority }
+    : inspectAstraSessionAuthority()
+  const status = getAstraWorkspaceStatus(inspected.status === "valid" ? inspected.authority : undefined)
+  if (!status) return null
+
+  return (
+    <box paddingLeft={1} paddingRight={1}>
+      <text fg={status.color}>{status.label}</text>
+    </box>
+  )
+}

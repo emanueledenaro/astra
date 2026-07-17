@@ -15,6 +15,7 @@ export function createTerminalIO(overrides: TerminalOverrides) {
 
   const io: WorkspaceGateIO = {
     write: (line) => console.log(line),
+    continueAfterGitInspection: overrides.decision === undefined,
     async chooseWorkspaceDecision(activationAllowed, gitInspectionAllowed) {
       if (overrides.decision) return overrides.decision
       while (true) {

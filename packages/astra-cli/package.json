@@ -23,7 +23,8 @@
   "dependencies": {
     "@astra/domain": "workspace:*",
     "@astra/git": "workspace:*",
-    "@astra/runtime": "workspace:*"
+    "@astra/runtime": "workspace:*",
+    "@opencode-ai/tui": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

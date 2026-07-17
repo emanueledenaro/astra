@@ -86,6 +86,7 @@ import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
+import { inspectAstraSessionAuthority } from "./astra/session-authority"
 
 registerOpencodeSpinner()
 
@@ -184,6 +185,14 @@ function isVersionGreater(left: string, right: string) {
 }
 
 export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+  if (Flag.ASTRA_SAFE_START) {
+    const authority = inspectAstraSessionAuthority(process.env, process.cwd())
+    if (authority.status !== "valid") {
+      return yield* Effect.fail(
+        new Error(`Astra session authority rejected: ${authority.status === "invalid" ? authority.reason : "missing"}`),
+      )
+    }
+  }
   const global = yield* Global.Service
   const exit = { epilogue: undefined as string | undefined, reason: undefined as unknown }
   const result = yield* Effect.scoped(
@@ -384,6 +393,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const pluginRuntime = usePluginRuntime()
   const attention = createTuiAttention({ renderer, config: tuiConfig, kv })
   const clipboard = useClipboard()
+  const astraAuthority = inspectAstraSessionAuthority()
+  const astraSession = astraAuthority.status === "valid"
 
   const api = createTuiApi(
     createTuiApiAdapters({
@@ -405,19 +416,25 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     }),
   )
   const [ready, setReady] = createSignal(false)
-  props.pluginHost
-    .start({
-      api,
-      config: tuiConfig,
-      runtime: pluginRuntime,
-      dispose: () => attention.dispose(),
-    })
-    .catch((error) => {
-      console.error("Failed to load TUI plugins", error)
-    })
-    .finally(() => {
-      setReady(true)
-    })
+  let astraSlots: ReturnType<typeof pluginRuntime.setupSlots> | undefined
+  if (astraSession) {
+    astraSlots = pluginRuntime.setupSlots(api)
+    setReady(true)
+  } else {
+    props.pluginHost
+      .start({
+        api,
+        config: tuiConfig,
+        runtime: pluginRuntime,
+        dispose: () => attention.dispose(),
+      })
+      .catch((error) => {
+        console.error("Failed to load TUI plugins", error)
+      })
+      .finally(() => {
+        setReady(true)
+      })
+  }
 
   // Let selection copy/dismiss win ahead of normal bindings when explicit copy is required.
   const offSelectionKeys = keymap.intercept(
@@ -429,6 +446,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     { priority: 1 },
   )
   onCleanup(() => {
+    astraSlots?.dispose()
     offSelectionKeys()
     attention.dispose()
   })
@@ -541,6 +559,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     on(
       () => sync.status === "complete" && sync.data.provider.length === 0,
       (isEmpty, wasEmpty) => {
+        if (astraSession) return
         // only trigger when we transition into an empty-provider state
         if (!isEmpty || wasEmpty) return
         dialog.replace(() => <DialogProviderList />)

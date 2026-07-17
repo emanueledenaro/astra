@@ -28,6 +28,7 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
+import { inspectAstraSessionAuthority } from "../astra/session-authority"
 import { batch, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
@@ -445,6 +446,32 @@ export const {
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
       const workspace = project.workspace.current()
+      const astraAuthority = inspectAstraSessionAuthority()
+      if (astraAuthority.status === "valid") {
+        try {
+          const config = await sdk.client.config.get({ workspace }, { throwOnError: true })
+          batch(() => {
+            setStore("provider", reconcile([]))
+            setStore("provider_default", reconcile({}))
+            setStore("provider_next", reconcile({ all: [], default: {}, connected: [] }))
+            setStore("provider_auth", reconcile({}))
+            setStore("agent", reconcile([]))
+            setStore("config", reconcile(config.data ?? {}))
+            setStore("command", reconcile([]))
+            setStore("lsp", reconcile([]))
+            setStore("mcp", reconcile({}))
+            setStore("mcp_resource", reconcile({}))
+            setStore("formatter", reconcile([]))
+            setStore("vcs", reconcile(undefined))
+            setStore("status", "complete")
+          })
+          return
+        } catch (error) {
+          if (fatal) exit(error)
+          else throw error
+          return
+        }
+      }
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
 

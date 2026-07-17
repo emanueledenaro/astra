@@ -7,10 +7,16 @@ import {
   type GitRepositoryBaselineSnapshot,
 } from "@astra/domain/git-repository-baseline"
 import type { OperationEvent, OperationState } from "@astra/domain/operation"
+import { parseOperationEvidence, type OperationEvidence } from "@astra/domain/operation-contract"
 import type { WorkspaceTrustEvent, WorkspaceTrustReport, WorkspaceTrustState } from "@astra/domain/workspace-trust"
 import type { GitInspectionResult } from "@astra/git"
 import { createControlledWritePlan } from "@astra/runtime/controlled-write-plan"
-import { checkWorkspaceActivation, revalidateWorkspaceSnapshot, scanWorkspace } from "@astra/runtime/preflight"
+import {
+  checkWorkspaceActivation,
+  revalidateWorkspacePreflight,
+  revalidateWorkspaceSnapshot,
+  scanWorkspace,
+} from "@astra/runtime/preflight"
 import {
   renderControlledWritePreview,
   renderHeader,
@@ -26,6 +32,7 @@ export type EffectApproval = "approve" | "deny"
 
 export type WorkspaceGateIO = Readonly<{
   write: (line: string) => void
+  continueAfterGitInspection?: boolean
   chooseWorkspaceDecision: (activationAllowed: boolean, gitInspectionAllowed: boolean) => Promise<WorkspaceDecision>
   approveControlledWrite: () => Promise<EffectApproval>
 }>
@@ -59,10 +66,7 @@ export type DurableVerification = Readonly<{
   sequence: number
   lastCursor: number
   status: "verified" | "failed" | "unknown"
-  evidence: Readonly<{
-    snapshotDigest: string
-    criteria: ReadonlyArray<Readonly<{ result: "passed" | "failed" | "unknown"; observationDigest: string }>>
-  }>
+  evidence: OperationEvidence
 }>
 
 export type GitInspection = GitInspectionResult
@@ -78,6 +82,7 @@ export type WorkspaceGateDependencies = Readonly<{
     input: Readonly<{
       plan: ReturnType<typeof createControlledWritePlan>
       report: WorkspaceTrustReport
+      repositoryBaseline?: GitRepositoryBaselineSnapshot
       policyAskedAt: string
       approvalRejectedAt: string
       recordingStartedAt: string
@@ -87,6 +92,7 @@ export type WorkspaceGateDependencies = Readonly<{
     input: Readonly<{
       plan: ReturnType<typeof createControlledWritePlan>
       report: WorkspaceTrustReport
+      repositoryBaseline?: GitRepositoryBaselineSnapshot
       policyAskedAt: string
       approvalGrantedAt: string
       recordingStartedAt: string
@@ -96,6 +102,7 @@ export type WorkspaceGateDependencies = Readonly<{
     input: Readonly<{
       plan: ReturnType<typeof createControlledWritePlan>
       report: WorkspaceTrustReport
+      repositoryBaseline?: GitRepositoryBaselineSnapshot
     }>,
   ) => Promise<DurableVerification>
 }>
@@ -125,7 +132,8 @@ export async function runWorkspaceGate(
         : "CHOICES    [R] read-only   [Q] exit   • activate once unavailable",
   )
 
-  const decision = await io.chooseWorkspaceDecision(activationCheck.allowed, gitInspectionAllowed)
+  let decision = await io.chooseWorkspaceDecision(activationCheck.allowed, gitInspectionAllowed)
+  let repositoryBaseline: GitRepositoryBaselineSnapshot | undefined
   if (decision === "exit") {
     workspaceState = advanceWorkspace(workspaceState, "decision.exit", io)
     io.write("EXIT       no trust stored • no effect dispatched")
@@ -137,35 +145,10 @@ export async function runWorkspaceGate(
     return { exitCode: 0, workspaceState, operationState: null, report }
   }
   if (decision === "inspect-git") {
-    workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
     if (!gitInspectionAllowed || !dependencies.inspectGitWorkspace) {
       io.write("GIT INSPECTION BLOCKED  unsupported workspace boundary or adapter unavailable")
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
-    }
-    let observedInspection: unknown
-    try {
-      observedInspection = await dependencies.inspectGitWorkspace(report.root)
-    } catch {
-      io.write("GIT INSPECTION BLOCKED  bounded adapter failed closed")
-      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
-    }
-    if (!isGitInspection(observedInspection, report.root)) {
-      io.write("GIT INSPECTION BLOCKED  invalid adapter result")
-      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
-    }
-    const inspection = observedInspection
-    if (inspection.status === "complete" && inspection.diff.observationDigest !== inspection.outputDigest) {
-      io.write("GIT INSPECTION BLOCKED  diff binding does not match the bounded observation")
-      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
-    }
-    for (const line of renderGitInspection(inspection)) io.write(line)
-    if (inspection.status === "blocked") {
-      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
     }
     for (const line of renderGitBaselineView({ status: "not-captured" })) io.write(line)
     if (!dependencies.captureGitRepositoryBaseline || !dependencies.revalidateGitRepositoryBaseline) {
@@ -173,7 +156,7 @@ export async function runWorkspaceGate(
         io.write(line)
       }
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
     }
     for (const line of renderGitBaselineView({ status: "capturing" })) io.write(line)
     const capture = await dependencies.captureGitRepositoryBaseline(report.root).catch(() => null)
@@ -183,21 +166,45 @@ export async function runWorkspaceGate(
         io.write(line)
       }
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
     }
     if (parsedCapture.value.status === "blocked") {
       for (const line of renderGitBaselineView({ status: "blocked", reason: parsedCapture.value.reason })) {
         io.write(line)
       }
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
     }
     if (!baselineMatchesWorkspace(parsedCapture.value.snapshot, report)) {
       for (const line of renderGitBaselineView({ status: "blocked", reason: "workspace identity mismatch" })) {
         io.write(line)
       }
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
+    }
+    let observedInspection: unknown
+    try {
+      observedInspection = await dependencies.inspectGitWorkspace(report.root)
+    } catch {
+      io.write("GIT INSPECTION BLOCKED  bounded adapter failed closed")
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return finishGitInspection(workspaceState, io, report)
+    }
+    if (!isGitInspection(observedInspection, report.root)) {
+      io.write("GIT INSPECTION BLOCKED  invalid adapter result")
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return finishGitInspection(workspaceState, io, report)
+    }
+    const inspection = observedInspection
+    if (inspection.status === "complete" && inspection.diff.observationDigest !== inspection.outputDigest) {
+      io.write("GIT INSPECTION BLOCKED  diff binding does not match the bounded observation")
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return finishGitInspection(workspaceState, io, report)
+    }
+    for (const line of renderGitInspection(inspection)) io.write(line)
+    if (inspection.status === "blocked") {
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return finishGitInspection(workspaceState, io, report)
     }
     const revalidation = await dependencies
       .revalidateGitRepositoryBaseline(report.root, parsedCapture.value.snapshot)
@@ -208,32 +215,57 @@ export async function runWorkspaceGate(
         io.write(line)
       }
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
     }
     if (parsedRevalidation.value.status === "blocked") {
       for (const line of renderGitBaselineView({ status: "blocked", reason: parsedRevalidation.value.reason })) {
         io.write(line)
       }
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
     }
-    if (parsedRevalidation.value.expectedSnapshotDigest !== parsedCapture.value.snapshot.snapshotDigest) {
+    if (
+      parsedRevalidation.value.expectedSnapshotDigest !== parsedCapture.value.snapshot.snapshotDigest ||
+      (parsedRevalidation.value.status === "current" &&
+        parsedRevalidation.value.currentSnapshotDigest !== parsedCapture.value.snapshot.snapshotDigest)
+    ) {
       for (const line of renderGitBaselineView({ status: "blocked", reason: "revalidation snapshot mismatch" })) {
         io.write(line)
       }
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-      return { exitCode: 2, workspaceState, operationState: null, report }
+      return finishGitInspection(workspaceState, io, report)
     }
     for (const line of renderGitBaselineView(parsedRevalidation.value)) io.write(line)
-    io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-    return {
-      exitCode: parsedRevalidation.value.status === "current" ? 0 : 2,
-      workspaceState,
-      operationState: null,
-      report,
+    if (parsedRevalidation.value.status !== "current") {
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return finishGitInspection(workspaceState, io, report)
+    }
+    repositoryBaseline = parsedCapture.value.snapshot
+    if (!io.continueAfterGitInspection) {
+      workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
+      io.write("WORKSPACE STATE  UNTRUSTED • inspection complete • no trust stored")
+      return { exitCode: 0, workspaceState, operationState: null, report }
+    }
+    io.write("WORKSPACE STATE  AWAITING_DECISION • Git baseline current • no trust stored")
+    io.write("CHOICES    [R] read-only   [A] activate once   [Q] exit")
+    decision = await io.chooseWorkspaceDecision(true, false)
+    if (decision === "exit") {
+      workspaceState = advanceWorkspace(workspaceState, "decision.exit", io)
+      io.write("EXIT       no trust stored • no effect dispatched")
+      return { exitCode: 0, workspaceState, operationState: null, report }
+    }
+    if (decision === "read-only") {
+      workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
+      io.write("READ ONLY  bounded report and Git baseline only • no trust stored • no effect dispatched")
+      return { exitCode: 0, workspaceState, operationState: null, report }
+    }
+    if (decision !== "activate-once") {
+      workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
+      io.write("DENIED     activation requires an explicit Activate once decision")
+      return { exitCode: 2, workspaceState, operationState: null, report }
     }
   }
-  if (!activationCheck.allowed && activationCheck.reason === "git_baseline_not_inspected") {
+  if (!activationCheck.allowed && activationCheck.reason === "git_baseline_not_inspected" && !repositoryBaseline) {
     workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
     io.write("GIT BASELINE NOT INSPECTED — activation and controlled effects are unavailable")
     io.write("READ ONLY  bounded static report remains available • no trust stored • no effect dispatched")
@@ -244,11 +276,21 @@ export async function runWorkspaceGate(
     return { exitCode: 2, workspaceState, operationState: null, report }
   }
 
-  const activation = await revalidateWorkspaceSnapshot(report)
+  const activation = repositoryBaseline
+    ? await revalidateWorkspacePreflight(report)
+    : await revalidateWorkspaceSnapshot(report)
   if (!activation.matched) {
     workspaceState = advanceWorkspace(workspaceState, "snapshot.drifted", io)
     io.write(`STALE      ${activation.reason} • run a new bounded static preflight`)
     return { exitCode: 2, workspaceState, operationState: null, report: activation.report }
+  }
+  if (repositoryBaseline) {
+    const current = await revalidateCurrentGitBaseline(report.root, repositoryBaseline, dependencies)
+    if (!current.current) {
+      workspaceState = advanceWorkspace(workspaceState, "snapshot.drifted", io)
+      io.write(`STALE      ${current.reason} • inspect Git again before activation`)
+      return { exitCode: 2, workspaceState, operationState: null, report: activation.report }
+    }
   }
 
   workspaceState = advanceWorkspace(workspaceState, "decision.activate_once", io)
@@ -261,13 +303,14 @@ export async function runWorkspaceGate(
   for (const line of renderControlledWritePreview(plan)) io.write(line)
 
   const approval = await io.approveControlledWrite()
-  if (approval === "deny") {
+  if (approval !== "approve") {
     const approvalRejectedAt = new Date().toISOString()
     if (dependencies.recordDeniedOperation) {
       try {
         const durable = await dependencies.recordDeniedOperation({
           plan,
           report,
+          ...(repositoryBaseline ? { repositoryBaseline } : {}),
           policyAskedAt,
           approvalRejectedAt,
           recordingStartedAt: new Date().toISOString(),
@@ -306,6 +349,7 @@ export async function runWorkspaceGate(
     executed = await dependencies.executeApprovedOperation({
       plan,
       report,
+      ...(repositoryBaseline ? { repositoryBaseline } : {}),
       policyAskedAt,
       approvalGrantedAt,
       recordingStartedAt: new Date().toISOString(),
@@ -336,8 +380,12 @@ export async function runWorkspaceGate(
   io.write("EFFECT OBSERVED — NOT VERIFIED")
   let verification: DurableVerification
   try {
-    verification = await dependencies.verifyApprovedOperation({ plan, report })
-    requireMatchingDurableVerification(verification, plan.operationId)
+    verification = await dependencies.verifyApprovedOperation({
+      plan,
+      report,
+      ...(repositoryBaseline ? { repositoryBaseline } : {}),
+    })
+    requireMatchingDurableVerification(verification, plan.operationId, executed.receiptID, plan.contentDigest)
   } catch {
     operationState = "reconciliation_required"
     io.write(renderOperationState(plan.operationId, Operation.operationSemanticKey(operationState)))
@@ -362,6 +410,45 @@ export async function runWorkspaceGate(
   )
   workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
   return { exitCode: verification.status === "failed" ? 1 : 2, workspaceState, operationState, report }
+}
+
+function finishGitInspection(
+  workspaceState: WorkspaceTrustState,
+  io: WorkspaceGateIO,
+  report: WorkspaceTrustReport,
+): WorkspaceGateResult {
+  return {
+    exitCode: 2,
+    workspaceState: advanceWorkspace(workspaceState, "decision.read_only", io),
+    operationState: null,
+    report,
+  }
+}
+
+async function revalidateCurrentGitBaseline(
+  workspaceRoot: string,
+  snapshot: GitRepositoryBaselineSnapshot,
+  dependencies: WorkspaceGateDependencies,
+) {
+  if (!dependencies.revalidateGitRepositoryBaseline) {
+    return { current: false as const, reason: "Git baseline adapter unavailable" }
+  }
+  const observed = await dependencies.revalidateGitRepositoryBaseline(workspaceRoot, snapshot).catch(() => null)
+  const parsed = parseGitRepositoryBaselineRevalidationResult(observed)
+  if (!parsed.ok) return { current: false as const, reason: "invalid Git baseline revalidation" }
+  if (parsed.value.status !== "current") {
+    return {
+      current: false as const,
+      reason: parsed.value.status === "stale" ? "Git baseline changed" : `Git baseline blocked: ${parsed.value.reason}`,
+    }
+  }
+  if (
+    parsed.value.expectedSnapshotDigest !== snapshot.snapshotDigest ||
+    parsed.value.currentSnapshotDigest !== snapshot.snapshotDigest
+  ) {
+    return { current: false as const, reason: "Git baseline binding mismatch" }
+  }
+  return { current: true as const }
 }
 
 function baselineMatchesWorkspace(snapshot: GitRepositoryBaselineSnapshot, report: WorkspaceTrustReport) {
@@ -544,7 +631,14 @@ function requireMatchingDurableExecution(value: DurableExecution, operationID: s
   }
 }
 
-function requireMatchingDurableVerification(value: DurableVerification, operationID: string) {
+function requireMatchingDurableVerification(
+  value: DurableVerification,
+  operationID: string,
+  receiptID: string | null,
+  expectedObservationDigest: string,
+) {
+  const evidence = parseOperationEvidence(value.evidence)
+  const criterion = evidence.ok && evidence.value.criteria.length === 1 ? evidence.value.criteria[0] : undefined
   if (
     value.operationID !== operationID ||
     !Number.isSafeInteger(value.sequence) ||
@@ -553,7 +647,17 @@ function requireMatchingDurableVerification(value: DurableVerification, operatio
     value.lastCursor < 1 ||
     (value.status === "verified" && value.state !== "succeeded") ||
     (value.status === "failed" && value.state !== "failed") ||
-    (value.status === "unknown" && value.state !== "reconciliation_required")
+    (value.status === "unknown" && value.state !== "reconciliation_required") ||
+    !evidence.ok ||
+    evidence.value.operationID !== operationID ||
+    receiptID === null ||
+    evidence.value.receiptID !== receiptID ||
+    !criterion ||
+    criterion.criterionID !== "marker_exact_bytes" ||
+    (value.status === "verified" &&
+      (criterion.result !== "passed" || criterion.observationDigest !== expectedObservationDigest)) ||
+    (value.status === "failed" && criterion.result !== "failed") ||
+    (value.status === "unknown" && criterion.result !== "unknown")
   ) {
     throw new Error("The durable verification projection does not match the current Operation")
   }
