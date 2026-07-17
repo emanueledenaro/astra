@@ -72,6 +72,7 @@ const observedCompletionContext = {
 } as const satisfies OperationReceipt["verificationContext"]
 
 const providerResources = ["provider:turn"] as const
+const hostCommandResources = ["process:/bin/pwd", "workspace:/tmp/astra"] as const
 const providerAuthorizedLifecycle = [
   {
     ...authorizedLifecycle[0],
@@ -86,6 +87,26 @@ const providerAuthorizedLifecycle = [
           completionCriteria: ["provider_turn_response_observed"],
         },
         resources: providerResources,
+      },
+    },
+  },
+  ...authorizedLifecycle.slice(1),
+] as const
+
+const hostCommandAuthorizedLifecycle = [
+  {
+    ...authorizedLifecycle[0],
+    event: {
+      ...authorizedLifecycle[0].event,
+      payload: {
+        ...admittedPayload,
+        effectSpecification: {
+          ...admittedPayload.effectSpecification,
+          effectClass: "host_command",
+          targetDescriptors: [{ resource: "process:/bin/pwd", mode: "execute_once" }],
+          completionCriteria: ["host_process_exit_observed"],
+        },
+        resources: hostCommandResources,
       },
     },
   },
@@ -162,6 +183,36 @@ describe("specialized operation receipt ingestion", () => {
           },
           observedCompletionContext,
           { effectClass: "provider_turn", resources: providerResources },
+        )
+        const result = yield* ledger.ingestReceipt({ receipt, event: receiptEvent })
+        expect(result).toMatchObject({
+          kind: "ingested",
+          event: { name: "effect.completed" },
+          operation: { state: "completed" },
+        })
+        expect(JSON.stringify(result)).not.toContain("VERIFIED")
+      }),
+    )
+  })
+
+  test("accepts observed completion for an admitted host command", async () => {
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        let now = "2026-07-17T10:00:04.000Z"
+        const ledger = yield* makeOperationLedgerWithClock(() => now)
+        yield* ledger.initialize()
+        yield* ledger.appendBatch(hostCommandAuthorizedLifecycle)
+        yield* ledger.claimDispatch(claimCommand)
+        now = "2026-07-17T10:00:06.000Z"
+        const receipt = makeReceipt(
+          {
+            kind: "effect_completed",
+            completionDigest: contentDigest,
+            assurance: "observed_not_verified",
+          },
+          observedCompletionContext,
+          { effectClass: "host_command", resources: hostCommandResources },
         )
         const result = yield* ledger.ingestReceipt({ receipt, event: receiptEvent })
         expect(result).toMatchObject({

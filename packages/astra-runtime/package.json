@@ -13,7 +13,8 @@
     "./controlled-write": "./src/controlled-write.ts",
     "./operation-ledger": "./src/operation-ledger.ts",
     "./controlled-write-coordinator": "./src/controlled-write-coordinator.ts",
-    "./controlled-write-verifier": "./src/controlled-write-verifier.ts"
+    "./controlled-write-verifier": "./src/controlled-write-verifier.ts",
+    "./host-command": "./src/host-command.ts"
   },
   "scripts": {
     "test": "bun test",

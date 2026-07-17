@@ -67,6 +67,7 @@ const maximumIntegrityEvents = 100_000
 const maximumIntegrityOperations = 10_000
 const maximumBatchEvents = 32
 const emptyDigest = `sha256:${"0".repeat(64)}`
+const observedCompletionEffectClasses = ["provider_turn", "host_command"] as const
 
 const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
 type Database = Effect.Success<typeof makeDatabase>
@@ -2585,7 +2586,10 @@ function receiptObservationBindingMatches(receipt: OperationReceipt) {
 }
 
 function receiptCompletionClassMatches(receipt: OperationReceipt) {
-  return receipt.observation.kind !== "effect_completed" || receipt.effectClass === "provider_turn"
+  return (
+    receipt.observation.kind !== "effect_completed" ||
+    observedCompletionEffectClasses.some((effectClass) => receipt.effectClass === effectClass)
+  )
 }
 
 function parseAndDigestEvent(
