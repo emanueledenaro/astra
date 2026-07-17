@@ -11,6 +11,7 @@ export {
 } from "./operation"
 
 export * as Operation from "./operation"
+export * as OperationContract from "./operation-contract"
 
 export {
   projectWorkspaceTrustEvent,
@@ -30,6 +31,35 @@ export type {
   OperationTransitionResult,
   RejectedOperationTransition,
 } from "./operation"
+
+export type {
+  ActorRef,
+  AdmissionKey,
+  AttemptID,
+  CapabilityGrantID,
+  ContentDigest,
+  CorrelationID,
+  DecisionID,
+  EvidenceID,
+  IdempotencyKey,
+  OperationAuthority,
+  OperationDispatch,
+  OperationEffectSpecification,
+  OperationEventEnvelope,
+  OperationEventID,
+  OperationEventName,
+  OperationEvidence,
+  OperationID,
+  OperationIntent,
+  OperationReceipt,
+  OperationReversibility,
+  OperationRisk,
+  OperationVerificationPlan,
+  ReceiptID,
+  RetryBudget,
+  VerificationPlanID,
+  WorkspaceBaseline,
+} from "./operation-contract"
 
 export type {
   AcceptedWorkspaceTrustTransition,
