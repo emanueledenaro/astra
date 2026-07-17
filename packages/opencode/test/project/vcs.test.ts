@@ -333,3 +333,46 @@ describe("Vcs diff", () => {
     { git: true },
   )
 })
+
+describe("Vcs apply", () => {
+  afterEach(async () => {
+    await disposeAllInstances()
+  })
+
+  it.instance(
+    "blocks inherited patch application during Astra safe start without effects",
+    () =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const previous = process.env.ASTRA_SAFE_START
+          process.env.ASTRA_SAFE_START = "1"
+          return previous
+        }),
+        () =>
+          Effect.gen(function* () {
+            const test = yield* TestInstance
+            const vcs = yield* Vcs.Service
+            const target = path.join(test.directory, "blocked-by-astra.txt")
+            const patch = [
+              "diff --git a/blocked-by-astra.txt b/blocked-by-astra.txt",
+              "new file mode 100644",
+              "--- /dev/null",
+              "+++ b/blocked-by-astra.txt",
+              "@@ -0,0 +1 @@",
+              "+must not exist",
+              "",
+            ].join("\n")
+
+            const exit = yield* Effect.exit(vcs.apply({ patch }))
+            expect(exit._tag).toBe("Failure")
+            expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(target))).toBe(false)
+          }),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.ASTRA_SAFE_START
+            else process.env.ASTRA_SAFE_START = previous
+          }),
+      ),
+    { git: true },
+  )
+})

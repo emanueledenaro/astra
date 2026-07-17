@@ -31,6 +31,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 
@@ -1337,6 +1338,16 @@ const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(() =>
       Effect.gen(function* () {
+        if (Flag.ASTRA_SAFE_START) {
+          return {
+            models: new Map(),
+            providers: {} as Record<ProviderV2.ID, Info>,
+            catalog: {} as Record<ProviderV2.ID, Info>,
+            sdk: new Map(),
+            modelLoaders: {},
+            varsLoaders: {},
+          }
+        }
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()

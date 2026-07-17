@@ -10,6 +10,9 @@ import { Context, Deferred, Duration, Effect, Exit, Layer, Scope } from "effect"
 import { type InstanceContext } from "./instance-context"
 import { InstanceBootstrap } from "./bootstrap-service"
 import * as Project from "./project"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { ProjectV2 } from "@opencode-ai/core/project"
+import { revalidateAstraSessionAuthority } from "@astra/runtime/session-authority"
 
 export interface LoadInput {
   directory: string
@@ -44,8 +47,27 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
 
     const boot = (input: LoadInput & { directory: string }) =>
       Effect.gen(function* () {
-        const ctx: InstanceContext =
-          input.project && input.worktree
+        const ctx: InstanceContext = Flag.ASTRA_SAFE_START
+          ? yield* Effect.promise(async () => {
+              const session = await revalidateAstraSessionAuthority(process.env, input.directory)
+              if (session.status !== "valid") {
+                throw new Error(
+                  `Astra session authority rejected before instance admission: ${session.status === "invalid" ? session.reason : "missing"}`,
+                )
+              }
+              const issuedAt = Date.parse(session.authority.issuedAt)
+              return {
+                directory: session.report.root,
+                worktree: session.report.root,
+                project: {
+                  id: ProjectV2.ID.make(`astra-${session.authority.sessionID}`),
+                  worktree: session.report.root,
+                  time: { created: issuedAt, updated: issuedAt },
+                  sandboxes: [],
+                },
+              }
+            })
+          : input.project && input.worktree
             ? {
                 directory: input.directory,
                 worktree: input.worktree,

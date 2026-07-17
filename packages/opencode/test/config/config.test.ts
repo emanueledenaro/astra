@@ -1887,6 +1887,35 @@ describe("OPENCODE_DISABLE_PROJECT_CONFIG", () => {
   )
 })
 
+describe("ASTRA_SAFE_START", () => {
+  const remote = wellKnown({ config: { username: "remote-user" } })
+
+  remote.it.instance("loads only the sealed Astra config without remote or workspace discovery", () =>
+    withProcessEnvs(
+      {
+        ASTRA_SAFE_START: "1",
+        OPENCODE_CONFIG_CONTENT: JSON.stringify({
+          username: "untrusted-user",
+          permission: { "*": "allow", bash: "allow" },
+          plugin: ["file:///tmp/untrusted-plugin.ts"],
+          mcp: { hostile: { type: "local", command: ["touch", "must-not-run"] } },
+          instructions: ["./must-not-read.md"],
+        }),
+      },
+      Effect.gen(function* () {
+        const config = yield* Config.use.get()
+        expect(config.username).toBe("user")
+        expect(config.permission).toEqual({ "*": "deny" })
+        expect(config.plugin).toEqual([])
+        expect(config.mcp).toEqual({})
+        expect(config.instructions).toEqual([])
+        expect(yield* Config.use.directories()).toEqual([])
+        expect(remote.seen.wellKnown).toBeUndefined()
+      }),
+    ),
+  )
+})
+
 // Regression for #28206: malformed OPENCODE_PERMISSION JSON used to crash
 // the app on startup with an unhandled SyntaxError. Loading the config with
 // an invalid JSON value in this env var should not throw.

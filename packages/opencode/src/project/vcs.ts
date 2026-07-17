@@ -7,6 +7,7 @@ import { Git } from "@/git"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { VcsEvent } from "@opencode-ai/schema/vcs-event"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 const PATCH_CONTEXT_LINES = 2_147_483_647
 const MAX_PATCH_BYTES = 10_000_000
@@ -398,6 +399,12 @@ const layer: Layer.Layer<Service, never, Git.Service | EventV2Bridge.Service> = 
         return [tracked, ...untracked].filter(Boolean).join("\n")
       }),
       apply: Effect.fn("Vcs.apply")(function* (input: ApplyInput) {
+        if (Flag.ASTRA_SAFE_START) {
+          return yield* new PatchApplyError({
+            message: "Patch application is blocked until the Astra Git Control Plane authorizes it",
+            reason: "not-clean",
+          })
+        }
         const ctx = yield* InstanceState.context
         if (ctx.project.vcs !== "git") {
           return yield* new PatchApplyError({

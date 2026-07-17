@@ -19,8 +19,7 @@ import type { ConsoleState } from "@opencode-ai/core/v1/config/console-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { InstanceState } from "@/effect/instance-state"
 import { Context, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http"
-import { EffectFlock } from "@opencode-ai/core/util/effect-flock"
+import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { containsPath, type InstanceContext } from "../project/instance-context"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { RemoteAuthError } from "@opencode-ai/core/v1/config/error"
@@ -313,6 +312,31 @@ const layer = Layer.effect(
 
     const loadInstanceState = Effect.fn("Config.loadInstanceState")(
       function* (ctx: InstanceContext) {
+        if (Flag.ASTRA_SAFE_START) {
+          return {
+            config: {
+              $schema: "https://opencode.ai/config.json",
+              username: "user",
+              share: "disabled" as const,
+              autoshare: false,
+              permission: { "*": "deny" as const },
+              formatter: false,
+              lsp: false,
+              plugin: [],
+              mcp: {},
+              command: {},
+              instructions: [],
+            } satisfies Info,
+            directories: [],
+            deps: [],
+            consoleState: {
+              consoleManagedProviders: [],
+              activeOrgName: undefined,
+              switchableOrgCount: 0,
+            },
+          }
+        }
+
         const auth = yield* authSvc.all().pipe(Effect.orDie)
 
         let result: Info = {}
@@ -422,6 +446,7 @@ const layer = Layer.effect(
         const deps: Fiber.Fiber<void>[] = []
 
         for (const dir of directories) {
+          if (Flag.ASTRA_SAFE_START) continue
           if (dir.endsWith(".opencode") || dir === Flag.OPENCODE_CONFIG_DIR) {
             for (const file of ["opencode.json", "opencode.jsonc"]) {
               const source = path.join(dir, file)

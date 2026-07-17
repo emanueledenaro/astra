@@ -1,3 +1,6 @@
+import { createHash, randomUUID } from "node:crypto"
+import { chmod, mkdir, writeFile } from "node:fs/promises"
+import { join } from "node:path"
 import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -8,6 +11,7 @@ import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
 import { tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { scanWorkspace } from "@astra/runtime/preflight"
 
 let bootstrapRun: Effect.Effect<void> = Effect.void
 const noopBootstrap = Layer.succeed(
@@ -39,6 +43,58 @@ const registerDisposerScoped = (disposer: (directory: string) => Promise<void>) 
   )
 
 describe("InstanceStore", () => {
+  it.live("admits Astra from sealed static facts without Git or repository writes", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const authorityDirectory = yield* tmpdirScoped()
+      const canaryDirectory = yield* tmpdirScoped()
+      yield* Effect.promise(() => chmod(authorityDirectory, 0o700))
+      const bin = join(dir, "canary-bin")
+      yield* Effect.promise(() => mkdir(bin, { mode: 0o700 }))
+      const marker = join(canaryDirectory, "git-ran")
+      const fakeGit = join(bin, "git")
+      yield* Effect.promise(async () => {
+        await writeFile(fakeGit, '#!/bin/sh\n: > "$ASTRA_GIT_CANARY"\nexit 99\n')
+        await chmod(fakeGit, 0o700)
+      })
+
+      const report = yield* Effect.promise(() => scanWorkspace(dir))
+      if (!report.identity || !report.securityDigest || report.completeness !== "complete") {
+        throw new Error("Expected a complete Astra preflight")
+      }
+      const content = JSON.stringify({
+        schemaVersion: 1,
+        sessionID: randomUUID(),
+        issuedAt: new Date().toISOString(),
+        mode: "read-only",
+        effectPolicy: "deny",
+        workspace: { root: report.root, identity: report.identity, securityDigest: report.securityDigest },
+        repositoryBaseline: null,
+      })
+      const authority = join(authorityDirectory, "authority.json")
+      yield* Effect.promise(() => writeFile(authority, content, { mode: 0o600 }))
+
+      const store = yield* InstanceStore.Service
+      const ctx = yield* withEnvironment(
+        {
+          ASTRA_SAFE_START: "1",
+          OPENCODE_CLIENT: "astra",
+          ASTRA_SESSION_AUTHORITY_FILE: authority,
+          ASTRA_SESSION_AUTHORITY_DIGEST: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+          ASTRA_GIT_CANARY: marker,
+          PATH: `${bin}:${process.env.PATH ?? ""}`,
+        },
+        store.load({ directory: dir }),
+      )
+
+      expect(ctx.directory).toBe(dir)
+      expect(ctx.worktree).toBe(dir)
+      expect(ctx.project.id).toStartWith("astra-")
+      expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+      expect(yield* Effect.promise(() => Bun.file(join(dir, ".git", "opencode")).exists())).toBe(false)
+    }),
+  )
+
   it.live("loads instance context", () =>
     Effect.gen(function* () {
       const dir = yield* tmpdirScoped({ git: true })
@@ -246,3 +302,24 @@ describe("InstanceStore", () => {
     }),
   )
 })
+
+function withEnvironment<A, E, R>(
+  values: Readonly<Record<string, string>>,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]))
+      for (const [key, value] of Object.entries(values)) process.env[key] = value
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        for (const [key, value] of Object.entries(previous)) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }),
+  )
+}
