@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { lstat, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createControlledWritePlan, demoMarkerName } from "../src/controlled-write-plan"
@@ -103,5 +103,33 @@ describe("controlled demo write", () => {
       prepared: false,
       reason: "security_digest_changed",
     })
+  })
+
+  test("blocks the effect when Git metadata exists without an inspected baseline", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const report = await scanWorkspace(root)
+
+    expect(await prepareControlledWrite(createControlledWritePlan(root, "operation-git"), report)).toEqual({
+      prepared: false,
+      reason: "git_baseline_not_inspected",
+    })
+    expect(await lstat(join(root, demoMarkerName)).catch(() => null)).toBeNull()
+  })
+
+  test("blocks the effect when Git metadata appears after preparation", async () => {
+    const root = await workspace()
+    const report = await scanWorkspace(root)
+    const prepared = await prepareControlledWrite(createControlledWritePlan(root, "operation-late-git"), report)
+    expect(prepared.prepared).toBeTrue()
+    if (!prepared.prepared) throw new Error(prepared.reason)
+
+    await mkdir(join(root, ".git"))
+
+    expect(await prepared.execute()).toEqual({
+      status: "failed_without_effect",
+      reason: "git_baseline_not_inspected",
+    })
+    expect(await lstat(join(root, demoMarkerName)).catch(() => null)).toBeNull()
   })
 })

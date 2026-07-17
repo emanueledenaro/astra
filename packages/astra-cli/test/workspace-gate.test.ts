@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { lstat, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { demoMarkerName } from "@astra/runtime/controlled-write-plan"
+import { createMaliciousWorkspace, directoryDigest, sentinelNames } from "../../astra-runtime/test/support"
 import {
   runWorkspaceGate,
   type EffectApproval,
@@ -59,6 +60,89 @@ describe("workspace gate", () => {
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
     expect(terminal.lines.join("\n")).toContain("READ ONLY")
     expect(terminal.lines.join("\n")).not.toContain("HOST EXECUTION")
+    expect(terminal.lines.join("\n")).toContain("STATIC PREFLIGHT DIGEST")
+    expect(terminal.lines.join("\n")).not.toContain("SNAPSHOT")
+  })
+
+  test("keeps a hostile Git workspace read-only when an override requests activation", async () => {
+    let requests = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        requests += 1
+        return new Response("unexpected")
+      },
+    })
+    const fixture = await createMaliciousWorkspace(server.port)
+
+    try {
+      const before = await directoryDigest(fixture.root)
+      const terminal = scriptedIO("activate-once", "approve")
+      let denialRecordings = 0
+      const result = await runWorkspaceGate(fixture.root, terminal.io, {
+        async recordDeniedOperation({ plan }) {
+          denialRecordings += 1
+          return { operationID: plan.operationId, state: "denied", sequence: 3, lastCursor: 3 }
+        },
+      })
+      const output = terminal.lines.join("\n")
+
+      expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: null })
+      expect(output).toContain("GIT META   directory • .git")
+      expect(output).toContain("GIT BASELINE NOT INSPECTED")
+      expect(output).toContain("activate once unavailable")
+      expect(output).toContain("READ ONLY  bounded static report remains available")
+      expect(output).not.toContain("HOST EXECUTION")
+      expect(output).not.toContain("OPERATION ")
+      expect(denialRecordings).toBe(0)
+      expect(await directoryDigest(fixture.root)).toBe(before)
+      expect(await sentinelNames(fixture.sentinel)).toEqual([])
+      expect(requests).toBe(0)
+    } finally {
+      await server.stop(true)
+      await fixture.cleanup()
+    }
+  })
+
+  test("keeps a nested Git workspace read-only when an override requests activation", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "astra-cli-parent-repository-"))
+    const root = join(repository, "packages", "app")
+    roots.push(repository)
+    await mkdir(join(repository, ".git"))
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, "package.json"), "{}\n")
+    const terminal = scriptedIO("activate-once", "approve")
+
+    const result = await runWorkspaceGate(root, terminal.io)
+    const output = terminal.lines.join("\n")
+
+    expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: null })
+    expect(output).toContain("GIT META   directory • ../../.git")
+    expect(output).toContain("GIT BASELINE NOT INSPECTED")
+    expect(output).not.toContain("HOST EXECUTION")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("keeps a symlinked path into a Git repository read-only", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "astra-cli-physical-repository-"))
+    const aliases = await mkdtemp(join(tmpdir(), "astra-cli-repository-alias-"))
+    const physicalParent = join(repository, "packages")
+    const root = join(aliases, "linked-packages", "app")
+    roots.push(repository, aliases)
+    await mkdir(join(repository, ".git"))
+    await mkdir(join(physicalParent, "app"), { recursive: true })
+    await writeFile(join(physicalParent, "app", "package.json"), "{}\n")
+    await symlink(physicalParent, join(aliases, "linked-packages"))
+    const terminal = scriptedIO("activate-once", "approve")
+
+    const result = await runWorkspaceGate(root, terminal.io)
+    const output = terminal.lines.join("\n")
+
+    expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: null })
+    expect(output).toContain("GIT META   directory • ../../.git")
+    expect(output).toContain("GIT BASELINE NOT INSPECTED")
+    expect(output).not.toContain("HOST EXECUTION")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
   })
 
   test("exits without creating trust or proposing an effect", async () => {
@@ -178,7 +262,7 @@ describe("workspace gate", () => {
     expect(output).toContain("demo marker matches the exact expected bytes and SHA-256")
   })
 
-  test("invalidates activate-once when the snapshot changes after preview", async () => {
+  test("invalidates activate-once when bounded static facts change after preview", async () => {
     const root = await workspace()
     const terminal = scriptedIO("activate-once", "approve", () =>
       writeFile(join(root, "AGENTS.md"), "changed after report\n"),
@@ -187,7 +271,7 @@ describe("workspace gate", () => {
 
     expect(result).toMatchObject({ exitCode: 2, workspaceState: "STALE", operationState: null })
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
-    expect(terminal.lines.join("\n")).toContain("run a new preflight")
+    expect(terminal.lines.join("\n")).toContain("run a new bounded static preflight")
   })
 
   test("cancels without overwriting an existing marker or inventing stale trust", async () => {

@@ -17,8 +17,8 @@ describe("preflight negative-capability boundary", () => {
       .filter((value): value is string => value !== undefined)
 
     expect(imports.toSorted((left, right) => left.localeCompare(right))).toEqual(
-      ["@astra/domain/workspace-trust", "node:crypto", "node:fs/promises", "node:path"].toSorted((left, right) =>
-        left.localeCompare(right),
+      ["@astra/domain/workspace-trust", "node:crypto", "node:fs", "node:fs/promises", "node:path"].toSorted(
+        (left, right) => left.localeCompare(right),
       ),
     )
     for (const token of [

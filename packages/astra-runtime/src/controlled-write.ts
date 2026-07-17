@@ -56,6 +56,14 @@ export async function prepareControlledWrite(
     async execute() {
       if (consumed) return { status: "failed_without_effect", reason: "attempt_already_consumed" }
       consumed = true
+      const revalidation = await revalidateWorkspaceSnapshot(trustedReport)
+      if (!revalidation.matched) {
+        const gitMetadataAppeared = revalidation.report.surfaces.some((surface) => surface.kind === "git_metadata")
+        return {
+          status: "failed_without_effect",
+          reason: gitMetadataAppeared ? "git_baseline_not_inspected" : revalidation.reason,
+        }
+      }
       return executeCreateOnlyWrite(plan, target, expectedIdentity)
     },
   }

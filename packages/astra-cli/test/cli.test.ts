@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 const roots: Array<string> = []
@@ -37,6 +37,21 @@ describe("Astra CLI durable state", () => {
       sequence: 3,
       lastCursor: 3,
     })
+  })
+
+  test("a command-line decision override cannot activate a Git workspace", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const dataDirectory = join(await temporaryDirectory("astra-cli-data-parent-"), "not-created")
+    const run = await runCli(root, dataDirectory, "activate-once", "approve")
+
+    expect(run.exitCode).toBe(2)
+    expect(run.stdout).toContain("GIT META   directory • .git")
+    expect(run.stdout).toContain("GIT BASELINE NOT INSPECTED")
+    expect(run.stdout).toContain("READ ONLY  bounded static report remains available")
+    expect(run.stdout).not.toContain("HOST EXECUTION")
+    expect(await exists(join(root, ".astra-demo-marker"))).toBeFalse()
+    expect(await exists(dataDirectory)).toBeFalse()
   })
 })
 

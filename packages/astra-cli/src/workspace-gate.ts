@@ -2,7 +2,7 @@ import { Operation, WorkspaceTrust } from "@astra/domain"
 import type { OperationEvent, OperationState } from "@astra/domain/operation"
 import type { WorkspaceTrustEvent, WorkspaceTrustReport, WorkspaceTrustState } from "@astra/domain/workspace-trust"
 import { createControlledWritePlan } from "@astra/runtime/controlled-write-plan"
-import { revalidateWorkspaceSnapshot, scanWorkspace } from "@astra/runtime/preflight"
+import { checkWorkspaceActivation, revalidateWorkspaceSnapshot, scanWorkspace } from "@astra/runtime/preflight"
 import {
   renderControlledWritePreview,
   renderHeader,
@@ -61,9 +61,14 @@ export async function runWorkspaceGate(
     io,
   )
   for (const line of renderWorkspaceReport(report)) io.write(line)
-  io.write("CHOICES    [R] read-only   [A] activate once   [Q] exit")
+  const activationCheck = checkWorkspaceActivation(report)
+  io.write(
+    activationCheck.allowed
+      ? "CHOICES    [R] read-only   [A] activate once   [Q] exit"
+      : "CHOICES    [R] read-only   [Q] exit   • activate once unavailable",
+  )
 
-  const decision = await io.chooseWorkspaceDecision(report.completeness === "complete")
+  const decision = await io.chooseWorkspaceDecision(activationCheck.allowed)
   if (decision === "exit") {
     workspaceState = advanceWorkspace(workspaceState, "decision.exit", io)
     io.write("EXIT       no trust stored • no effect dispatched")
@@ -74,6 +79,12 @@ export async function runWorkspaceGate(
     io.write("READ ONLY  bounded report only • no trust stored • no effect dispatched")
     return { exitCode: 0, workspaceState, operationState: null, report }
   }
+  if (!activationCheck.allowed && activationCheck.reason === "git_baseline_not_inspected") {
+    workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
+    io.write("GIT BASELINE NOT INSPECTED — activation and controlled effects are unavailable")
+    io.write("READ ONLY  bounded static report remains available • no trust stored • no effect dispatched")
+    return { exitCode: 2, workspaceState, operationState: null, report }
+  }
   if (report.completeness !== "complete") {
     io.write("DENIED     activation is unavailable for an incomplete preflight")
     return { exitCode: 2, workspaceState, operationState: null, report }
@@ -82,12 +93,12 @@ export async function runWorkspaceGate(
   const activation = await revalidateWorkspaceSnapshot(report)
   if (!activation.matched) {
     workspaceState = advanceWorkspace(workspaceState, "snapshot.drifted", io)
-    io.write(`STALE      ${activation.reason} • run a new preflight`)
+    io.write(`STALE      ${activation.reason} • run a new bounded static preflight`)
     return { exitCode: 2, workspaceState, operationState: null, report: activation.report }
   }
 
   workspaceState = advanceWorkspace(workspaceState, "decision.activate_once", io)
-  io.write("TRUST      once • exact snapshot • current process only • nothing persisted")
+  io.write("TRUST      once • bounded static preflight unchanged • current process only • nothing persisted")
 
   const plan = createControlledWritePlan(report.root)
   let operationState = advanceOperation(null, "operation.admitted", plan.operationId, io)

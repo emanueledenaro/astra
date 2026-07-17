@@ -79,7 +79,7 @@ async function verifyDeniedEffect() {
 }
 
 async function verifyApprovedEffect() {
-  const fixture = await workspace()
+  const fixture = await workspace(false)
   const run = await runCli(fixture.root, "activate-once", "approve")
   const marker = await readFile(join(fixture.root, demoMarkerName), "utf8")
 

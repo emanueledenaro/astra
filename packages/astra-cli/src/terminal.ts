@@ -25,15 +25,23 @@ export function renderHeader() {
 }
 
 export function renderWorkspaceReport(report: WorkspaceTrustReport) {
+  const gitMetadata = report.surfaces.find((surface) => surface.kind === "git_metadata")
   const lines = [
     `WORKSPACE  ${sanitizeTerminalText(report.root)}`,
     `STATE      ${report.state === "awaiting_decision" ? "AWAITING_DECISION" : "PREFLIGHT_BLOCKED"}`,
-    `SNAPSHOT   ${report.securityDigest ?? "UNAVAILABLE"}`,
+    `STATIC PREFLIGHT DIGEST  ${report.securityDigest ?? "UNAVAILABLE"}`,
     `IDENTITY   ${report.identity ? `${report.identity.device}:${report.identity.inode}` : "UNAVAILABLE"}`,
     `BOUNDS     ${report.scannedEntries}/${report.limits.maxEntries} entries • ${report.scannedBytes}/${report.limits.maxTotalBytes} bytes`,
+    "SCOPE      bounded root metadata, selected regular files, and ancestor .git markers only",
+    gitMetadata
+      ? `GIT META   ${gitMetadata.entryKind} • ${sanitizeTerminalText(gitMetadata.path)}`
+      : "GIT META   none in bounded static inspection",
+    gitMetadata
+      ? "GIT BASELINE NOT INSPECTED • activation blocked"
+      : "GIT BASELINE not required for this non-Git workspace",
   ]
 
-  if (report.surfaces.length === 0) lines.push("SURFACES   none detected in bounded root inventory")
+  if (report.surfaces.length === 0) lines.push("SURFACES   none detected in bounded static inspection")
   for (const surface of report.surfaces) {
     lines.push(`SURFACE    ${sanitizeTerminalText(surface.kind)} • ${sanitizeTerminalText(surface.path)}`)
   }

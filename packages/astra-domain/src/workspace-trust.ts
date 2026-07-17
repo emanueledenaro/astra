@@ -68,6 +68,7 @@ export type WorkspaceIdentity = Readonly<{
 export type WorkspaceRiskSurface = Readonly<{
   kind: string
   path: string
+  entryKind: "directory" | "file" | "symlink" | "other"
 }>
 
 export type WorkspacePreflightLimits = Readonly<{
@@ -98,8 +99,8 @@ const transitionIndex: ReadonlyMap<string, WorkspaceTrustState> = new Map(
  * Projects one already-validated workspace trust event onto the open context.
  *
  * This function proves structural legality only. Before emitting
- * `decision.activate_once`, the runtime must revalidate the exact workspace
- * identity and security digest represented by the preflight report.
+ * `decision.activate_once`, the runtime must revalidate the bounded static
+ * workspace identity and security digest represented by the preflight report.
  */
 export function projectWorkspaceTrustEvent(
   state: WorkspaceTrustState | null,
