@@ -1,29 +1,36 @@
-### Issue for this PR
+## Related issue
 
 Closes #
 
-### Type of change
+## What changed
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Refactor / code improvement
-- [ ] Documentation
+Describe the smallest complete behavior changed by this pull request.
 
-### What does this PR do?
+## Why
 
-Please provide a description of the issue, the changes you made to fix it, and why they work. It is expected that you understand why your changes work and if you do not understand why at least say as much so a maintainer knows how much to value the PR.
+Explain the user or developer problem and why this approach is appropriate.
 
-**If you paste a large clearly AI generated description here your PR may be IGNORED or CLOSED!**
+## Effects and authority
 
-### How did you verify your code works?
+List any file, process, network, credential, Git, persistence, provider, plugin, skill, MCP, or external-service effects. Write `None` when the change introduces none.
 
-### Screenshots / recordings
+## Evidence
 
-_If this is a UI change, please include a screenshot or recording._
+Describe the negative and positive cases observed. Distinguish command success, observed effects, and independently verified outcomes.
 
-### Checklist
+## Validation
 
-- [ ] I have tested my changes locally
-- [ ] I have not included unrelated changes in this PR
+List the exact test, typecheck, lint, formatting, build, or demo commands executed.
 
-_If you do not follow this template your PR will be automatically rejected._
+## Limitations
+
+State what this change does not implement or prove.
+
+## Checklist
+
+- [ ] The change is scoped and contains no unrelated refactor.
+- [ ] I followed AGENTS.md and applicable package instructions.
+- [ ] I added or updated focused tests where behavior changed.
+- [ ] Rejected risky operations were tested for absence of effects where applicable.
+- [ ] Documentation separates implemented behavior from planned behavior.
+- [ ] I reviewed this description and all generated material for accuracy.

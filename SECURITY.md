@@ -1,47 +1,34 @@
-# Security
+# Astra Security Policy
 
-## IMPORTANT
+Astra is under active foundation development. It is not ready for production use and no released version is currently supported.
 
-We do not accept AI generated security reports. We receive a large number of
-these and we absolutely do not have the resources to review them all. If you
-submit one that will be an automatic ban from the project.
+## Report a vulnerability privately
 
-## Threat Model
+Do not open a public issue for a suspected vulnerability. Use GitHub private vulnerability reporting:
 
-### Overview
+https://github.com/emanueledenaro/astra/security/advisories/new
 
-OpenCode is an AI-powered coding assistant that runs locally on your machine. It provides an agent system with access to powerful tools including shell execution, file operations, and web access.
+Include:
 
-### No Sandbox
+- the affected commit or branch;
+- the operating system and relevant runtime versions;
+- a minimal reproduction;
+- the authority or trust boundary that was crossed;
+- the observed effect and supporting evidence;
+- any known workaround.
 
-OpenCode does **not** sandbox the agent. The permission system exists as a UX feature to help users stay aware of what actions the agent is taking - it prompts for confirmation before executing commands, writing files, etc. However, it is not designed to provide security isolation.
+Remove credentials, personal data, proprietary source code, and unrelated logs before submitting. Reports must be reviewed and reproducible by the reporter, including when AI assisted with discovery or drafting.
 
-If you need true isolation, run OpenCode inside a Docker container or VM.
+## Current security boundary
 
-### Server Mode
+The committed Astra demo provides a bounded workspace preflight, explicit activation and effect approval, durable operation records, and fail-closed guards for the implemented paths. It does not yet provide a production sandbox, a credential broker, isolated plugin or MCP execution, or complete Git activation.
 
-Server mode is opt-in only. When enabled, set `OPENCODE_SERVER_PASSWORD` to require HTTP Basic Auth. Without this, the server runs unauthenticated (with a warning). It is the end user's responsibility to secure the server - any functionality it provides is not a vulnerability.
+The inherited OpenCode runtime contains capabilities that are not yet connected behind the Astra trust boundary. OpenCode documentation and behavior must not be interpreted as a released Astra security guarantee.
 
-### Out of Scope
+## Upstream findings
 
-| Category                        | Rationale                                                               |
-| ------------------------------- | ----------------------------------------------------------------------- |
-| **Server access when opted-in** | If you enable server mode, API access is expected behavior              |
-| **Sandbox escapes**             | The permission system is not a sandbox (see above)                      |
-| **LLM provider data handling**  | Data sent to your configured LLM provider is governed by their policies |
-| **MCP server behavior**         | External MCP servers you configure are outside our trust boundary       |
-| **Malicious config files**      | Users control their own config; modifying it is not an attack vector    |
+If a finding affects unchanged OpenCode code and is not caused by an Astra modification, follow the upstream OpenCode security policy. If the finding involves an Astra package, an Astra trust boundary, or the interaction between Astra and inherited code, report it privately to Astra first.
 
----
+## Disclosure and rewards
 
-# Reporting Security Issues
-
-We appreciate your efforts to responsibly disclose your findings, and will make every effort to acknowledge your contributions.
-
-To report a security issue, please use the GitHub Security Advisory ["Report a Vulnerability"](https://github.com/anomalyco/opencode/security/advisories/new) tab.
-
-The team will send a response indicating the next steps in handling your report. After the initial reply to your report, the security team will keep you informed of the progress towards a fix and full announcement, and may ask for additional information or guidance.
-
-## Escalation
-
-If you do not receive an acknowledgement of your report within 6 business days, you may send an email to security@anoma.ly
+Allow time to investigate and coordinate disclosure before publishing details. Astra does not currently operate a vulnerability reward program.
