@@ -21,6 +21,7 @@
     "./governed-workspace-search": "./src/governed-workspace-search.ts",
     "./governed-workspace-search-control": "./src/governed-workspace-search-control.ts",
     "./git-repository-baseline": "./src/git-repository-baseline.ts",
+    "./mcp-activation": "./src/mcp-activation.ts",
     "./provider-control": "./src/provider-control.ts",
     "./session-authority": "./src/session-authority.ts",
     "./workspace-trust": "./src/workspace-trust.ts"

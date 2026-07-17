@@ -20,6 +20,8 @@
     "./git-unstage-coordinator": "./src/git-unstage-coordinator.ts",
     "./extension-inventory-operation": "./src/extension-inventory-operation.ts",
     "./governed-workspace-search": "./src/governed-workspace-search.ts",
+    "./mcp-pinned-fetch": "./src/mcp-pinned-fetch.ts",
+    "./mcp-activation-coordinator": "./src/mcp-activation-coordinator.ts",
     "./anthropic-one-turn": "./src/anthropic-one-turn.ts",
     "./provider-turn-coordinator": "./src/provider-turn-coordinator.ts",
     "./provider-turn-network-policy": "./src/provider-turn-network-policy.ts",

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, createHmac, randomBytes } from "node:crypto"
 import { closeSync, constants, fstatSync, openSync, unlinkSync } from "node:fs"
 import { lstat, mkdir, open, realpath } from "node:fs/promises"
 import { dirname, isAbsolute, relative, resolve } from "node:path"
@@ -112,6 +112,51 @@ export type ExtensionInventoryDependencies = Readonly<{
   beforePinnedHelperSpawn?: () => Promise<void>
   onWorkspaceRootOpened?: () => void
   onProcessEntered?: () => void
+  onPrivateMcpRegistrySnapshot?: (snapshot: ParentPrivateMcpRegistrySnapshot) => void
+}>
+
+export type ParentPrivateMcpConfig =
+  | Readonly<{
+      type: "remote"
+      url: string
+      enabled?: boolean
+      headers?: Readonly<Record<string, string>>
+      oauth?: false | Readonly<Record<string, unknown>>
+      timeout?: number
+    }>
+  | Readonly<{
+      type: "local"
+      command: ReadonlyArray<string>
+      cwd?: string
+      environment?: Readonly<Record<string, string>>
+      enabled?: boolean
+      timeout?: number
+    }>
+
+export type ParentPrivateMcpCandidate = Readonly<{
+  candidateID: ContentDigest
+  serverName: string
+  sourcePath: string
+  sourceDevice: string
+  sourceInode: string
+  sourceDigest: ContentDigest
+  configBindingDigest: ContentDigest
+  config: ParentPrivateMcpConfig
+}>
+
+export type ParentPrivateMcpRegistrySnapshot = Readonly<{
+  generationDigest: ContentDigest
+  entries: ReadonlyArray<ParentPrivateMcpCandidate>
+}>
+
+export type ParentPrivateMcpRegistry = Readonly<{
+  replace: (snapshot: ParentPrivateMcpRegistrySnapshot) => void
+  resolve: (
+    candidateID: string,
+  ) =>
+    | Readonly<{ status: "resolved"; candidate: ParentPrivateMcpCandidate }>
+    | Readonly<{ status: "candidate_stale" | "candidate_unknown" }>
+  clear: () => void
 }>
 
 export class ExtensionInventoryCoordinationError extends Error {
@@ -347,6 +392,9 @@ export async function executeExtensionInventory(
     const ingested = await ingestReceipt(input, facts, receipt)
     await dependencies.injectFault?.("after_ledger_before_ack")
     await acknowledgeReceipt(input.spoolFilename, receipt, ingested.event.eventID, ingested.event.digest)
+    if (observation.privateMcpSnapshot && classifyObservation(observation) === "completed_observed_not_verified") {
+      notifyRegistry(dependencies.onPrivateMcpRegistrySnapshot, observation.privateMcpSnapshot)
+    }
     return durableResult(ingested.operation, receipt, observation.report)
   } catch (cause) {
     if (cause instanceof ExtensionInventoryCoordinationError) throw cause
@@ -415,9 +463,21 @@ export async function recoverExtensionInventory(
 
 /** Parses the private wire and returns only a redacted public report. */
 export function parseAndRedactExtensionInventoryWire(input: Uint8Array): ExtensionInventoryReport {
+  return parseExtensionInventoryWireForParent(input).report
+}
+
+/**
+ * Produces the redacted report plus an in-memory-only registry snapshot. The
+ * private half must never cross the child socket, ledger, receipt, or logs.
+ */
+export function parseExtensionInventoryWireForParent(input: Uint8Array): Readonly<{
+  report: ExtensionInventoryReport
+  privateMcpSnapshot: ParentPrivateMcpRegistrySnapshot
+}> {
   const records = decodeWire(input)
+  const candidateKey = randomBytes(32)
   const candidates = records
-    .flatMap((record) => candidatesFromRecord(record))
+    .flatMap((record) => candidatesFromRecord(record, candidateKey))
     .toSorted((left, right) => {
       const leftKey = `${left.kind}\0${left.sourcePath}\0${left.candidateID}`
       const rightKey = `${right.kind}\0${right.sourcePath}\0${right.candidateID}`
@@ -439,12 +499,57 @@ export function parseAndRedactExtensionInventoryWire(input: Uint8Array): Extensi
   } as const
   const parsed = parseExtensionInventoryReport(report)
   if (!parsed.ok) throw new TypeError("The redacted extension inventory is invalid")
-  return parsed.value
+  const entries = records.flatMap((record) => privateMcpCandidatesFromRecord(record, candidateKey))
+  return Object.freeze({
+    report: parsed.value,
+    privateMcpSnapshot: Object.freeze({
+      generationDigest: requireContentDigest(
+        digest(canonicalJson(entries.map((entry) => ({ candidateID: entry.candidateID, binding: entry.configBindingDigest })))),
+      ),
+      entries: Object.freeze(entries),
+    }),
+  })
+}
+
+/** Creates a non-enumerable, parent-memory-only registry with stale detection. */
+export function createParentPrivateMcpRegistry(): ParentPrivateMcpRegistry {
+  let active = new Map<string, ParentPrivateMcpCandidate>()
+  const stale = new Set<string>()
+  const registry = Object.create(null) as ParentPrivateMcpRegistry
+  Object.defineProperties(registry, {
+    replace: {
+      enumerable: false,
+      value(snapshot: ParentPrivateMcpRegistrySnapshot) {
+        for (const candidateID of active.keys()) stale.add(candidateID)
+        active = new Map(snapshot.entries.map((entry) => [entry.candidateID, deepFreeze(structuredClone(entry))]))
+        for (const candidateID of active.keys()) stale.delete(candidateID)
+      },
+    },
+    resolve: {
+      enumerable: false,
+      value(candidateID: string) {
+        const candidate = active.get(candidateID)
+        if (candidate) return Object.freeze({ status: "resolved", candidate })
+        return Object.freeze({ status: stale.has(candidateID) ? "candidate_stale" : "candidate_unknown" })
+      },
+    },
+    clear: {
+      enumerable: false,
+      value() {
+        for (const candidateID of active.keys()) stale.add(candidateID)
+        active.clear()
+      },
+    },
+  })
+  return Object.freeze(registry)
 }
 
 type WireRecord = Readonly<{
   path: string
   content: Uint8Array
+  device: string
+  inode: string
+  digest: ContentDigest
 }>
 
 type ExtensionInventoryObservation = Readonly<{
@@ -455,6 +560,7 @@ type ExtensionInventoryObservation = Readonly<{
   stderrDigest: ContentDigest
   stderrBytes: number
   report: ExtensionInventoryReport | null
+  privateMcpSnapshot: ParentPrivateMcpRegistrySnapshot | null
   stopReason?:
     | "workspace_identity_changed"
     | "helper_identity_changed"
@@ -541,9 +647,12 @@ async function runBoundedExtensionInventory(
       ? ({ kind: "exited", exitCode } as const)
       : ({ kind: "unconfirmed" } as const)
     let report: ExtensionInventoryReport | null = null
+    let privateMcpSnapshot: ParentPrivateMcpRegistrySnapshot | null = null
     if (!stopReason && exitCode === 0) {
       try {
-        report = parseAndRedactExtensionInventoryWire(stdout)
+        const parsed = parseExtensionInventoryWireForParent(stdout)
+        report = parsed.report
+        privateMcpSnapshot = parsed.privateMcpSnapshot
       } catch {
         stopReason = "protocol_rejected"
       }
@@ -556,6 +665,7 @@ async function runBoundedExtensionInventory(
       stderrDigest: sha256(stderr),
       stderrBytes: stderr.byteLength,
       report,
+      privateMcpSnapshot,
       ...(stopReason ? { stopReason } : {}),
     })
   } catch {
@@ -635,13 +745,21 @@ function decodeWire(input: Uint8Array): ReadonlyArray<WireRecord> {
     totalBytes += contentLength
     if (totalBytes > extensionInventoryLimits.maxTotalInputBytes) throw protocolError()
     if (!createHash("sha256").update(content).digest().equals(expectedDigest)) throw protocolError()
-    records.push(Object.freeze({ path, content: Uint8Array.from(content) }))
+    records.push(
+      Object.freeze({
+        path,
+        content: Uint8Array.from(content),
+        device: String(device),
+        inode: String(inode),
+        digest: requireContentDigest(`sha256:${Buffer.from(expectedDigest).toString("hex")}`),
+      }),
+    )
   }
   if (offset !== input.byteLength) throw protocolError()
   return Object.freeze(records)
 }
 
-function candidatesFromRecord(record: WireRecord): ReadonlyArray<ExtensionInventoryCandidate> {
+function candidatesFromRecord(record: WireRecord, candidateKey: Uint8Array): ReadonlyArray<ExtensionInventoryCandidate> {
   if (record.path.startsWith(".opencode/plugin/") || record.path.startsWith(".opencode/plugins/")) {
     return [makeCandidate("plugin", record.path, "workspace_file", "local_path", 0)]
   }
@@ -653,9 +771,54 @@ function candidatesFromRecord(record: WireRecord): ReadonlyArray<ExtensionInvent
   )
   const mcpContainer = mcpEntries(parsed, record.path)
   const mcpCandidates = Object.keys(mcpContainer).map((name, index) =>
-    makeCandidate("mcp", record.path, "config", classifyMcpReference(mcpContainer[name]), index),
+    makeCandidate(
+      "mcp",
+      record.path,
+      "config",
+      classifyMcpReference(mcpContainer[name]),
+      index,
+      digest(canonicalJson({ name, sourceDigest: record.digest, config: mcpContainer[name] })),
+      candidateKey,
+    ),
   )
   return [...pluginCandidates, ...mcpCandidates]
+}
+
+function privateMcpCandidatesFromRecord(
+  record: WireRecord,
+  candidateKey: Uint8Array,
+): ReadonlyArray<ParentPrivateMcpCandidate> {
+  if (record.path.startsWith(".opencode/plugin/") || record.path.startsWith(".opencode/plugins/")) return []
+  const parsed = parseStaticConfig(record.content)
+  const container = mcpEntries(parsed, record.path)
+  return Object.keys(container).flatMap((serverName, index) => {
+    const config = parsePrivateMcpConfig(container[serverName])
+    if (!config || hasUnsafeText(serverName) || serverName.length < 1 || serverName.length > 256) return []
+    const configBindingDigest = requireContentDigest(
+      digest(canonicalJson({ serverName, sourcePath: record.path, sourceDigest: record.digest, config })),
+    )
+    const candidate = makeCandidate(
+      "mcp",
+      record.path,
+      "config",
+      classifyMcpReference(container[serverName]),
+      index,
+      digest(canonicalJson({ name: serverName, sourceDigest: record.digest, config: container[serverName] })),
+      candidateKey,
+    )
+    return [
+      deepFreeze({
+        candidateID: candidate.candidateID,
+        serverName,
+        sourcePath: record.path,
+        sourceDevice: record.device,
+        sourceInode: record.inode,
+        sourceDigest: record.digest,
+        configBindingDigest,
+        config,
+      }),
+    ]
+  })
 }
 
 function parseStaticConfig(input: Uint8Array): Record<string, unknown> {
@@ -685,10 +848,21 @@ function makeCandidate(
   source: "config" | "workspace_file",
   referenceClass: ExtensionInventoryCandidate["referenceClass"],
   ordinal: number,
+  privateBindingDigest?: string,
+  candidateKey?: Uint8Array,
 ): ExtensionInventoryCandidate {
   const sourcePath = publicSourcePath(rawPath)
   const referenceDigest = digest(canonicalJson({ kind, sourcePath, ordinal, referenceClass }))
-  const candidateID = digest(canonicalJson({ kind, sourcePath, ordinal, referenceDigest }))
+  const candidateMaterial = canonicalJson({
+      kind,
+      sourcePath,
+      ordinal,
+      referenceDigest,
+      ...(privateBindingDigest === undefined ? {} : { privateBindingDigest }),
+    })
+  const candidateID = candidateKey
+    ? requireContentDigest(`sha256:${createHmac("sha256", candidateKey).update(candidateMaterial).digest("hex")}`)
+    : digest(candidateMaterial)
   return Object.freeze({
     candidateID,
     kind,
@@ -713,8 +887,82 @@ function classifyPluginReference(input: unknown): ExtensionInventoryCandidate["r
 function classifyMcpReference(input: unknown): ExtensionInventoryCandidate["referenceClass"] {
   if (!isRecord(input)) return "unknown"
   if (typeof ownValue(input, "url") === "string") return "remote"
-  if (typeof ownValue(input, "command") === "string") return "process"
+  const command = ownValue(input, "command")
+  if (Array.isArray(command) && command.length > 0 && command.every((entry) => typeof entry === "string")) return "process"
   return "unknown"
+}
+
+function parsePrivateMcpConfig(input: unknown): ParentPrivateMcpConfig | null {
+  if (!isRecord(input)) return null
+  const type = ownValue(input, "type")
+  const inferredType = type === undefined ? (typeof ownValue(input, "url") === "string" ? "remote" : Array.isArray(ownValue(input, "command")) ? "local" : null) : type
+  if (inferredType === "remote") {
+    if (!onlyKeys(input, ["type", "url", "enabled", "headers", "oauth", "timeout"])) return null
+    const url = ownValue(input, "url")
+    const enabled = optionalBoolean(ownValue(input, "enabled"))
+    const timeout = optionalPositiveInteger(ownValue(input, "timeout"))
+    const headers = optionalStringRecord(ownValue(input, "headers"))
+    const oauth = ownValue(input, "oauth")
+    if (
+      typeof url !== "string" ||
+      enabled === null ||
+      timeout === null ||
+      headers === null ||
+      (oauth !== undefined && oauth !== false && !isRecord(oauth))
+    ) return null
+    const oauthSnapshot = oauth === undefined || oauth === false ? oauth : (snapshotJsonData(oauth) as Record<string, unknown>)
+    return deepFreeze({
+      type: "remote",
+      url,
+      ...(enabled === undefined ? {} : { enabled }),
+      ...(headers === undefined ? {} : { headers }),
+      ...(oauthSnapshot === undefined ? {} : { oauth: oauthSnapshot }),
+      ...(timeout === undefined ? {} : { timeout }),
+    })
+  }
+  if (inferredType !== "local") return null
+  if (!onlyKeys(input, ["type", "command", "cwd", "environment", "enabled", "timeout"])) return null
+  const command = ownValue(input, "command")
+  const cwd = ownValue(input, "cwd")
+  const environment = optionalStringRecord(ownValue(input, "environment"))
+  const enabled = optionalBoolean(ownValue(input, "enabled"))
+  const timeout = optionalPositiveInteger(ownValue(input, "timeout"))
+  if (
+    !Array.isArray(command) ||
+    command.length < 1 ||
+    !command.every((entry) => typeof entry === "string") ||
+    (cwd !== undefined && typeof cwd !== "string") ||
+    environment === null ||
+    enabled === null ||
+    timeout === null
+  ) return null
+  return deepFreeze({
+    type: "local",
+    command: [...command],
+    ...(cwd === undefined ? {} : { cwd }),
+    ...(environment === undefined ? {} : { environment }),
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(timeout === undefined ? {} : { timeout }),
+  })
+}
+
+function onlyKeys(input: Record<string, unknown>, allowed: ReadonlyArray<string>) {
+  const accepted = new Set(allowed)
+  return Object.keys(input).every((key) => accepted.has(key))
+}
+
+function optionalBoolean(input: unknown): boolean | undefined | null {
+  return input === undefined || typeof input === "boolean" ? input : null
+}
+
+function optionalPositiveInteger(input: unknown): number | undefined | null {
+  return input === undefined || (Number.isSafeInteger(input) && Number(input) > 0) ? (input as number | undefined) : null
+}
+
+function optionalStringRecord(input: unknown): Readonly<Record<string, string>> | undefined | null {
+  if (input === undefined) return undefined
+  if (!isRecord(input) || Object.values(input).some((value) => typeof value !== "string")) return null
+  return deepFreeze(structuredClone(input) as Record<string, string>)
 }
 
 function publicSourcePath(path: string) {
@@ -1402,6 +1650,7 @@ function notStartedObservation(reason: NonNullable<ExtensionInventoryObservation
     stderrDigest: sha256(new Uint8Array()),
     stderrBytes: 0,
     report: null,
+    privateMcpSnapshot: null,
     stopReason: reason,
   })
 }
@@ -1417,6 +1666,7 @@ function startedUnknownObservation(
     stderrDigest: sha256(new Uint8Array()),
     stderrBytes: 0,
     report: null,
+    privateMcpSnapshot: null,
     stopReason: reason,
   })
 }
@@ -1429,6 +1679,15 @@ function requireReadableChildStream(input: unknown): ReadableStream<Uint8Array> 
 function notify(callback: (() => void) | undefined) {
   try {
     callback?.()
+  } catch {}
+}
+
+function notifyRegistry(
+  callback: ((snapshot: ParentPrivateMcpRegistrySnapshot) => void) | undefined,
+  snapshot: ParentPrivateMcpRegistrySnapshot,
+) {
+  try {
+    callback?.(snapshot)
   } catch {}
 }
 
