@@ -40,7 +40,7 @@ describe("bounded read-only Git inspection", () => {
   test("keeps the large-workspace boundary bounded with production defaults", () => {
     expect(defaultGitInspectionLimits).toMatchObject({
       maxBoundaryEntries: 250_000,
-      maxBoundaryDurationMs: 5_000,
+      maxBoundaryDurationMs: 15_000,
     })
   })
 

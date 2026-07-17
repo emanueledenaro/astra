@@ -12,7 +12,7 @@ export const defaultGitInspectionLimits = {
   maxStderrBytes: 16 * 1024,
   maxEntries: 10_000,
   maxBoundaryEntries: 250_000,
-  maxBoundaryDurationMs: 5_000,
+  maxBoundaryDurationMs: 15_000,
   maxGitBinaryBytes: 64 * 1024 * 1024,
 } as const satisfies GitInspectionLimits
 
