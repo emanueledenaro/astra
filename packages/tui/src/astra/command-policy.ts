@@ -7,6 +7,11 @@ const approvedCommands = new Set([
   "astra.git.close",
   "astra.git.inspect",
   "astra.git.open",
+  "astra.write.approve",
+  "astra.write.close",
+  "astra.write.open",
+  "astra.write.prepare",
+  "astra.write.reject",
   "command.palette.show",
 ])
 

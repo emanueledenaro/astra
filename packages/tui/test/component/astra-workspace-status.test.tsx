@@ -11,10 +11,10 @@ test("describes a fail-closed read-only Astra workspace", () => {
   })
 })
 
-test("does not promise host effects before the Astra control plane exists", () => {
+test("describes activate-once as governed rather than generally enabled", () => {
   expect(getAstraWorkspaceStatus(authority("activate-once"))).toMatchObject({
     mode: "activate-once",
-    label: "ASTRA  •  ACTIVE ONCE  •  EFFECTS BLOCKED",
+    label: "ASTRA  •  ACTIVE ONCE  •  GOVERNED EFFECTS ONLY",
   })
 })
 

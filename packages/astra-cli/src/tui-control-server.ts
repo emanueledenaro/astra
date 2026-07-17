@@ -7,11 +7,32 @@ import {
   type GitControlInspectionBlockReason,
   type GitControlInspectionSummary,
 } from "@astra/domain/git-control-inspection"
+import {
+  controlledWriteBoundaryLabel,
+  controlledWriteNetworkWarning,
+  parseControlledWriteDecisionRequest,
+  parseControlledWriteDecisionResult,
+  parseControlledWritePrepareRequest,
+  parseControlledWritePrepareResult,
+  parseControlledWriteProgress,
+  type ControlledWriteDecisionRequest,
+  type ControlledWriteDecisionResult,
+  type ControlledWritePrepareRequest,
+  type ControlledWritePrepareResult,
+  type ControlledWriteProgress,
+} from "@astra/domain/controlled-write-control"
+import type {
+  AstraControlledWriteControl,
+  ControlledWriteDecisionResult as InternalControlledWriteDecisionResult,
+  ControlledWritePrepareResult as InternalControlledWritePrepareResult,
+  ControlledWriteProgress as InternalControlledWriteProgress,
+} from "./controlled-write-control"
 
 const requestLimitBytes = 2_048
 const maximumRequestsPerSession = 1_024
 const maximumObservedEntries = 10_000
 const defaultInspectionTimeoutMs = 30_000
+const defaultControlledWriteTimeoutMs = 60_000
 const socketFilename = "control.sock"
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -25,6 +46,8 @@ type GitInspectRequest = Readonly<{
   token: string
 }>
 
+type ControlRequest = GitInspectRequest | ControlledWritePrepareRequest | ControlledWriteDecisionRequest
+
 export type AstraTuiControlServer = Readonly<{
   socketPath: string
   sessionID: string
@@ -36,11 +59,13 @@ export type AstraTuiControlServerInput = Readonly<{
   directory: string
   workspaceRoot: string
   sessionID: string
+  controlledWriteControl?: AstraControlledWriteControl
 }>
 
 export type AstraTuiControlServerDependencies = Readonly<{
   inspectGitWorkspace: (workspaceRoot: string) => Promise<unknown>
   inspectionTimeoutMs?: number
+  controlledWriteTimeoutMs?: number
 }>
 
 /**
@@ -66,6 +91,7 @@ export async function startAstraTuiControlServer(
   const sockets = new Set<Socket>()
   const pending = new Set<Promise<void>>()
   const usedRequestIDs = new Set<string>()
+  const preparedOperations = new Map<string, string>()
   let activeRequestID: string | undefined
   let cancelActiveInspection: (() => void) | undefined
   let accepting = true
@@ -89,21 +115,32 @@ export async function startAstraTuiControlServer(
           return
         }
         if (usedRequestIDs.has(request.requestId)) {
-          socket.end(encodeTerminal(request.requestId, blocked("request_replayed")))
+          socket.end(encodeBlockedTerminal(request, "request_replayed"))
           return
         }
         if (usedRequestIDs.size >= maximumRequestsPerSession) {
-          socket.end(encodeTerminal(request.requestId, blocked("control_limit_reached")))
+          socket.end(encodeBlockedTerminal(request, "control_limit_reached"))
           return
         }
         usedRequestIDs.add(request.requestId)
         if (activeRequestID) {
-          socket.end(encodeTerminal(request.requestId, blocked("control_busy")))
+          socket.end(encodeBlockedTerminal(request, "control_busy"))
           return
         }
 
         activeRequestID = request.requestId
         ownedRequestID = request.requestId
+        if (request.method !== "git.inspect") {
+          await handleControlledWriteRequest(
+            socket,
+            request,
+            input.controlledWriteControl,
+            dependencies.controlledWriteTimeoutMs ?? defaultControlledWriteTimeoutMs,
+            preparedOperations,
+          )
+          if (activeRequestID === request.requestId) activeRequestID = undefined
+          return
+        }
         const inspection = runBoundedInspection(
           () => dependencies.inspectGitWorkspace(input.workspaceRoot),
           dependencies.inspectionTimeoutMs ?? defaultInspectionTimeoutMs,
@@ -157,11 +194,11 @@ export async function startAstraTuiControlServer(
 }
 
 function receiveRequest(socket: Socket) {
-  return new Promise<GitInspectRequest | null>((complete) => {
+  return new Promise<ControlRequest | null>((complete) => {
     const chunks: Buffer[] = []
     let bytes = 0
     let settled = false
-    const finish = (request: GitInspectRequest | null) => {
+    const finish = (request: ControlRequest | null) => {
       if (settled) return
       settled = true
       complete(request)
@@ -187,10 +224,14 @@ function receiveRequest(socket: Socket) {
   })
 }
 
-function parseRequest(input: string): GitInspectRequest | null {
+function parseRequest(input: string): ControlRequest | null {
   if (!input.endsWith("\n") || input.slice(0, -1).includes("\n")) return null
   try {
     const value: unknown = JSON.parse(input.slice(0, -1))
+    const prepare = parseControlledWritePrepareRequest(value)
+    if (prepare.ok) return prepare.value
+    const decision = parseControlledWriteDecisionRequest(value)
+    if (decision.ok) return decision.value
     const record = exactRecord(value, ["schemaVersion", "method", "requestId", "sessionID", "token"])
     if (
       !record ||
@@ -217,8 +258,222 @@ function parseRequest(input: string): GitInspectRequest | null {
   }
 }
 
-function authorized(request: GitInspectRequest, sessionID: string, token: string) {
+function authorized(request: ControlRequest, sessionID: string, token: string) {
   return sameSecret(request.sessionID, sessionID) && sameSecret(request.token, token)
+}
+
+async function handleControlledWriteRequest(
+  socket: Socket,
+  request: ControlledWritePrepareRequest | ControlledWriteDecisionRequest,
+  control: AstraControlledWriteControl | undefined,
+  timeoutMs: number,
+  preparedOperations: Map<string, string>,
+) {
+  if (!control) {
+    socket.end(encodeBlockedTerminal(request, "control_unavailable"))
+    return
+  }
+
+  if (request.method === "controlled-write.prepare") {
+    const operation = runBoundedOperation(() => control.prepare(), timeoutMs)
+    const bounded = await operation.outcome
+    const result =
+      bounded.status === "complete"
+        ? mapPrepareResult(request.requestId, bounded.value)
+        : blockedPrepareResult(
+            request.requestId,
+            bounded.status === "timed_out" ? "control_response_timed_out" : "control_failed",
+          )
+    if (result.status === "prepared") {
+      preparedOperations.set(result.preview.proposalID, result.preview.operationID)
+    }
+    socket.end(encodeControlledWriteTerminal(request.requestId, result))
+    await operation.settled
+    return
+  }
+
+  const operationID = preparedOperations.get(request.proposalID)
+  const operation = runBoundedOperation(
+    () =>
+      control.decide(request.proposalID, request.decision, (progress) => {
+        const publicProgress = mapProgress(request, operationID, progress)
+        if (publicProgress) void write(socket, encodeControlledWriteProgress(request.requestId, publicProgress))
+      }),
+    timeoutMs,
+  )
+  const bounded = await operation.outcome
+  const result =
+    bounded.status === "complete"
+      ? mapDecisionResult(request, bounded.value)
+      : request.decision === "approve" && operationID
+        ? reconciliationResult(request, operationID, "durable_state_unavailable")
+        : blockedDecisionResult(
+            request,
+            bounded.status === "timed_out" ? "control_response_timed_out" : "control_failed",
+          )
+  socket.end(encodeControlledWriteTerminal(request.requestId, result))
+  await operation.settled
+  preparedOperations.delete(request.proposalID)
+}
+
+function mapPrepareResult(
+  requestId: string,
+  input: InternalControlledWritePrepareResult,
+): ControlledWritePrepareResult {
+  if (input.status === "blocked") return blockedPrepareResult(requestId, input.reason)
+  const candidate = {
+    schemaVersion: 1,
+    requestId,
+    status: "prepared",
+    preview: {
+      schemaVersion: 1,
+      operation: "controlled_write_create_only",
+      operationID: input.preview.operationID,
+      proposalID: input.preview.proposalID,
+      expiresAt: input.preview.expiresAt,
+      boundary: { mode: "host_no_sandbox", label: controlledWriteBoundaryLabel },
+      resource: {
+        kind: "workspace_relative_file",
+        mode: "create_only",
+        relativeTarget: input.preview.target,
+        bytes: input.preview.bytes,
+        contentDigest: input.preview.contentDigest,
+      },
+      capabilityDigest: input.preview.capabilityDigest,
+      network: { mode: "host_unrestricted", warning: controlledWriteNetworkWarning },
+      verification: "not_verified",
+    },
+  } as const
+  const parsed = parseControlledWritePrepareResult(candidate)
+  return parsed.ok ? parsed.value : blockedPrepareResult(requestId, "protocol_invalid")
+}
+
+function mapDecisionResult(
+  request: ControlledWriteDecisionRequest,
+  input: InternalControlledWriteDecisionResult,
+): ControlledWriteDecisionResult {
+  let candidate: unknown
+  if (input.status === "blocked") return blockedDecisionResult(request, input.reason)
+  if (input.status === "denied_without_workspace_effect") {
+    candidate = decisionBinding(request, input.operationID, input.status)
+  } else if (input.status === "failed_without_effect") {
+    candidate = { ...decisionBinding(request, input.operationID, input.status), reason: input.reason }
+  } else if (input.status === "reconciliation_required") {
+    candidate = { ...decisionBinding(request, input.operationID, input.status), reason: input.reason }
+  } else {
+    candidate = {
+      ...decisionBinding(request, input.operationID, "verified"),
+      verification: "exact_readback",
+      receiptID: input.receiptID,
+      evidenceID: input.evidenceID,
+      readback: {
+        relativeTarget: input.relativeTarget,
+        bytes: input.bytes,
+        contentDigest: input.contentDigest,
+      },
+    }
+  }
+  const parsed = parseControlledWriteDecisionResult(candidate)
+  if (parsed.ok) return parsed.value
+  return input.status === "reconciliation_required" || request.decision === "approve"
+    ? reconciliationResult(request, input.operationID, "durable_state_unavailable")
+    : blockedDecisionResult(request, "protocol_invalid")
+}
+
+function mapProgress(
+  request: ControlledWriteDecisionRequest,
+  preparedOperationID: string | undefined,
+  input: InternalControlledWriteProgress,
+): ControlledWriteProgress | null {
+  if (!preparedOperationID) return null
+  const binding = {
+    schemaVersion: 1,
+    requestId: request.requestId,
+    proposalID: request.proposalID,
+    operationID: preparedOperationID,
+  } as const
+  const candidate =
+    input.status === "effect_observed_not_verified"
+      ? {
+          ...binding,
+          status: input.status,
+          verification: "not_verified",
+          receiptID: input.receiptID,
+          observation: {
+            relativeTarget: input.relativeTarget,
+            bytes: input.bytes,
+            contentDigest: input.contentDigest,
+          },
+        }
+      : {
+          ...binding,
+          status: input.status,
+          verification: "not_verified",
+        }
+  if (input.status === "effect_observed_not_verified" && input.operationID !== preparedOperationID) return null
+  const parsed = parseControlledWriteProgress(candidate)
+  return parsed.ok ? parsed.value : null
+}
+
+function decisionBinding(request: ControlledWriteDecisionRequest, operationID: string, status: string) {
+  return {
+    schemaVersion: 1 as const,
+    requestId: request.requestId,
+    proposalID: request.proposalID,
+    operationID,
+    status,
+  }
+}
+
+function blockedPrepareResult(requestId: string, reason: string): ControlledWritePrepareResult {
+  const parsed = parseControlledWritePrepareResult({ schemaVersion: 1, requestId, status: "blocked", reason })
+  if (!parsed.ok) throw new Error("Invalid controlled-write prepare terminal")
+  return parsed.value
+}
+
+function blockedDecisionResult(request: ControlledWriteDecisionRequest, reason: string): ControlledWriteDecisionResult {
+  const parsed = parseControlledWriteDecisionResult({
+    schemaVersion: 1,
+    requestId: request.requestId,
+    proposalID: request.proposalID,
+    status: "blocked",
+    reason,
+  })
+  if (!parsed.ok) throw new Error("Invalid controlled-write decision terminal")
+  return parsed.value
+}
+
+function reconciliationResult(
+  request: ControlledWriteDecisionRequest,
+  operationID: string,
+  reason: string,
+): ControlledWriteDecisionResult {
+  const parsed = parseControlledWriteDecisionResult({
+    ...decisionBinding(request, operationID, "reconciliation_required"),
+    reason,
+  })
+  if (!parsed.ok) throw new Error("Invalid controlled-write reconciliation terminal")
+  return parsed.value
+}
+
+function runBoundedOperation<Value>(operation: () => Promise<Value>, timeoutMs: number) {
+  const duration = Number.isSafeInteger(timeoutMs) && timeoutMs > 0 ? timeoutMs : defaultControlledWriteTimeoutMs
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const timedOut = new Promise<{ status: "timed_out" }>((complete) => {
+    timeout = setTimeout(() => complete({ status: "timed_out" }), duration)
+  })
+  const execution = Promise.resolve()
+    .then(operation)
+    .then(
+      (value) => ({ status: "complete" as const, value }),
+      () => ({ status: "failed" as const }),
+    )
+  return {
+    outcome: Promise.race([execution, timedOut]).finally(() => {
+      if (timeout) clearTimeout(timeout)
+    }),
+    settled: execution.then(() => undefined),
+  }
 }
 
 function runBoundedInspection(operation: () => Promise<unknown>, timeoutMs: number) {
@@ -388,6 +643,32 @@ function encodeAccepted(requestId: string) {
 
 function encodeTerminal(requestId: string, summary: GitControlInspectionSummary) {
   return JSON.stringify({ schemaVersion: 1, type: "terminal", requestId, summary }) + "\n"
+}
+
+function encodeControlledWriteProgress(requestId: string, progress: ControlledWriteProgress) {
+  return JSON.stringify({ schemaVersion: 1, type: "controlled-write.progress", requestId, progress }) + "\n"
+}
+
+function encodeControlledWriteTerminal(
+  requestId: string,
+  result: ControlledWritePrepareResult | ControlledWriteDecisionResult,
+) {
+  return JSON.stringify({ schemaVersion: 1, type: "controlled-write.terminal", requestId, result }) + "\n"
+}
+
+function encodeBlockedTerminal(request: ControlRequest, reason: string) {
+  if (request.method === "git.inspect") return encodeTerminal(request.requestId, blocked(mapControlBlockReason(reason)))
+  if (request.method === "controlled-write.prepare") {
+    return encodeControlledWriteTerminal(request.requestId, blockedPrepareResult(request.requestId, reason))
+  }
+  return encodeControlledWriteTerminal(request.requestId, blockedDecisionResult(request, reason))
+}
+
+function mapControlBlockReason(reason: string): GitControlInspectionBlockReason {
+  if (reason === "control_busy") return "control_busy"
+  if (reason === "control_limit_reached") return "control_limit_reached"
+  if (reason === "request_replayed") return "request_replayed"
+  return "inspection_failed"
 }
 
 function write(socket: Socket, value: string) {

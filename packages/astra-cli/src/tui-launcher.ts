@@ -8,6 +8,8 @@ import type { GitRepositoryBaselineRevalidationResult } from "@astra/domain/git-
 import type { WorkspaceRevalidation } from "@astra/runtime/preflight"
 import { startAstraTuiControlServer, type AstraTuiControlServer } from "./tui-control-server"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
+import { createAstraControlledWriteControl } from "./controlled-write-control"
+import { operationLedgerPath, receiptSpoolPath } from "./app-state"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -116,6 +118,10 @@ export async function launchAstraTui(session: OpenedWorkspace) {
       directory: authority.directory,
       workspaceRoot: authority.authority.workspace.root,
       sessionID: authority.authority.sessionID,
+      controlledWriteControl: createAstraControlledWriteControl(session, {
+        ledgerFilename: operationLedgerPath(),
+        spoolFilename: receiptSpoolPath(),
+      }),
     })
     const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control)
     child = Bun.spawn([...spec.command], {

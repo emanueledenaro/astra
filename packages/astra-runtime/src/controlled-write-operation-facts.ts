@@ -2,7 +2,6 @@ import { type GitRepositoryBaselineSnapshot } from "@astra/domain/git-repository
 import {
   parseAttemptID,
   parseCapabilityGrantID,
-  parseContentDigest,
   parseDispatchRequest,
   parseDispatchRequestID,
   parseExecutorClaimID,
@@ -289,7 +288,10 @@ function requireMonotonicTimeline(input: ApprovedControlledWriteFactsInput) {
     times.some(
       ({ value, milliseconds }) => !Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value,
     ) ||
-    times.some((time, index) => index > 0 && time.milliseconds < times[index - 1].milliseconds)
+    times.some((time, index) => {
+      const previous = times.at(index - 1)
+      return index > 0 && previous !== undefined && time.milliseconds < previous.milliseconds
+    })
   ) {
     throw new TypeError("Controlled write observations must be canonical, monotonic UTC timestamps")
   }
@@ -328,12 +330,6 @@ function requireExecutorClaimID(value: string) {
 function requireReceiptID(value: string) {
   const result = parseReceiptID(value)
   if (!result.ok) throw new TypeError("The controlled write receipt ID is invalid")
-  return result.value
-}
-
-function requireContentDigest(value: string) {
-  const result = parseContentDigest(value)
-  if (!result.ok) throw new TypeError("The controlled write digest is invalid")
   return result.value
 }
 

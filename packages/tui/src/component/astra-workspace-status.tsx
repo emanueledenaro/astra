@@ -20,7 +20,7 @@ export function getAstraWorkspaceStatus(
   if (authority?.mode === "activate-once") {
     return {
       mode: "activate-once",
-      label: "ASTRA  •  ACTIVE ONCE  •  EFFECTS BLOCKED",
+      label: "ASTRA  •  ACTIVE ONCE  •  GOVERNED EFFECTS ONLY",
       color: "#f0bd6a",
     }
   }

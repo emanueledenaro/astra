@@ -1,10 +1,11 @@
-import { randomUUID } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { mkdtemp, rm, stat } from "node:fs/promises"
 import { createConnection } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { expect, test } from "bun:test"
 import { parseGitControlInspectionSummary } from "@astra/domain/git-control-inspection"
+import type { AstraControlledWriteControl } from "../src/controlled-write-control"
 import { startAstraTuiControlServer, type AstraTuiControlServer } from "../src/tui-control-server"
 
 test("does not inspect before an authenticated explicit request and excludes raw Git data", async () => {
@@ -195,6 +196,210 @@ test("reports adapter failures without details and removes its socket on close",
   }
 })
 
+test("keeps controlled-write scope server-owned and maps explicit rejection durably", async () => {
+  const fixture = await makeFixture()
+  let prepareCalls = 0
+  let decisionCalls = 0
+  const proposalID = randomUUID()
+  const operationID = randomUUID()
+  const writeControl = {
+    async prepare() {
+      prepareCalls++
+      return internalPrepared(proposalID, operationID)
+    },
+    async decide(id, decision) {
+      decisionCalls++
+      expect(id).toBe(proposalID)
+      expect(decision).toBe("reject")
+      return { status: "denied_without_workspace_effect", operationID, sequence: 4, lastCursor: 4 }
+    },
+  } satisfies AstraControlledWriteControl
+  const control = await startAstraTuiControlServer(
+    { ...fixture.input, controlledWriteControl: writeControl },
+    {
+      async inspectGitWorkspace(root) {
+        return completeInspection(root)
+      },
+    },
+  )
+
+  try {
+    expect(prepareCalls).toBe(0)
+    const prepareRequest = controlledRequest(control, "controlled-write.prepare")
+    expect(await sendRequest(control, { ...prepareRequest, workspaceRoot: fixture.root })).toEqual([])
+    expect(prepareCalls).toBe(0)
+
+    const prepared = await sendRequest(control, prepareRequest)
+    expect(prepared.map((message) => message.type)).toEqual(["accepted", "controlled-write.terminal"])
+    expect(prepared[1]).toMatchObject({
+      result: {
+        status: "prepared",
+        preview: {
+          operationID,
+          proposalID,
+          boundary: { label: "HOST EXECUTION — NO SANDBOX" },
+          resource: { relativeTarget: ".astra-demo-marker", mode: "create_only" },
+          verification: "not_verified",
+        },
+      },
+    })
+    expect(JSON.stringify(prepareRequest)).not.toContain(".astra-demo-marker")
+    expect(JSON.stringify(prepareRequest)).not.toContain(fixture.root)
+
+    const rejected = await sendRequest(control, {
+      ...controlledRequest(control, "controlled-write.decide"),
+      proposalID,
+      decision: "reject",
+    })
+    expect(rejected.map((message) => message.type)).toEqual(["accepted", "controlled-write.terminal"])
+    expect(rejected[1]).toMatchObject({ result: { status: "denied_without_workspace_effect", operationID } })
+    expect(prepareCalls).toBe(1)
+    expect(decisionCalls).toBe(1)
+  } finally {
+    await control.close()
+    await fixture.close()
+  }
+})
+
+test("emits ordered operation progress before an independently verified terminal", async () => {
+  const fixture = await makeFixture()
+  const proposalID = randomUUID()
+  const operationID = randomUUID()
+  const receiptID = randomUUID()
+  const evidenceID = randomUUID()
+  const marker = markerFacts(operationID)
+  const writeControl = {
+    async prepare() {
+      return internalPrepared(proposalID, operationID)
+    },
+    async decide(id, decision, onProgress) {
+      expect(id).toBe(proposalID)
+      expect(decision).toBe("approve")
+      onProgress?.({ status: "recording_authority" })
+      onProgress?.({ status: "host_adapter_validating" })
+      onProgress?.({
+        status: "effect_observed_not_verified",
+        operationID,
+        receiptID,
+        relativeTarget: ".astra-demo-marker",
+        bytes: marker.bytes,
+        contentDigest: marker.contentDigest,
+      })
+      onProgress?.({ status: "verifying" })
+      return {
+        status: "verified",
+        operationID,
+        sequence: 8,
+        lastCursor: 8,
+        receiptID,
+        evidenceID,
+        evidenceDigest: `sha256:${"b".repeat(64)}`,
+        relativeTarget: ".astra-demo-marker",
+        bytes: marker.bytes,
+        contentDigest: marker.contentDigest,
+      }
+    },
+  } satisfies AstraControlledWriteControl
+  const control = await startAstraTuiControlServer({ ...fixture.input, controlledWriteControl: writeControl })
+
+  try {
+    await sendRequest(control, controlledRequest(control, "controlled-write.prepare"))
+    const messages = await sendRequest(control, {
+      ...controlledRequest(control, "controlled-write.decide"),
+      proposalID,
+      decision: "approve",
+    })
+    expect(messages.map((message) => message.type)).toEqual([
+      "accepted",
+      "controlled-write.progress",
+      "controlled-write.progress",
+      "controlled-write.progress",
+      "controlled-write.progress",
+      "controlled-write.terminal",
+    ])
+    expect(messages[1]).toMatchObject({ progress: { status: "recording_authority" } })
+    expect(messages[2]).toMatchObject({ progress: { status: "host_adapter_validating" } })
+    expect(messages[3]).toMatchObject({
+      progress: { status: "effect_observed_not_verified", verification: "not_verified", receiptID },
+    })
+    expect(messages[4]).toMatchObject({ progress: { status: "verifying" } })
+    expect(messages[5]).toMatchObject({
+      result: { status: "verified", verification: "exact_readback", receiptID, evidenceID },
+    })
+  } finally {
+    await control.close()
+    await fixture.close()
+  }
+})
+
+test("retains single-flight ownership after an approved response timeout until the operation settles", async () => {
+  const fixture = await makeFixture()
+  const proposalID = randomUUID()
+  const operationID = randomUUID()
+  let settle!: (value: Awaited<ReturnType<AstraControlledWriteControl["decide"]>>) => void
+  const pendingDecision = new Promise<Awaited<ReturnType<AstraControlledWriteControl["decide"]>>>((resolve) => {
+    settle = resolve
+  })
+  const writeControl = {
+    async prepare() {
+      return internalPrepared(proposalID, operationID)
+    },
+    async decide() {
+      return pendingDecision
+    },
+  } satisfies AstraControlledWriteControl
+  const control = await startAstraTuiControlServer(
+    { ...fixture.input, controlledWriteControl: writeControl },
+    {
+      controlledWriteTimeoutMs: 20,
+      async inspectGitWorkspace(root) {
+        return completeInspection(root)
+      },
+    },
+  )
+
+  try {
+    await sendRequest(control, controlledRequest(control, "controlled-write.prepare"))
+    const timedOut = await sendRequest(control, {
+      ...controlledRequest(control, "controlled-write.decide"),
+      proposalID,
+      decision: "approve",
+    })
+    expect(timedOut[1]).toMatchObject({
+      result: { status: "reconciliation_required", operationID, reason: "durable_state_unavailable" },
+    })
+
+    const busy = await sendRequest(control, controlledRequest(control, "controlled-write.prepare"))
+    expect(busy[1]).toMatchObject({ result: { status: "blocked", reason: "control_busy" } })
+
+    let closed = false
+    const closing = control.close().then(() => {
+      closed = true
+    })
+    await Bun.sleep(10)
+    expect(closed).toBeFalse()
+    settle({
+      status: "reconciliation_required",
+      operationID,
+      sequence: null,
+      lastCursor: null,
+      reason: "effect_unknown",
+    })
+    await completeWithin(closing, 250)
+    expect(closed).toBeTrue()
+  } finally {
+    settle({
+      status: "reconciliation_required",
+      operationID,
+      sequence: null,
+      lastCursor: null,
+      reason: "effect_unknown",
+    })
+    await control.close()
+    await fixture.close()
+  }
+})
+
 async function makeFixture() {
   const directory = await mkdtemp(join(tmpdir(), "astra-control-test-"))
   const root = join(directory, "workspace")
@@ -214,6 +419,48 @@ function request(control: AstraTuiControlServer) {
     sessionID: control.sessionID,
     token: control.token,
   } as const
+}
+
+function controlledRequest(
+  control: AstraTuiControlServer,
+  method: "controlled-write.prepare" | "controlled-write.decide",
+) {
+  return {
+    schemaVersion: 1,
+    method,
+    requestId: randomUUID(),
+    sessionID: control.sessionID,
+    token: control.token,
+  } as const
+}
+
+function internalPrepared(proposalID: string, operationID: string) {
+  const marker = markerFacts(operationID)
+  return {
+    status: "awaiting_approval",
+    preview: {
+      schemaVersion: 1,
+      proposalID,
+      operationID,
+      executionBoundary: "HOST EXECUTION — NO SANDBOX",
+      target: ".astra-demo-marker",
+      resource: "workspace:.astra-demo-marker",
+      bytes: marker.bytes,
+      contentDigest: marker.contentDigest,
+      capabilityDigest: `sha256:${"b".repeat(64)}`,
+      expiresAt: "2026-07-17T14:00:00.000Z",
+      effect: "create_only",
+      network: "host_unrestricted_not_isolated",
+    },
+  } as const
+}
+
+function markerFacts(operationID: string) {
+  const content = `Astra controlled host write\noperation_id=${operationID}\n`
+  return {
+    bytes: Buffer.byteLength(content),
+    contentDigest: `sha256:${createHash("sha256").update(content).digest("hex")}` as const,
+  }
 }
 
 function sendRequest(

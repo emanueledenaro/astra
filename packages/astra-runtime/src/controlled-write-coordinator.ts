@@ -60,6 +60,7 @@ export type ExecuteApprovedControlledWriteInput = Readonly<{
 export type ControlledWriteCoordinatorDependencies = Readonly<{
   injectFault?: (point: ControlledWriteFaultPoint) => Promise<void>
   beforeEffectBoundary?: () => Promise<void>
+  onHostAdapterEntered?: () => void
   now?: () => number
 }>
 
@@ -182,8 +183,10 @@ export async function executeApprovedControlledWrite(
           : { allowed: false as const, reason: `effect_authority_${validation.reason}` }
       },
       () => checkRepositoryBaseline(input, facts.repositorySnapshotDigest),
-      (plan, target, expectedWorkspaceIdentity) =>
-        executeHostControlledWrite(facts.capabilityProposal, plan, target, expectedWorkspaceIdentity),
+      (plan, target, expectedWorkspaceIdentity) => {
+        notifyHostAdapterEntered(dependencies.onHostAdapterEntered)
+        return executeHostControlledWrite(facts.capabilityProposal, plan, target, expectedWorkspaceIdentity)
+      },
     )
     const effect = prepared.prepared
       ? await prepared.execute()
@@ -249,6 +252,14 @@ export async function executeApprovedControlledWrite(
       "The approved controlled write could not complete its durable path",
       cause,
     )
+  }
+}
+
+function notifyHostAdapterEntered(callback: (() => void) | undefined) {
+  try {
+    callback?.()
+  } catch {
+    // Observation delivery must never change or retry an Operation.
   }
 }
 
