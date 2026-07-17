@@ -60,6 +60,12 @@ type ApprovedVerifierModule = Readonly<{
 
 type GitInspectionModule = Readonly<{
   inspectGitWorkspace: (workspaceRoot: string) => Promise<GitInspection>
+  captureGitRepositoryBaseline: NonNullable<
+    import("./workspace-gate").WorkspaceGateDependencies["captureGitRepositoryBaseline"]
+  >
+  revalidateGitRepositoryBaseline: NonNullable<
+    import("./workspace-gate").WorkspaceGateDependencies["revalidateGitRepositoryBaseline"]
+  >
 }>
 
 type Arguments = Readonly<{
@@ -83,6 +89,18 @@ if (!parsed.ok) {
           const loaded: unknown = await import(moduleName)
           if (!isGitInspectionModule(loaded)) throw new Error("Astra Git inspection adapter is unavailable")
           return loaded.inspectGitWorkspace(workspaceRoot)
+        },
+        async captureGitRepositoryBaseline(workspaceRoot) {
+          const moduleName = ["@astra", "git"].join("/")
+          const loaded: unknown = await import(moduleName)
+          if (!isGitInspectionModule(loaded)) throw new Error("Astra Git baseline adapter is unavailable")
+          return loaded.captureGitRepositoryBaseline(workspaceRoot)
+        },
+        async revalidateGitRepositoryBaseline(workspaceRoot, snapshot) {
+          const moduleName = ["@astra", "git"].join("/")
+          const loaded: unknown = await import(moduleName)
+          if (!isGitInspectionModule(loaded)) throw new Error("Astra Git baseline adapter is unavailable")
+          return loaded.revalidateGitRepositoryBaseline(workspaceRoot, snapshot)
         },
         async recordDeniedOperation(input) {
           const moduleName = ["@astra/runtime", "operation-ledger"].join("/")
@@ -192,7 +210,11 @@ function isGitInspectionModule(value: unknown): value is GitInspectionModule {
     typeof value === "object" &&
     value !== null &&
     "inspectGitWorkspace" in value &&
-    typeof value.inspectGitWorkspace === "function"
+    typeof value.inspectGitWorkspace === "function" &&
+    "captureGitRepositoryBaseline" in value &&
+    typeof value.captureGitRepositoryBaseline === "function" &&
+    "revalidateGitRepositoryBaseline" in value &&
+    typeof value.revalidateGitRepositoryBaseline === "function"
   )
 }
 

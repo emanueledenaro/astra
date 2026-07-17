@@ -1,4 +1,11 @@
 import { Operation, WorkspaceTrust } from "@astra/domain"
+import {
+  parseGitRepositoryBaselineCaptureResult,
+  parseGitRepositoryBaselineRevalidationResult,
+  type GitRepositoryBaselineCaptureResult,
+  type GitRepositoryBaselineRevalidationResult,
+  type GitRepositoryBaselineSnapshot,
+} from "@astra/domain/git-repository-baseline"
 import type { OperationEvent, OperationState } from "@astra/domain/operation"
 import type { WorkspaceTrustEvent, WorkspaceTrustReport, WorkspaceTrustState } from "@astra/domain/workspace-trust"
 import type { GitInspectionResult } from "@astra/git"
@@ -12,6 +19,7 @@ import {
   renderWorkspaceState,
   sanitizeTerminalText,
 } from "./terminal"
+import { renderGitBaselineView } from "./git-baseline-view"
 
 export type WorkspaceDecision = "read-only" | "inspect-git" | "activate-once" | "exit"
 export type EffectApproval = "approve" | "deny"
@@ -60,7 +68,12 @@ export type DurableVerification = Readonly<{
 export type GitInspection = GitInspectionResult
 
 export type WorkspaceGateDependencies = Readonly<{
-  inspectGitWorkspace?: (workspaceRoot: string) => Promise<GitInspection>
+  inspectGitWorkspace?: (workspaceRoot: string) => Promise<unknown>
+  captureGitRepositoryBaseline?: (workspaceRoot: string) => Promise<GitRepositoryBaselineCaptureResult>
+  revalidateGitRepositoryBaseline?: (
+    workspaceRoot: string,
+    snapshot: GitRepositoryBaselineSnapshot,
+  ) => Promise<GitRepositoryBaselineRevalidationResult>
   recordDeniedOperation?: (
     input: Readonly<{
       plan: ReturnType<typeof createControlledWritePlan>
@@ -130,27 +143,95 @@ export async function runWorkspaceGate(
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
       return { exitCode: 2, workspaceState, operationState: null, report }
     }
-    let inspection: GitInspection
+    let observedInspection: unknown
     try {
-      inspection = await dependencies.inspectGitWorkspace(report.root)
+      observedInspection = await dependencies.inspectGitWorkspace(report.root)
     } catch {
       io.write("GIT INSPECTION BLOCKED  bounded adapter failed closed")
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
       return { exitCode: 2, workspaceState, operationState: null, report }
     }
-    if (inspection.workspaceRoot !== report.root) {
-      io.write("GIT INSPECTION BLOCKED  adapter result does not match the opened workspace")
+    if (!isGitInspection(observedInspection, report.root)) {
+      io.write("GIT INSPECTION BLOCKED  invalid adapter result")
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
       return { exitCode: 2, workspaceState, operationState: null, report }
     }
+    const inspection = observedInspection
     if (inspection.status === "complete" && inspection.diff.observationDigest !== inspection.outputDigest) {
       io.write("GIT INSPECTION BLOCKED  diff binding does not match the bounded observation")
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
       return { exitCode: 2, workspaceState, operationState: null, report }
     }
     for (const line of renderGitInspection(inspection)) io.write(line)
+    if (inspection.status === "blocked") {
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    for (const line of renderGitBaselineView({ status: "not-captured" })) io.write(line)
+    if (!dependencies.captureGitRepositoryBaseline || !dependencies.revalidateGitRepositoryBaseline) {
+      for (const line of renderGitBaselineView({ status: "blocked", reason: "baseline adapter unavailable" })) {
+        io.write(line)
+      }
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    for (const line of renderGitBaselineView({ status: "capturing" })) io.write(line)
+    const capture = await dependencies.captureGitRepositoryBaseline(report.root).catch(() => null)
+    const parsedCapture = parseGitRepositoryBaselineCaptureResult(capture)
+    if (!parsedCapture.ok) {
+      for (const line of renderGitBaselineView({ status: "blocked", reason: "invalid baseline adapter result" })) {
+        io.write(line)
+      }
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    if (parsedCapture.value.status === "blocked") {
+      for (const line of renderGitBaselineView({ status: "blocked", reason: parsedCapture.value.reason })) {
+        io.write(line)
+      }
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    if (!baselineMatchesWorkspace(parsedCapture.value.snapshot, report)) {
+      for (const line of renderGitBaselineView({ status: "blocked", reason: "workspace identity mismatch" })) {
+        io.write(line)
+      }
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    const revalidation = await dependencies
+      .revalidateGitRepositoryBaseline(report.root, parsedCapture.value.snapshot)
+      .catch(() => null)
+    const parsedRevalidation = parseGitRepositoryBaselineRevalidationResult(revalidation)
+    if (!parsedRevalidation.ok) {
+      for (const line of renderGitBaselineView({ status: "blocked", reason: "invalid revalidation result" })) {
+        io.write(line)
+      }
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    if (parsedRevalidation.value.status === "blocked") {
+      for (const line of renderGitBaselineView({ status: "blocked", reason: parsedRevalidation.value.reason })) {
+        io.write(line)
+      }
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    if (parsedRevalidation.value.expectedSnapshotDigest !== parsedCapture.value.snapshot.snapshotDigest) {
+      for (const line of renderGitBaselineView({ status: "blocked", reason: "revalidation snapshot mismatch" })) {
+        io.write(line)
+      }
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    for (const line of renderGitBaselineView(parsedRevalidation.value)) io.write(line)
     io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
-    return { exitCode: inspection.status === "complete" ? 0 : 2, workspaceState, operationState: null, report }
+    return {
+      exitCode: parsedRevalidation.value.status === "current" ? 0 : 2,
+      workspaceState,
+      operationState: null,
+      report,
+    }
   }
   if (!activationCheck.allowed && activationCheck.reason === "git_baseline_not_inspected") {
     workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
@@ -281,6 +362,112 @@ export async function runWorkspaceGate(
   )
   workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
   return { exitCode: verification.status === "failed" ? 1 : 2, workspaceState, operationState, report }
+}
+
+function baselineMatchesWorkspace(snapshot: GitRepositoryBaselineSnapshot, report: WorkspaceTrustReport) {
+  return (
+    report.identity !== null &&
+    snapshot.root.canonicalPath === report.root &&
+    snapshot.root.device === report.identity.device &&
+    snapshot.root.inode === report.identity.inode
+  )
+}
+
+function isGitInspection(input: unknown, expectedRoot: string): input is GitInspection {
+  if (!record(input) || input.workspaceRoot !== expectedRoot) return false
+  if (
+    input.mode !== "bounded_read_only" ||
+    input.baseline !== "not_captured" ||
+    input.activationAllowed !== false ||
+    input.verification !== "not_verified" ||
+    input.submodules !== "not_inspected"
+  ) {
+    return false
+  }
+  if (input.status === "blocked") {
+    return typeof input.reason === "string" && input.reason.length > 0
+  }
+  if (input.status !== "complete" || !gitBranch(input.branch)) return false
+  if (
+    !pathStates(input.staged) ||
+    !pathStates(input.unstaged) ||
+    !boundedStrings(input.untracked) ||
+    !conflicts(input.conflicts) ||
+    !nonNegativeInteger(input.entryCount) ||
+    !digestString(input.outputDigest) ||
+    !record(input.diff) ||
+    input.diff.source !== "status_porcelain_v2" ||
+    input.diff.format !== "metadata_only" ||
+    input.diff.renames !== "disabled" ||
+    input.diff.durability !== "ephemeral" ||
+    input.diff.verification !== "not_verified" ||
+    input.diff.untrackedContent !== "not_inspected" ||
+    input.diff.conflictContent !== "not_inspected" ||
+    !digestString(input.diff.observationDigest) ||
+    !digestString(input.reportDigest)
+  ) {
+    return false
+  }
+  return true
+}
+
+function gitBranch(input: unknown) {
+  return (
+    record(input) &&
+    nullableString(input.oid) &&
+    nullableString(input.head) &&
+    nullableString(input.upstream) &&
+    nullableNonNegativeInteger(input.ahead) &&
+    nullableNonNegativeInteger(input.behind) &&
+    nonNegativeInteger(input.stashCount) &&
+    input.aheadBehindScope === "local_ref_only"
+  )
+}
+
+function pathStates(input: unknown) {
+  return (
+    Array.isArray(input) &&
+    input.length <= 10_000 &&
+    input.every(
+      (entry) =>
+        record(entry) &&
+        typeof entry.path === "string" &&
+        typeof entry.index === "string" &&
+        typeof entry.worktree === "string",
+    )
+  )
+}
+
+function conflicts(input: unknown) {
+  return (
+    Array.isArray(input) &&
+    input.length <= 10_000 &&
+    input.every((entry) => record(entry) && typeof entry.path === "string" && typeof entry.code === "string")
+  )
+}
+
+function boundedStrings(input: unknown) {
+  return Array.isArray(input) && input.length <= 10_000 && input.every((value) => typeof value === "string")
+}
+
+function nullableString(input: unknown) {
+  return input === null || typeof input === "string"
+}
+
+function nullableNonNegativeInteger(input: unknown) {
+  return input === null || nonNegativeInteger(input)
+}
+
+function nonNegativeInteger(input: unknown) {
+  return Number.isSafeInteger(input) && Number(input) >= 0
+}
+
+function digestString(input: unknown): input is `sha256:${string}` {
+  return typeof input === "string" && /^sha256:[0-9a-f]{64}$/.test(input)
+}
+
+function record(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input)
 }
 
 function supportsGitInspection(report: WorkspaceTrustReport) {

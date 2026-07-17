@@ -2,6 +2,11 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import {
+  computeGitRepositoryBaselineSnapshotDigest,
+  type GitRepositoryBaselineSnapshot,
+  type GitRepositoryBaselineSnapshotAuthority,
+} from "@astra/domain/git-repository-baseline"
 import { demoMarkerName } from "@astra/runtime/controlled-write-plan"
 import { createMaliciousWorkspace, directoryDigest, sentinelNames } from "../../astra-runtime/test/support"
 import {
@@ -156,6 +161,82 @@ async function exists(path: string) {
   }
 }
 
+function gitBaselineDependencies() {
+  return {
+    async captureGitRepositoryBaseline(workspaceRoot: string) {
+      return { status: "complete" as const, snapshot: await gitRepositoryBaseline(workspaceRoot) }
+    },
+    async revalidateGitRepositoryBaseline(_workspaceRoot: string, snapshot: GitRepositoryBaselineSnapshot) {
+      return {
+        status: "current" as const,
+        expectedSnapshotDigest: snapshot.snapshotDigest,
+        currentSnapshotDigest: snapshot.snapshotDigest,
+      }
+    },
+  }
+}
+
+async function gitRepositoryBaseline(root: string): Promise<GitRepositoryBaselineSnapshot> {
+  const [rootFacts, gitFacts] = await Promise.all([lstat(root), lstat(join(root, ".git"))])
+  const gitIdentity = {
+    canonicalPath: join(root, ".git"),
+    device: String(gitFacts.dev),
+    inode: String(gitFacts.ino),
+  }
+  const authority = {
+    schemaVersion: 1,
+    mode: "bounded_read_only",
+    durability: "ephemeral",
+    verification: "not_verified",
+    contentPolicy: {
+      tracked: "raw_content_type_and_executable",
+      untracked: "raw_content_type_and_executable",
+      symlinks: "raw_link_text_no_follow",
+      ignored: "excluded",
+      specialFiles: "blocked",
+    },
+    root: { canonicalPath: root, device: String(rootFacts.dev), inode: String(rootFacts.ino) },
+    gitDirectory: gitIdentity,
+    commonDirectory: gitIdentity,
+    head: { kind: "unborn", symbolicRef: "refs/heads/main" },
+    refs: { digest: `sha256:${"1".repeat(64)}`, count: 0 },
+    index: {
+      digest: `sha256:${"2".repeat(64)}`,
+      metadataDigest: `sha256:${"3".repeat(64)}`,
+      entryCount: 0,
+    },
+    worktree: {
+      digest: `sha256:${"4".repeat(64)}`,
+      ignored: "excluded",
+      trackedPaths: 0,
+      untrackedPaths: 0,
+      contentEntries: 0,
+      totalBytes: 0,
+    },
+    metadata: { digest: `sha256:${"5".repeat(64)}`, fileCount: 0, totalBytes: 0, externalConfig: "unsupported" },
+    observer: {
+      adapter: "astra.git-baseline.v1",
+      adapterDigest: `sha256:${"6".repeat(64)}`,
+      gitBinaryDigest: `sha256:${"7".repeat(64)}`,
+      observationDigest: `sha256:${"8".repeat(64)}`,
+    },
+    limits: {
+      timeoutMs: 1_000,
+      maxStdoutBytes: 1_024,
+      maxStderrBytes: 1_024,
+      maxEntries: 128,
+      maxBoundaryEntries: 128,
+      maxBoundaryDurationMs: 1_000,
+      maxGitBinaryBytes: 16_000_000,
+      maxContentEntries: 128,
+      maxFileBytes: 65_536,
+      maxTotalBytes: 262_144,
+      maxDurationMs: 2_000,
+    },
+  } as const satisfies GitRepositoryBaselineSnapshotAuthority
+  return { ...authority, snapshotDigest: computeGitRepositoryBaselineSnapshotDigest(authority) }
+}
+
 describe("workspace gate", () => {
   test("opens read-only without trust persistence or workspace effects", async () => {
     const root = await workspace()
@@ -179,6 +260,7 @@ describe("workspace gate", () => {
     let inspections = 0
 
     const result = await runWorkspaceGate(root, terminal.io, {
+      ...gitBaselineDependencies(),
       async inspectGitWorkspace(workspaceRoot) {
         inspections += 1
         expect(workspaceRoot).toBe(root)
@@ -196,10 +278,120 @@ describe("workspace gate", () => {
     expect(output).toContain("UNSTAGED   same.txt")
     expect(output).toContain("GIT DIFF   metadata only • ephemeral • not verified")
     expect(output).toContain(`DIFF BIND  sha256:${"1".repeat(64)}`)
+    expect(output).toContain("GIT BASELINE  CAPTURING • BOUNDED READ ONLY • NOT VERIFIED")
+    expect(output).toContain("GIT BASELINE  CURRENT")
+    expect(output).toContain("NOT VERIFIED")
     expect(output).toContain("WORKSPACE STATE  UNTRUSTED")
     expect(output).not.toContain("HOST EXECUTION")
-    expect(output).not.toContain("VERIFIED")
+    expect(output).not.toContain("VERIFIED   independent verifier matched")
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("shows a blocked baseline without treating Git inspection as activation", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO("inspect-git")
+    let revalidations = 0
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async inspectGitWorkspace(workspaceRoot) {
+        return completeGitInspection(workspaceRoot)
+      },
+      async captureGitRepositoryBaseline(workspaceRoot) {
+        return {
+          status: "blocked",
+          mode: "bounded_read_only",
+          durability: "ephemeral",
+          verification: "not_verified",
+          workspaceRoot,
+          reason: "git_config_include_unsupported",
+        }
+      },
+      async revalidateGitRepositoryBaseline() {
+        revalidations += 1
+        throw new Error("must not revalidate a blocked capture")
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: null })
+    expect(revalidations).toBe(0)
+    expect(terminal.lines.join("\n")).toContain("GIT BASELINE  BLOCKED • git_config_include_unsupported • NOT VERIFIED")
+    expect(terminal.lines.join("\n")).toContain("WORKSPACE STATE  UNTRUSTED")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("does not capture a baseline after Git inspection is blocked", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO("inspect-git")
+    let captures = 0
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async inspectGitWorkspace(workspaceRoot) {
+        return {
+          status: "blocked",
+          mode: "bounded_read_only",
+          baseline: "not_captured",
+          activationAllowed: false,
+          verification: "not_verified",
+          submodules: "not_inspected",
+          workspaceRoot,
+          reason: "git_process_failed",
+        }
+      },
+      async captureGitRepositoryBaseline() {
+        captures += 1
+        throw new Error("must not capture after blocked inspection")
+      },
+    })
+
+    expect(result.exitCode).toBe(2)
+    expect(captures).toBe(0)
+    expect(terminal.lines.join("\n")).toContain("GIT INSPECTION BLOCKED  git_process_failed")
+    expect(terminal.lines.join("\n")).not.toContain("GIT BASELINE  CAPTURING")
+  })
+
+  test("fails closed for a malformed Git inspection result", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO("inspect-git")
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async inspectGitWorkspace() {
+        return null
+      },
+    })
+
+    expect(result.exitCode).toBe(2)
+    expect(terminal.lines.join("\n")).toContain("GIT INSPECTION BLOCKED  invalid adapter result")
+    expect(terminal.lines.join("\n")).toContain("WORKSPACE STATE  UNTRUSTED")
+  })
+
+  test("rejects a current tuple that is not bound to the captured snapshot", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO("inspect-git")
+    const unrelatedDigest = `sha256:${"9".repeat(64)}` as const
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      ...gitBaselineDependencies(),
+      async inspectGitWorkspace(workspaceRoot) {
+        return completeGitInspection(workspaceRoot)
+      },
+      async revalidateGitRepositoryBaseline() {
+        return {
+          status: "current",
+          expectedSnapshotDigest: unrelatedDigest,
+          currentSnapshotDigest: unrelatedDigest,
+        }
+      },
+    })
+
+    expect(result.exitCode).toBe(2)
+    expect(terminal.lines.join("\n")).toContain(
+      "GIT BASELINE  BLOCKED • revalidation snapshot mismatch • NOT VERIFIED",
+    )
+    expect(terminal.lines.join("\n")).not.toContain("GIT BASELINE  CURRENT")
   })
 
   test("blocks a Git diff whose binding does not match the bounded observation", async () => {
