@@ -14,6 +14,7 @@ import DESCRIPTION from "./apply_patch.txt"
 import { FileSystem } from "@opencode-ai/core/filesystem"
 import { Format } from "../format"
 import * as Bom from "@/util/bom"
+import { assertAstraFileMutationEnabled } from "./astra-safe-start"
 
 export const Parameters = Schema.Struct({
   patchText: Schema.String.annotate({ description: "The full patch text that describes all changes to be made" }),
@@ -31,6 +32,7 @@ export const ApplyPatchTool = Tool.define(
       params: Schema.Schema.Type<typeof Parameters>,
       ctx: Tool.Context,
     ) {
+      assertAstraFileMutationEnabled()
       if (!params.patchText) {
         return yield* Effect.fail(new Error("patchText is required"))
       }
