@@ -11,6 +11,7 @@ operation.admitted -> policy.ask -> approval.rejected -> denied
 ## Current guarantees
 
 - Event, global cursor, and projection updates commit in one `IMMEDIATE` transaction.
+- Bounded event batches commit atomically; a rejected later event rolls back the complete batch.
 - Appends compare the expected state and sequence before mutation.
 - Event IDs are idempotent only for exact fact replays; divergent reuse fails closed.
 - Admission keys are unique across Operations.

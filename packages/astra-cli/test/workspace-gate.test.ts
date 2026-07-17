@@ -74,18 +74,81 @@ describe("workspace gate", () => {
   test("denies the controlled effect before dispatch and produces no marker", async () => {
     const root = await workspace()
     const terminal = scriptedIO("activate-once", "deny")
-    const result = await runWorkspaceGate(root, terminal.io)
+    const recorded: Array<string> = []
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async recordDeniedOperation({ plan }) {
+        recorded.push(plan.operationId)
+        return { operationID: plan.operationId, state: "denied", sequence: 3, lastCursor: 9 }
+      },
+    })
     const output = terminal.lines.join("\n")
 
     expect(result).toMatchObject({ exitCode: 0, workspaceState: "UNTRUSTED", operationState: "denied" })
+    expect(recorded).toHaveLength(1)
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
     expect(output).toContain("HOST EXECUTION — NO SANDBOX")
     expect(output).toContain("PLANNING")
     expect(output).toContain("AWAITING_APPROVAL")
     expect(output).toContain("DENIED     no dispatch • no host effect")
+    expect(output).toContain("LEDGER     durable • sequence 3 • cursor 9")
     expect(output).not.toContain("DISPATCHING")
     expect(output).not.toContain("EFFECT OBSERVED")
     expect(output).not.toContain("VERIFIED   demo marker")
+  })
+
+  test("fails closed when a denial cannot be recorded durably", async () => {
+    const root = await workspace()
+    const terminal = scriptedIO("activate-once", "deny")
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async recordDeniedOperation() {
+        throw new Error("Git baseline unavailable")
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: "denied" })
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+    expect(terminal.lines.join("\n")).toContain(
+      "LEDGER     DENIAL NOT CONFIRMED DURABLE • durable Operation state is unavailable",
+    )
+    expect(terminal.lines.join("\n")).not.toContain("DISPATCHING")
+  })
+
+  test("rejects a durable projection for another Operation", async () => {
+    const root = await workspace()
+    const terminal = scriptedIO("activate-once", "deny")
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async recordDeniedOperation() {
+        return {
+          operationID: "0196e4cb-5d80-7b1d-8fb2-263b81670499",
+          state: "denied",
+          sequence: 3,
+          lastCursor: 3,
+        }
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 2, operationState: "denied" })
+    expect(terminal.lines.join("\n")).toContain("LEDGER     DENIAL NOT CONFIRMED DURABLE")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("does not request denial recording for read-only, exit, or approval", async () => {
+    for (const [decision, approval] of [
+      ["read-only", "deny"],
+      ["exit", "deny"],
+      ["activate-once", "approve"],
+    ] as const) {
+      const root = await workspace()
+      const terminal = scriptedIO(decision, approval)
+      let calls = 0
+      await runWorkspaceGate(root, terminal.io, {
+        async recordDeniedOperation({ plan }) {
+          calls += 1
+          return { operationID: plan.operationId, state: "denied", sequence: 3, lastCursor: 3 }
+        },
+      })
+      expect(calls).toBe(0)
+    }
   })
 
   test("runs one approved create-only effect through observed and verified states", async () => {

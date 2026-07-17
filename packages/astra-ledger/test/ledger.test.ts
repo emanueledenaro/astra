@@ -74,9 +74,7 @@ describe("Operation ledger denial lifecycle", () => {
         Effect.gen(function* () {
           const ledger = yield* makeOperationLedger()
           yield* ledger.initialize()
-          const results = []
-          for (const command of lifecycle) results.push(yield* ledger.append(command))
-          return results
+          return yield* ledger.appendBatch(lifecycle)
         }),
       )
 
@@ -121,6 +119,33 @@ describe("Operation ledger denial lifecycle", () => {
           .pipe(Effect.flip)
         expect(error).toBeInstanceOf(EventConflictError)
         expect((yield* ledger.readEvents(operationID, { limit: 10 })).length).toBe(1)
+      }),
+    )
+  })
+
+  test("rolls back an entire batch when a later event is rejected", async () => {
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        const ledger = yield* makeOperationLedger()
+        yield* ledger.initialize()
+        const rejected = yield* ledger
+          .appendBatch([
+            lifecycle[0],
+            appendCommand({
+              eventID: eventIDs(58),
+              name: "approval.rejected",
+              payload: { decisionID, reasonCode: "user_rejected" },
+              expectedState: "proposed",
+              expectedSequence: 1,
+            }),
+          ])
+          .pipe(Effect.flip)
+
+        expect(rejected).toBeInstanceOf(OperationTransitionError)
+        expect(yield* ledger.getOperation(operationID)).toBeNull()
+        expect(yield* ledger.readGlobalCursor()).toBe(0)
+        expect(yield* ledger.readEvents(operationID, { limit: 10 })).toEqual([])
       }),
     )
   })

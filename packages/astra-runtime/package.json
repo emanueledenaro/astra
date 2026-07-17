@@ -8,14 +8,18 @@
     ".": "./src/index.ts",
     "./preflight": "./src/workspace-preflight.ts",
     "./controlled-write-plan": "./src/controlled-write-plan.ts",
-    "./controlled-write": "./src/controlled-write.ts"
+    "./controlled-write": "./src/controlled-write.ts",
+    "./operation-ledger": "./src/operation-ledger.ts"
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsgo --noEmit"
+    "typecheck": "tsgo --noEmit && tsgo --noEmit -p tsconfig.ledger.json"
   },
   "dependencies": {
-    "@astra/domain": "workspace:*"
+    "@astra/domain": "workspace:*",
+    "@astra/ledger": "workspace:*",
+    "@effect/sql-sqlite-bun": "catalog:",
+    "effect": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

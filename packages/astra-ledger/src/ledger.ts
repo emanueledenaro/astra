@@ -35,6 +35,7 @@ const ledgerSchemaVersion = 1
 const maximumReadEvents = 256
 const maximumIntegrityEvents = 100_000
 const maximumIntegrityOperations = 10_000
+const maximumBatchEvents = 32
 const emptyDigest = `sha256:${"0".repeat(64)}`
 
 const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
@@ -93,6 +94,9 @@ export type LedgerDurability = Readonly<{
 export interface OperationLedger {
   initialize(): Effect.Effect<void, OperationLedgerError>
   append(command: AppendOperationEvent): Effect.Effect<AppendOperationEventResult, OperationLedgerError>
+  appendBatch(
+    commands: ReadonlyArray<AppendOperationEvent>,
+  ): Effect.Effect<ReadonlyArray<AppendOperationEventResult>, OperationLedgerError>
   getOperation(operationID: OperationID): Effect.Effect<OperationRecord | null, OperationLedgerError>
   readEvents(
     operationID: OperationID,
@@ -120,6 +124,7 @@ export function makeOperationLedgerInternal(
     return {
       initialize: () => initialize(db),
       append: (command) => append(db, command, injectFault),
+      appendBatch: (commands) => appendBatch(db, commands, injectFault),
       getOperation: (operationID) => getOperation(db, operationID),
       readEvents: (operationID, options) => readEvents(db, operationID, options.limit),
       readGlobalCursor: () => readGlobalCursor(db),
@@ -194,14 +199,39 @@ function append(
   command: AppendOperationEvent,
   injectFault: LedgerFault,
 ): Effect.Effect<AppendOperationEventResult, OperationLedgerError> {
-  if (!Number.isSafeInteger(command.expectedSequence) || command.expectedSequence < 0) {
+  const validation = validateAppendCommand(command, "$")
+  if (validation) return Effect.fail(validation)
+
+  return db
+    .transaction(
+      (tx) =>
+        Effect.gen(function* () {
+          const meta = yield* requireInitialized(tx)
+          yield* verifyLedgerIntegrity(tx, meta)
+          return yield* appendWithinTransaction(tx, command, injectFault)
+        }),
+      { behavior: "immediate" },
+    )
+    .pipe(Effect.mapError(mapStorageError("Failed to append the operation event")))
+}
+
+function appendBatch(
+  db: Database,
+  commands: ReadonlyArray<AppendOperationEvent>,
+  injectFault: LedgerFault,
+): Effect.Effect<ReadonlyArray<AppendOperationEventResult>, OperationLedgerError> {
+  if (commands.length < 1 || commands.length > maximumBatchEvents) {
     return Effect.fail(
       new OperationEventValidationError(
-        "Expected sequence must be a non-negative safe integer",
-        "$.expectedSequence",
-        "expected_non_negative_integer",
+        `Operation event batches must contain 1 to ${maximumBatchEvents} events`,
+        "$.commands",
+        "invalid_batch_size",
       ),
     )
+  }
+  for (const [index, command] of commands.entries()) {
+    const validation = validateAppendCommand(command, `$.commands[${index}]`)
+    if (validation) return Effect.fail(validation)
   }
 
   return db
@@ -210,60 +240,72 @@ function append(
         Effect.gen(function* () {
           const meta = yield* requireInitialized(tx)
           yield* verifyLedgerIntegrity(tx, meta)
-          const existingRows = yield* tx.all<EventRow>(
-            sql`SELECT * FROM operation_event WHERE event_id = ${command.event.eventID} LIMIT 1`,
-          )
-          if (existingRows[0]) return yield* replayExistingEvent(tx, command, existingRows[0])
-
-          const replay = yield* loadAndVerifyOperation(tx, command.event.operationID, maximumReadEvents)
-          const actualState = replay?.operation.state ?? null
-          const actualSequence = replay?.operation.sequence ?? 0
-          if (actualState !== command.expectedState || actualSequence !== command.expectedSequence) {
-            return yield* Effect.fail(
-              new OperationConcurrencyError(
-                command.expectedState,
-                command.expectedSequence,
-                actualState,
-                actualSequence,
-              ),
-            )
-          }
-
-          const transition = projectOperationEvent(actualState, command.event.name)
-          if (!transition.accepted) {
-            return yield* Effect.fail(new OperationTransitionError(actualState, command.event.name, transition.code))
-          }
-
-          const nextCursor = meta.last_cursor + 1
-          const persisted = yield* parseAndDigestEvent(
-            command.event,
-            actualSequence + 1,
-            nextCursor,
-            replay?.operation.lastDigest ?? null,
-          )
-          const lifecycle = yield* parseStoredLifecycle(persisted)
-          yield* validateLifecycleLink(replay?.operation ?? null, command.event.name, lifecycle)
-
-          if (lifecycle.admissionKey) {
-            const admissionRows = yield* tx.all<{ operation_id: string }>(
-              sql`SELECT operation_id FROM operation_projection WHERE admission_key = ${lifecycle.admissionKey} LIMIT 1`,
-            )
-            if (admissionRows[0] && admissionRows[0].operation_id !== command.event.operationID) {
-              return yield* Effect.fail(new AdmissionConflictError(lifecycle.admissionKey))
-            }
-          }
-
-          yield* insertEvent(tx, persisted)
-          yield* injectFault("after_event_insert")
-          const operation = yield* projectEvent(tx, replay?.operation ?? null, transition.state, persisted, lifecycle)
-          yield* injectFault("after_projection_update")
-          yield* tx.run(sql`UPDATE ledger_meta SET last_cursor = ${nextCursor} WHERE singleton = 1`)
-
-          return { kind: "appended" as const, event: persisted, operation }
+          const results: Array<AppendOperationEventResult> = []
+          for (const command of commands) results.push(yield* appendWithinTransaction(tx, command, injectFault))
+          return results
         }),
       { behavior: "immediate" },
     )
-    .pipe(Effect.mapError(mapStorageError("Failed to append the operation event")))
+    .pipe(Effect.mapError(mapStorageError("Failed to append the operation event batch")))
+}
+
+function appendWithinTransaction(tx: QueryExecutor, command: AppendOperationEvent, injectFault: LedgerFault) {
+  return Effect.gen(function* () {
+    const meta = yield* requireInitialized(tx)
+    const existingRows = yield* tx.all<EventRow>(
+      sql`SELECT * FROM operation_event WHERE event_id = ${command.event.eventID} LIMIT 1`,
+    )
+    if (existingRows[0]) return yield* replayExistingEvent(tx, command, existingRows[0])
+
+    const replay = yield* loadAndVerifyOperation(tx, command.event.operationID, maximumReadEvents)
+    const actualState = replay?.operation.state ?? null
+    const actualSequence = replay?.operation.sequence ?? 0
+    if (actualState !== command.expectedState || actualSequence !== command.expectedSequence) {
+      return yield* Effect.fail(
+        new OperationConcurrencyError(command.expectedState, command.expectedSequence, actualState, actualSequence),
+      )
+    }
+
+    const transition = projectOperationEvent(actualState, command.event.name)
+    if (!transition.accepted) {
+      return yield* Effect.fail(new OperationTransitionError(actualState, command.event.name, transition.code))
+    }
+
+    const nextCursor = meta.last_cursor + 1
+    const persisted = yield* parseAndDigestEvent(
+      command.event,
+      actualSequence + 1,
+      nextCursor,
+      replay?.operation.lastDigest ?? null,
+    )
+    const lifecycle = yield* parseStoredLifecycle(persisted)
+    yield* validateLifecycleLink(replay?.operation ?? null, command.event.name, lifecycle)
+
+    if (lifecycle.admissionKey) {
+      const admissionRows = yield* tx.all<{ operation_id: string }>(
+        sql`SELECT operation_id FROM operation_projection WHERE admission_key = ${lifecycle.admissionKey} LIMIT 1`,
+      )
+      if (admissionRows[0] && admissionRows[0].operation_id !== command.event.operationID) {
+        return yield* Effect.fail(new AdmissionConflictError(lifecycle.admissionKey))
+      }
+    }
+
+    yield* insertEvent(tx, persisted)
+    yield* injectFault("after_event_insert")
+    const operation = yield* projectEvent(tx, replay?.operation ?? null, transition.state, persisted, lifecycle)
+    yield* injectFault("after_projection_update")
+    yield* tx.run(sql`UPDATE ledger_meta SET last_cursor = ${nextCursor} WHERE singleton = 1`)
+    return { kind: "appended" as const, event: persisted, operation }
+  })
+}
+
+function validateAppendCommand(command: AppendOperationEvent, path: string) {
+  if (Number.isSafeInteger(command.expectedSequence) && command.expectedSequence >= 0) return null
+  return new OperationEventValidationError(
+    "Expected sequence must be a non-negative safe integer",
+    `${path}.expectedSequence`,
+    "expected_non_negative_integer",
+  )
 }
 
 function replayExistingEvent(

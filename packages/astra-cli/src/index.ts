@@ -1,7 +1,22 @@
 #!/usr/bin/env bun
 
-import { runWorkspaceGate, type EffectApproval, type WorkspaceDecision } from "./workspace-gate"
+import { runWorkspaceGate, type DurableDenial, type EffectApproval, type WorkspaceDecision } from "./workspace-gate"
+import { operationLedgerPath } from "./app-state"
 import { createTerminalIO } from "./terminal-io"
+
+type OperationLedgerModule = Readonly<{
+  recordDeniedControlledWrite: (
+    input: Readonly<{
+      filename: string
+      plan: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["recordDeniedOperation"]>
+      >[0]["plan"]
+      report: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["recordDeniedOperation"]>
+      >[0]["report"]
+    }>,
+  ) => Promise<DurableDenial>
+}>
 
 type Arguments = Readonly<{
   workspace: string
@@ -17,7 +32,16 @@ if (!parsed.ok) {
 } else {
   const terminal = createTerminalIO(parsed.arguments)
   try {
-    process.exitCode = (await runWorkspaceGate(parsed.arguments.workspace, terminal.io)).exitCode
+    process.exitCode = (
+      await runWorkspaceGate(parsed.arguments.workspace, terminal.io, {
+        async recordDeniedOperation(input) {
+          const moduleName = ["@astra/runtime", "operation-ledger"].join("/")
+          const loaded: unknown = await import(moduleName)
+          if (!isOperationLedgerModule(loaded)) throw new Error("Astra Operation ledger adapter is unavailable")
+          return loaded.recordDeniedControlledWrite({ filename: operationLedgerPath(), ...input })
+        },
+      })
+    ).exitCode
   } finally {
     terminal.close()
   }
@@ -62,6 +86,15 @@ function parseArguments(
       ...(approval ? { approval } : {}),
     },
   }
+}
+
+function isOperationLedgerModule(value: unknown): value is OperationLedgerModule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "recordDeniedControlledWrite" in value &&
+    typeof value.recordDeniedControlledWrite === "function"
+  )
 }
 
 function isWorkspaceDecision(value: string): value is WorkspaceDecision {

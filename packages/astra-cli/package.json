@@ -9,6 +9,7 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./app-state": "./src/app-state.ts",
     "./session": "./src/workspace-gate.ts",
     "./terminal": "./src/terminal.ts"
   },

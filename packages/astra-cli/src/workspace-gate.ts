@@ -27,7 +27,30 @@ export type WorkspaceGateResult = Readonly<{
   report: WorkspaceTrustReport
 }>
 
-export async function runWorkspaceGate(workspace: string, io: WorkspaceGateIO): Promise<WorkspaceGateResult> {
+export type DurableDenial = Readonly<{
+  operationID: string
+  state: "denied"
+  sequence: number
+  lastCursor: number
+}>
+
+export type WorkspaceGateDependencies = Readonly<{
+  recordDeniedOperation?: (
+    input: Readonly<{
+      plan: ReturnType<typeof createControlledWritePlan>
+      report: WorkspaceTrustReport
+      policyAskedAt: string
+      approvalRejectedAt: string
+      recordingStartedAt: string
+    }>,
+  ) => Promise<DurableDenial>
+}>
+
+export async function runWorkspaceGate(
+  workspace: string,
+  io: WorkspaceGateIO,
+  dependencies: WorkspaceGateDependencies = {},
+): Promise<WorkspaceGateResult> {
   for (const line of renderHeader()) io.write(line)
 
   let workspaceState = advanceWorkspace(null, "workspace.opened", io)
@@ -68,12 +91,36 @@ export async function runWorkspaceGate(workspace: string, io: WorkspaceGateIO): 
 
   const plan = createControlledWritePlan(report.root)
   let operationState = advanceOperation(null, "operation.admitted", plan.operationId, io)
+  const policyAskedAt = new Date().toISOString()
   operationState = advanceOperation(operationState, "policy.ask", plan.operationId, io)
   for (const line of renderControlledWritePreview(plan)) io.write(line)
 
   const approval = await io.approveControlledWrite()
   if (approval === "deny") {
-    operationState = advanceOperation(operationState, "approval.rejected", plan.operationId, io)
+    const approvalRejectedAt = new Date().toISOString()
+    if (dependencies.recordDeniedOperation) {
+      try {
+        const durable = await dependencies.recordDeniedOperation({
+          plan,
+          report,
+          policyAskedAt,
+          approvalRejectedAt,
+          recordingStartedAt: new Date().toISOString(),
+        })
+        requireMatchingDurableDenial(durable, plan.operationId)
+        operationState = durable.state
+        io.write(renderOperationState(plan.operationId, Operation.operationSemanticKey(durable.state)))
+        io.write(`LEDGER     durable • sequence ${durable.sequence} • cursor ${durable.lastCursor}`)
+      } catch (error) {
+        operationState = advanceOperation(operationState, "approval.rejected", plan.operationId, io)
+        io.write(`LEDGER     DENIAL NOT CONFIRMED DURABLE • ${recordingFailureMessage(error)}`)
+        io.write("DENIED     no dispatch • no host effect")
+        workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
+        return { exitCode: 2, workspaceState, operationState, report }
+      }
+    } else {
+      operationState = advanceOperation(operationState, "approval.rejected", plan.operationId, io)
+    }
     io.write("DENIED     no dispatch • no host effect")
     workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
     return { exitCode: 0, workspaceState, operationState, report }
@@ -119,6 +166,29 @@ export async function runWorkspaceGate(workspace: string, io: WorkspaceGateIO): 
   io.write(`EVIDENCE   ${effect.receipt.observedDigest} • ${effect.receipt.bytes} bytes`)
   workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
   return { exitCode: 0, workspaceState, operationState, report }
+}
+
+function requireMatchingDurableDenial(value: DurableDenial, operationID: string) {
+  if (
+    value.operationID !== operationID ||
+    value.state !== "denied" ||
+    !Number.isSafeInteger(value.sequence) ||
+    value.sequence < 1 ||
+    !Number.isSafeInteger(value.lastCursor) ||
+    value.lastCursor < 1
+  ) {
+    throw new Error("The durable denial projection does not match the current Operation")
+  }
+}
+
+function recordingFailureMessage(error: unknown) {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    if (error.code === "git_baseline_unavailable") return "Git baseline is unavailable in this increment"
+    if (error.code === "incomplete_preflight") return "a complete preflight is required"
+    if (error.code === "ledger_inside_workspace") return "the Operation ledger path is unsafe"
+    if (error.code === "unsafe_ledger_path") return "the Operation ledger path is unsafe"
+  }
+  return "durable Operation state is unavailable"
 }
 
 function advanceWorkspace(

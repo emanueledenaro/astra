@@ -11,5 +11,6 @@
     "exactOptionalPropertyTypes": true,
     "types": ["bun"]
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  "exclude": ["src/operation-ledger.ts", "test/operation-ledger.test.ts"]
 }

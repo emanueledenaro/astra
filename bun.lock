@@ -132,6 +132,9 @@
       "name": "@astra/runtime",
       "dependencies": {
         "@astra/domain": "workspace:*",
+        "@astra/ledger": "workspace:*",
+        "@effect/sql-sqlite-bun": "catalog:",
+        "effect": "catalog:",
       },
       "devDependencies": {
         "@types/bun": "catalog:",
