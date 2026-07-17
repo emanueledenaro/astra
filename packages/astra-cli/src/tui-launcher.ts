@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url"
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import type { GitRepositoryBaselineRevalidationResult } from "@astra/domain/git-repository-baseline"
 import type { WorkspaceRevalidation } from "@astra/runtime/preflight"
+import { startAstraTuiControlServer, type AstraTuiControlServer } from "./tui-control-server"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
 
 export type AstraTuiMode = "read-only" | "activate-once"
@@ -16,7 +17,14 @@ export type AstraTuiLaunchSpec = Readonly<{
   env: Readonly<Record<string, string>>
 }>
 
-export type AstraAuthorityFile = Readonly<{ directory: string; path: string; digest: string }>
+export type AstraAuthorityFile = Readonly<{
+  directory: string
+  path: string
+  digest: string
+  authority: AstraSessionAuthority
+}>
+
+export type AstraTuiControlReference = Pick<AstraTuiControlServer, "socketPath" | "token">
 
 type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }>
 
@@ -24,6 +32,7 @@ export function makeAstraTuiLaunchSpec(
   workspace: string,
   mode: AstraTuiMode,
   authority: Pick<AstraAuthorityFile, "path" | "digest">,
+  control: AstraTuiControlReference,
 ): AstraTuiLaunchSpec {
   const opencodePackage = fileURLToPath(new URL("../../opencode", import.meta.url))
   const opencodeEntrypoint = fileURLToPath(new URL("../../opencode/src/index.ts", import.meta.url))
@@ -45,6 +54,8 @@ export function makeAstraTuiLaunchSpec(
       ASTRA_WORKSPACE_MODE: mode,
       ASTRA_SESSION_AUTHORITY_FILE: authority.path,
       ASTRA_SESSION_AUTHORITY_DIGEST: authority.digest,
+      ASTRA_CONTROL_SOCKET: control.socketPath,
+      ASTRA_CONTROL_TOKEN: control.token,
       OPENCODE_CLIENT: "astra",
       OPENCODE_CONFIG_CONTENT: config,
       OPENCODE_PERMISSION: JSON.stringify(permission),
@@ -91,6 +102,7 @@ export function astraChildEnvironment(
 
 export async function launchAstraTui(session: OpenedWorkspace) {
   const authority = await createAstraSessionAuthorityFile(session)
+  let control: AstraTuiControlServer | undefined
   let child: ReturnType<typeof Bun.spawn> | undefined
   const terminate = (signal: NodeJS.Signals) => {
     if (child && child.exitCode === null) child.kill(signal)
@@ -100,7 +112,12 @@ export async function launchAstraTui(session: OpenedWorkspace) {
   process.once("SIGHUP", onHangup)
   process.once("SIGTERM", onTerminate)
   try {
-    const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority)
+    control = await startAstraTuiControlServer({
+      directory: authority.directory,
+      workspaceRoot: authority.authority.workspace.root,
+      sessionID: authority.authority.sessionID,
+    })
+    const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control)
     child = Bun.spawn([...spec.command], {
       cwd: spec.cwd,
       env: spec.env,
@@ -112,7 +129,11 @@ export async function launchAstraTui(session: OpenedWorkspace) {
   } finally {
     process.off("SIGHUP", onHangup)
     process.off("SIGTERM", onTerminate)
-    await rm(authority.directory, { recursive: true, force: true })
+    try {
+      await control?.close()
+    } finally {
+      await rm(authority.directory, { recursive: true, force: true })
+    }
   }
 }
 
@@ -124,6 +145,8 @@ export async function createAstraSessionAuthorityFile(
       root: string,
       snapshot: NonNullable<OpenedWorkspace["repositoryBaseline"]>,
     ) => Promise<GitRepositoryBaselineRevalidationResult>
+    createAuthorityDirectory?: () => Promise<string>
+    writeAuthorityFile?: (path: string, content: string) => Promise<void>
   }> = {
     async revalidateWorkspacePreflight(report) {
       const runtime = await import("@astra/runtime/preflight")
@@ -167,8 +190,21 @@ export async function createAstraSessionAuthorityFile(
     repositoryBaseline: session.repositoryBaseline ?? null,
   } as const satisfies AstraSessionAuthority
   const content = JSON.stringify(value)
-  const directory = await mkdtemp(join(tmpdir(), "astra-session-"))
+  const directory = dependencies.createAuthorityDirectory
+    ? await dependencies.createAuthorityDirectory()
+    : await mkdtemp(join(tmpdir(), "astra-session-"))
   const path = join(directory, "authority.json")
-  await writeFile(path, content, { flag: "wx", mode: 0o600 })
-  return { directory, path, digest: `sha256:${createHash("sha256").update(content).digest("hex")}` }
+  try {
+    if (dependencies.writeAuthorityFile) await dependencies.writeAuthorityFile(path, content)
+    else await writeFile(path, content, { flag: "wx", mode: 0o600 })
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true })
+    throw error
+  }
+  return {
+    directory,
+    path,
+    digest: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+    authority: value,
+  }
 }

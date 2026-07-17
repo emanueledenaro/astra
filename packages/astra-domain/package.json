@@ -9,6 +9,7 @@
     "./operation": "./src/operation.ts",
     "./operation-contract": "./src/operation-contract.ts",
     "./execution-capability": "./src/execution-capability.ts",
+    "./git-control-inspection": "./src/git-control-inspection.ts",
     "./git-repository-baseline": "./src/git-repository-baseline.ts",
     "./session-authority": "./src/session-authority.ts",
     "./workspace-trust": "./src/workspace-trust.ts"
