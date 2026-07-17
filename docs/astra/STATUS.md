@@ -9,11 +9,13 @@ Produce a local Astra release candidate that is functional, independently verifi
 ## Canonical repository
 
 - Path: `/Users/emanueledenaro/Documents/progetti/Astra`
-- Branch: `astra`
-- Latest implementation checkpoint: `9c818ac3e` (`fix(astra): block unsafe Git activation`)
+- Working branch: `durable-coordinator`
+- Public-preparation boundary: local branch `astra` at `57f3d1bb8` (`docs(astra): record command contract and checkpoints`)
+- Latest implementation checkpoint: `30c4f59f0` (`feat(astra): coordinate controlled writes durably`)
 - Audited OpenCode baseline: `453b61e27b2f6c2752a60dd7d8412bdcf4e0aa3d`
 - History: full local clone; the repository is not shallow
-- Remotes: fetch-only; push URLs are disabled
+- Remotes in this checkout: fetch-only; push URLs are disabled
+- Public repository preparation is handled separately from this active worktree.
 
 ## Implemented locally
 
@@ -30,17 +32,23 @@ Produce a local Astra release candidate that is functional, independently verifi
 - Approval, dispatch, and claim use an internal trusted clock and bind the admitted baseline, adapter digest, attempt, causation, actor, and event timestamps. Expired, reused, mismatched, competing, or backdated claims fail closed.
 - A separate append-only executor spool now preserves immutable receipts across process and database reopen.
 - Receipt ingestion binds the Operation, attempt, dispatch request, executor claim, capability, fencing token, adapter, admitted effect class, resources, and timing before atomically appending the observed outcome.
-- Recovery distinguishes a pending outbox, a claimed Operation without a receipt, and an ingested receipt. Exact receipt replay is idempotent; divergent replay fails closed.
-- Storage schema v4 migrates an authentic v1 denial ledger without losing its events.
+- The approved CLI path now uses the durable coordinator. It revalidates the exact durable Operation, claim, capability, fence, adapter, baseline, authority, and minimum remaining lease immediately before the create-only effect.
+- An active exact claim remains in progress and is never retried. A missing receipt becomes uncertain only after claim expiry. Recovery transfers exact pending receipts without rerunning the effect.
+- Executor receipts bind the admitted baseline, bounded post-effect workspace digest, preflight limits, activation guard, workspace identity, and executor-created target identity.
+- The verifier reopens durable state and the target independently, checks the workspace before and after fresh target reads, checks it again before evidence ingestion, and alone can append terminal verification evidence.
+- Drift, a new `.git` marker, a replaced inode, a foreign workspace, an expired authority, or an ambiguous effect becomes `reconciliation_required`; none can produce `VERIFIED`.
+- Generic ledger and spool APIs expose neither success-producing evidence ingestion nor receipt acknowledgement. Privileged mutations use internal process-local capability composition.
+- Ledger and receipt-spool SQLite families cannot overlap through their base, journal, shared-memory, or WAL paths.
+- Storage schema v5 migrates authentic v1-v4 ledgers without losing events.
 - Static preflight recognizes `.git` directories, files, symlinks, case variants, physical repository ancestors, and repository ancestry reached through intermediate symlinks without executing Git or traversing Git contents.
 - Git workspaces remain readable but cannot activate or reach the demo effect until a complete Git baseline exists. The controlled write revalidates this guard again at the effect boundary.
 
 ## Honest limits
 
-- The approved controlled write still uses the Phase D in-memory path. It is not connected to the durable ledger yet.
-- The durable outbox, capability reservation/consumption, executor claim, receipt spool, and receipt ingestion are implemented but deliberately not connected to the CLI effect executor yet.
-- The current CLI `VERIFIED` label comes from same-process exact readback in the Phase D adapter. It is not yet the independent durable verifier required by the final Operation contract and will be replaced by the next coordinator increment.
-- Recovery across receipt spool and ledger is implemented. Crash reconciliation for an effect that occurred before a receipt was durably spooled, lease renewal, cancellation, and independent verification are not yet implemented.
+- Coordinator and verifier are separated by restricted package APIs and process-local capabilities, but still run sequentially in one OS process. This is not protection from a fully compromised host process or hostile arbitrary module loading.
+- `VERIFIED` currently proves the durable admitted baseline, bounded post-effect workspace snapshot, exact target inode, exact bytes, and SHA-256 under that process-local boundary. A dedicated verifier process and sandbox remain hardening work.
+- The current executor supports one create-only demo effect and `maxAttempts: 1`. General retries, lease renewal, cancellation, and owner-driven reconciliation are not implemented.
+- Recovery never retries an ambiguous effect. An effect that may have occurred before its receipt was durably spooled requires reconciliation.
 - `HOST EXECUTION — NO SANDBOX` is accurate: the positive demo effect is a direct, bounded host write.
 - Git workspaces are restricted to the bounded read-only report until Astra can capture a complete Git baseline; no non-Git baseline is invented.
 - Trust is process-local and never persisted in this increment.
@@ -50,25 +58,27 @@ Produce a local Astra release candidate that is functional, independently verifi
 
 - Exact toolchain: Bun `1.3.14`; frozen install succeeds without lockfile changes.
 - Domain: 38 tests, 1,924 assertions; typecheck passes.
-- Executor: 5 tests, 18 assertions; typecheck passes.
-- Ledger: 37 tests, 146 assertions; typecheck passes.
-- Runtime: 26 tests, 99 assertions; both strict runtime and isolated SQLite-adapter typechecks pass.
-- CLI: 20 tests, 114 assertions; typecheck passes.
-- Total: 126 tests and 2,301 assertions.
+- Executor: 5 tests, 19 assertions; typecheck passes.
+- Ledger: 45 tests, 171 assertions; typecheck passes.
+- Runtime: 40 tests, 165 assertions; both strict runtime and isolated SQLite-adapter typechecks pass.
+- CLI: 21 tests, 119 assertions; typecheck passes.
+- Total: 149 tests and 2,398 assertions.
 - Scoped Oxlint: 0 warnings, 0 errors. Prettier check passes.
-- Real demo matrix passes: malicious read-only fixture, durable denial, approved create-only write, exact SHA-256 readback, and zero network-canary requests.
+- Frozen install and `git diff --check` pass.
+- Real demo matrix passes: malicious read-only fixture, durable denial, approved create-only write, durable receipt transfer, independent exact evidence, and zero network-canary requests.
 - The receipt-recovery review found no blocker. It recorded one coordinator invariant: only the coordinator may acknowledge a spooled receipt after exact ledger ingestion.
 - The Git-preflight review found four P1 bypasses involving nested repositories, case-variant metadata, late Git creation, and physical ancestry through symlinks. All four were corrected, covered by negative tests, and independently rechecked with no blocker remaining.
+- The coordinator review found three P1 issues and two P2 issues involving verification binding, forged evidence, expired authority, active-claim concurrency, and SQLite/acknowledgement boundaries. All were corrected and the same reviewer repeated the attacks with no P0, P1, or P2 remaining in the declared demo boundary.
 
 ## Roadmap
 
 ### Local demo
 
-Current: Workspace Gate, durable no-effect denial, outbox, capability reservation/consumption, one-shot fenced claim, receipt spool, receipt ingestion, and fail-closed Git activation guard are working. Next, connect one approved controlled effect through the complete durable coordinator and independent verifier.
+Current: Workspace Gate, durable denial, approved create-only effect, outbox, capability reservation/consumption, one-shot fenced claim, receipt spool, exact recovery, independent durable verification, and fail-closed Git activation guard are working. Next, add the isolated read-only Git baseline and control-plane adapter without enabling Git mutation.
 
 ### Hardening
 
-Add effect-specific crash reconciliation, lease renewal, complete Git baseline, capability policy, macOS sandbox backend, and hostile Git/process fixtures.
+Add effect-specific reconciliation, lease renewal, complete Git baseline, capability policy, a separate verifier process, macOS sandbox backend, and hostile Git/process fixtures.
 
 ### Professional release
 
@@ -77,12 +87,13 @@ Complete provider parity, credential broker, isolated plugin/skill/MCP lifecycle
 ## Blockers
 
 - No local implementation blocker is active.
-- Public fork, push, publication, release, signing, notarization, and deployment require separate product-owner authorization.
+- GitHub preparation for the already closed `astra` boundary is authorized and handled in a separate worktree/chat.
+- Release, package publication, signing, notarization, deployment, and publishing this active branch still require explicit product-owner authorization.
 
 ## Next executable work
 
-1. Add the durable coordinator for approval, dispatch, claim, effect, receipt spooling, ledger ingestion, and acknowledgement.
-2. Add crash points around the effect and prove that uncertain effects are never retried blindly.
-3. Add a separate verifier that alone may append `verification.passed` and emit `VERIFIED`.
-4. Connect the approved CLI path only after the coordinator crash matrix passes.
-5. Implement the isolated read-only Git baseline adapter before enabling Git activation.
+1. Implement the isolated read-only Git baseline adapter without enabling mutation.
+2. Show branch, HEAD, worktree, staged, unstaged, and untracked state through a typed Git Control Plane model.
+3. Add bounded Git fixtures and prove that repository inspection executes no hooks, filters, pagers, editors, signing, credential helpers, or repository scripts.
+4. Keep every Git mutation disabled until its exact Operation, approval, effect, and verification contract exists.
+5. Move verifier execution into a separate process during hardening without weakening the current evidence contract.

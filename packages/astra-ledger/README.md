@@ -8,6 +8,7 @@ The ledger currently supports durable denial and one bounded dispatch lifecycle:
 operation.admitted -> policy.ask -> approval.rejected -> denied
 operation.admitted -> policy.ask -> approval.granted -> dispatch.requested -> executor.accepted
   -> effect.observed | execution.failed_without_effect | effect.unknown
+effect.observed -> verification.started -> verification.passed | verification.failed | verification.unknown
 ```
 
 ## Current guarantees
@@ -18,8 +19,10 @@ operation.admitted -> policy.ask -> approval.granted -> dispatch.requested -> ex
 - Exact claim retries are idempotent; competing, mismatched, and expired claims fail closed. Claimed requests are never auto-reclaimed.
 - A specialized receipt API accepts only the exact claimed dispatch, capability, fencing token, and adapter. The receipt event, immutable receipt row, and projection commit atomically.
 - Receipt observations map to `effect_observed`, `failed`, or `reconciliation_required`; they never imply independent verification.
-- Recovery reads distinguish a pending outbox, an accepted claim without a receipt, and an ingested receipt.
-- Storage schema v4 migrates authentic v1-v3 ledgers in place and preserves existing events.
+- A claimed dispatch without a receipt remains active until the exact claim lease expires. Only then can a specialized, claim-bound uncertainty record enter `reconciliation_required`; it cannot synthesize executor timestamps or a receipt.
+- Verifier-only internal composition binds the immutable receipt, admitted verification plan, verifier identity, snapshot, criteria, causation, and two verification events in one transaction. The generic `OperationLedger`, root package surface, and generic append path expose no success-producing evidence ingestion.
+- Recovery reads distinguish a pending outbox, an accepted claim without a receipt, an ingested receipt, and a claim marked uncertain.
+- Storage schema v5 migrates authentic v1-v4 ledgers in place and preserves existing events.
 - Bounded event batches commit atomically; a rejected later event rolls back the complete batch.
 - Appends compare the expected state and sequence before mutation.
 - Event IDs are idempotent only for exact fact replays; divergent reuse fails closed.
@@ -36,4 +39,4 @@ The database-wide scan currently supports at most 100,000 events and 10,000 Oper
 
 The 256-event aggregate read bound is fail-closed. Pagination and checkpointed projections must replace it before Operations are allowed to exceed that size.
 
-The outbox and receipt ingestion are not connected to effect execution. The executor package only supplies a separate durable receipt spool. Effect execution, lease renewal, reconciliation actions, and CLI integration remain later increments.
+The current demo uses one attempt only. General retry orchestration, lease renewal, owner-driven reconciliation actions, and multi-attempt aggregate storage remain later increments.
