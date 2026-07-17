@@ -7,6 +7,7 @@ The ledger currently supports durable denial and one bounded dispatch lifecycle:
 ```text
 operation.admitted -> policy.ask -> approval.rejected -> denied
 operation.admitted -> policy.ask -> approval.granted -> dispatch.requested -> executor.accepted
+  -> effect.observed | execution.failed_without_effect | effect.unknown
 ```
 
 ## Current guarantees
@@ -15,7 +16,10 @@ operation.admitted -> policy.ask -> approval.granted -> dispatch.requested -> ex
 - `dispatch.requested` and its immutable outbox record commit atomically.
 - Approval reserves one globally unique capability. The specialized one-shot claim API consumes that capability with one exact pending request, allocates a monotonic fencing token, and appends `executor.accepted` atomically.
 - Exact claim retries are idempotent; competing, mismatched, and expired claims fail closed. Claimed requests are never auto-reclaimed.
-- Storage schema v3 migrates authentic v1 ledgers in place and preserves existing denial events.
+- A specialized receipt API accepts only the exact claimed dispatch, capability, fencing token, and adapter. The receipt event, immutable receipt row, and projection commit atomically.
+- Receipt observations map to `effect_observed`, `failed`, or `reconciliation_required`; they never imply independent verification.
+- Recovery reads distinguish a pending outbox, an accepted claim without a receipt, and an ingested receipt.
+- Storage schema v4 migrates authentic v1-v3 ledgers in place and preserves existing events.
 - Bounded event batches commit atomically; a rejected later event rolls back the complete batch.
 - Appends compare the expected state and sequence before mutation.
 - Event IDs are idempotent only for exact fact replays; divergent reuse fails closed.
@@ -32,4 +36,4 @@ The database-wide scan currently supports at most 100,000 events and 10,000 Oper
 
 The 256-event aggregate read bound is fail-closed. Pagination and checkpointed projections must replace it before Operations are allowed to exceed that size.
 
-The outbox and claim are not connected to an effect executor. Receipt spooling, effect execution, lease renewal, reconciliation, and CLI integration remain later increments.
+The outbox and receipt ingestion are not connected to effect execution. The executor package only supplies a separate durable receipt spool. Effect execution, lease renewal, reconciliation actions, and CLI integration remain later increments.

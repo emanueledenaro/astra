@@ -66,8 +66,11 @@ describe("durable dispatch outbox and one-shot executor claim", () => {
         expect(yield* ledger.getDispatchSnapshot(dispatchRequestID)).toEqual({
           request: dispatchRequest,
           claim: null,
+          receipt: null,
           createdCursor: 4,
           acceptedCursor: null,
+          receiptCursor: null,
+          recoveryStatus: "pending_outbox",
         })
         expect(yield* ledger.getOperation(operationID)).toMatchObject({
           baselineTrustDigest: dispatchRequest.baselineDigest,

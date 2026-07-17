@@ -13,11 +13,12 @@ import { scanWorkspace } from "../src/workspace-preflight"
 
 const roots: Array<string> = []
 const operationID = "0196e4cb-5d80-7b1d-8fb2-263b81670431"
-const createdAt = "2026-07-17T10:00:00.000Z"
+const recordingStartedMilliseconds = Date.now() - 1_000
+const createdAt = new Date(recordingStartedMilliseconds - 181_000).toISOString()
 const observation = {
-  policyAskedAt: "2026-07-17T10:01:00.000Z",
-  approvalRejectedAt: "2026-07-17T10:03:00.000Z",
-  recordingStartedAt: "2026-07-17T10:03:01.000Z",
+  policyAskedAt: new Date(recordingStartedMilliseconds - 121_000).toISOString(),
+  approvalRejectedAt: new Date(recordingStartedMilliseconds - 1_000).toISOString(),
+  recordingStartedAt: new Date(recordingStartedMilliseconds).toISOString(),
 } as const
 
 afterAll(async () => {

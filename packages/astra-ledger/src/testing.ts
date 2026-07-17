@@ -11,6 +11,15 @@ export function makeOperationLedgerWithFault(point: LedgerFaultPoint) {
   )
 }
 
+export function makeOperationLedgerWithDeferredFault(point: LedgerFaultPoint, skipMatches: number) {
+  let matches = 0
+  return makeOperationLedgerInternal((candidate) => {
+    if (candidate !== point) return Effect.void
+    if (matches++ < skipMatches) return Effect.void
+    return Effect.fail(new LedgerInjectedFault(candidate))
+  }, fixedTestClock)
+}
+
 export function makeOperationLedgerWithClock(clock: () => string) {
   return makeOperationLedgerInternal(() => Effect.void, clock)
 }

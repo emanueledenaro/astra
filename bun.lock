@@ -114,6 +114,20 @@
         "@typescript/native-preview": "catalog:",
       },
     },
+    "packages/astra-executor": {
+      "name": "@astra/executor",
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+        "@opencode-ai/effect-drizzle-sqlite": "workspace:*",
+        "drizzle-orm": "catalog:",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/sql-sqlite-bun": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
     "packages/astra-ledger": {
       "name": "@astra/ledger",
       "dependencies": {
@@ -123,6 +137,7 @@
         "effect": "catalog:",
       },
       "devDependencies": {
+        "@astra/executor": "workspace:*",
         "@effect/sql-sqlite-bun": "catalog:",
         "@types/bun": "catalog:",
         "@typescript/native-preview": "catalog:",
@@ -1275,6 +1290,8 @@
     "@astra/cli": ["@astra/cli@workspace:packages/astra-cli"],
 
     "@astra/domain": ["@astra/domain@workspace:packages/astra-domain"],
+
+    "@astra/executor": ["@astra/executor@workspace:packages/astra-executor"],
 
     "@astra/ledger": ["@astra/ledger@workspace:packages/astra-ledger"],
 

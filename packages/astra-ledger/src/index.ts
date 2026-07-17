@@ -11,6 +11,8 @@ export {
   OperationConcurrencyError,
   OperationEventValidationError,
   OperationTransitionError,
+  ReceiptConflictError,
+  ReceiptIngestionError,
 } from "./error"
 
 export { makeOperationLedger } from "./ledger"
@@ -28,6 +30,8 @@ export type {
   ClaimDispatchResult,
   DispatchSnapshot,
   RecoveryCandidate,
+  IngestReceiptCommand,
+  IngestReceiptResult,
 } from "./ledger"
 
 export type { OperationLedgerError } from "./error"

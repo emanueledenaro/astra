@@ -137,6 +137,32 @@ export class CapabilityConflictError extends Error {
   }
 }
 
+export class ReceiptIngestionError extends Error {
+  readonly _tag = "ReceiptIngestionError"
+
+  constructor(
+    readonly receiptID: string,
+    readonly code:
+      | "dispatch_not_found"
+      | "claim_not_accepted"
+      | "binding_mismatch"
+      | "stale_claim"
+      | "specialized_ingestion_required",
+  ) {
+    super(`Cannot ingest receipt ${receiptID}: ${code}`)
+    this.name = this._tag
+  }
+}
+
+export class ReceiptConflictError extends Error {
+  readonly _tag = "ReceiptConflictError"
+
+  constructor(readonly receiptID: string) {
+    super(`Receipt ${receiptID} conflicts with immutable ledger facts`)
+    this.name = this._tag
+  }
+}
+
 export type LedgerFaultPoint =
   | "after_event_insert"
   | "after_projection_update"
@@ -145,6 +171,8 @@ export type LedgerFaultPoint =
   | "after_claim_insert"
   | "after_claim_event_insert"
   | "after_capability_consumption"
+  | "after_receipt_event_insert"
+  | "after_receipt_insert"
 
 export type OperationLedgerError =
   | LedgerStorageError
@@ -159,6 +187,8 @@ export type OperationLedgerError =
   | LedgerInjectedFault
   | DispatchClaimError
   | CapabilityConflictError
+  | ReceiptIngestionError
+  | ReceiptConflictError
 
 export function mapStorageError(message: string) {
   return (cause: unknown): OperationLedgerError =>
@@ -178,6 +208,8 @@ function isOperationLedgerError(cause: unknown): cause is OperationLedgerError {
     cause instanceof LedgerNotInitializedError ||
     cause instanceof LedgerInjectedFault ||
     cause instanceof DispatchClaimError ||
-    cause instanceof CapabilityConflictError
+    cause instanceof CapabilityConflictError ||
+    cause instanceof ReceiptIngestionError ||
+    cause instanceof ReceiptConflictError
   )
 }

@@ -5,6 +5,7 @@ import {
   parseOperationAuthority,
   parseOperationEffectSpecification,
   parseOperationIntent,
+  parseOperationReceipt,
   parseOperationResources,
   parseOperationReversibility,
   parseOperationRisk,
@@ -15,6 +16,7 @@ import {
   type DispatchRequest,
   type ExecutorClaim,
   type OperationAuthority,
+  type OperationReceipt,
 } from "@astra/domain/operation-contract"
 import type { OperationEvent } from "@astra/domain/operation"
 import { OperationEventValidationError } from "./error"
@@ -28,6 +30,9 @@ export type ParsedLifecyclePayload = Readonly<{
   authority: OperationAuthority | null
   dispatchRequest: DispatchRequest | null
   executorClaim: ExecutorClaim | null
+  receipt: OperationReceipt | null
+  effectClass: string | null
+  resources: ReadonlyArray<string> | null
   baselineTrustDigest: string | null
   baselineAdapterDigest: string | null
 }>
@@ -39,6 +44,9 @@ export function parseLifecyclePayload(name: OperationEvent, payload: NormalizedJ
   if (name === "approval.granted") return parseApprovalGrantedPayload(payload)
   if (name === "dispatch.requested") return parseDispatchRequestedPayload(payload)
   if (name === "executor.accepted") return parseExecutorAcceptedPayload(payload)
+  if (name === "effect.observed" || name === "execution.failed_without_effect" || name === "effect.unknown") {
+    return parseReceiptPayload(name, payload)
+  }
   throw new OperationEventValidationError(
     `Event ${name} is not supported by the first durable ledger increment`,
     "$.name",
@@ -79,6 +87,9 @@ function parseAdmittedPayload(payload: NormalizedJsonObject): ParsedLifecyclePay
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
+    receipt: null,
+    effectClass: effectSpecification.effectClass,
+    resources,
     baselineTrustDigest: baseline.trustDigest,
     baselineAdapterDigest: baseline.adapterDigest,
     payload: {
@@ -103,6 +114,9 @@ function parsePolicyAskPayload(payload: NormalizedJsonObject): ParsedLifecyclePa
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
+    receipt: null,
+    effectClass: null,
+    resources: null,
     baselineTrustDigest: null,
     baselineAdapterDigest: null,
     payload: {
@@ -124,6 +138,9 @@ function parseApprovalRejectedPayload(payload: NormalizedJsonObject): ParsedLife
     authority: null,
     dispatchRequest: null,
     executorClaim: null,
+    receipt: null,
+    effectClass: null,
+    resources: null,
     baselineTrustDigest: null,
     baselineAdapterDigest: null,
     payload: {
@@ -141,6 +158,9 @@ function parseApprovalGrantedPayload(payload: NormalizedJsonObject): ParsedLifec
     authority,
     dispatchRequest: null,
     executorClaim: null,
+    receipt: null,
+    effectClass: null,
+    resources: null,
     baselineTrustDigest: null,
     baselineAdapterDigest: null,
     payload: authority,
@@ -155,6 +175,9 @@ function parseDispatchRequestedPayload(payload: NormalizedJsonObject): ParsedLif
     authority: null,
     dispatchRequest,
     executorClaim: null,
+    receipt: null,
+    effectClass: null,
+    resources: null,
     baselineTrustDigest: null,
     baselineAdapterDigest: null,
     payload: dispatchRequest,
@@ -169,9 +192,42 @@ function parseExecutorAcceptedPayload(payload: NormalizedJsonObject): ParsedLife
     authority: null,
     dispatchRequest: null,
     executorClaim,
+    receipt: null,
+    effectClass: null,
+    resources: null,
     baselineTrustDigest: null,
     baselineAdapterDigest: null,
     payload: executorClaim,
+  }
+}
+
+function parseReceiptPayload(name: OperationEvent, payload: NormalizedJsonObject): ParsedLifecyclePayload {
+  const receipt = requireParsed(parseOperationReceipt(payload), "$.payload")
+  const expectedName =
+    receipt.observation.kind === "effect_observed"
+      ? "effect.observed"
+      : receipt.observation.kind === "no_effect_proved"
+        ? "execution.failed_without_effect"
+        : "effect.unknown"
+  if (name !== expectedName) {
+    throw new OperationEventValidationError(
+      "Receipt observation does not match its lifecycle event",
+      "$.payload.observation.kind",
+      "receipt_outcome_mismatch",
+    )
+  }
+  return {
+    admissionKey: null,
+    decisionID: null,
+    authority: null,
+    dispatchRequest: null,
+    executorClaim: null,
+    receipt,
+    effectClass: null,
+    resources: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
+    payload: receipt,
   }
 }
 

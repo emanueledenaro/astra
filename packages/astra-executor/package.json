@@ -1,6 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "@astra/ledger",
+  "name": "@astra/executor",
   "private": true,
   "type": "module",
   "license": "MIT",
@@ -19,7 +19,6 @@
     "effect": "catalog:"
   },
   "devDependencies": {
-    "@astra/executor": "workspace:*",
     "@effect/sql-sqlite-bun": "catalog:",
     "@types/bun": "catalog:",
     "@typescript/native-preview": "catalog:"

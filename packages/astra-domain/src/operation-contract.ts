@@ -148,6 +148,10 @@ export type OperationReceipt = Readonly<{
   receiptID: ReceiptID
   operationID: OperationID
   attemptID: AttemptID
+  dispatchRequestID: DispatchRequestID
+  executorClaimID: ExecutorClaimID
+  capabilityGrantID: CapabilityGrantID
+  fencingToken: number
   adapter: Readonly<{ identity: string; version: string; digest: ContentDigest }>
   effectClass: string
   resources: ReadonlyArray<string>
@@ -216,6 +220,10 @@ export function parseAttemptID(input: unknown, path = "$"): OperationContractPar
 
 export function parseCapabilityGrantID(input: unknown, path = "$"): OperationContractParseResult<CapabilityGrantID> {
   return parseUUID<CapabilityGrantID>(input, path)
+}
+
+export function parseReceiptID(input: unknown, path = "$"): OperationContractParseResult<ReceiptID> {
+  return parseUUID<ReceiptID>(input, path)
 }
 
 export function parseContentDigest(input: unknown, path = "$"): OperationContractParseResult<ContentDigest> {
@@ -645,6 +653,10 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
       "receiptID",
       "operationID",
       "attemptID",
+      "dispatchRequestID",
+      "executorClaimID",
+      "capabilityGrantID",
+      "fencingToken",
       "adapter",
       "effectClass",
       "resources",
@@ -662,6 +674,14 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
   if (!operationID.ok) return operationID
   const attemptID = parseUUID<AttemptID>(record.value.attemptID, `${path}.attemptID`)
   if (!attemptID.ok) return attemptID
+  const dispatchRequestID = parseDispatchRequestID(record.value.dispatchRequestID, `${path}.dispatchRequestID`)
+  if (!dispatchRequestID.ok) return dispatchRequestID
+  const executorClaimID = parseExecutorClaimID(record.value.executorClaimID, `${path}.executorClaimID`)
+  if (!executorClaimID.ok) return executorClaimID
+  const capabilityGrantID = parseCapabilityGrantID(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
+  if (!capabilityGrantID.ok) return capabilityGrantID
+  const fencingToken = parsePositiveInteger(record.value.fencingToken, `${path}.fencingToken`)
+  if (!fencingToken.ok) return fencingToken
   const adapter = parseAdapter(record.value.adapter, `${path}.adapter`)
   if (!adapter.ok) return adapter
   const effectClass = parseBoundedString(record.value.effectClass, `${path}.effectClass`, 128)
@@ -681,6 +701,10 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
     receiptID: receiptID.value,
     operationID: operationID.value,
     attemptID: attemptID.value,
+    dispatchRequestID: dispatchRequestID.value,
+    executorClaimID: executorClaimID.value,
+    capabilityGrantID: capabilityGrantID.value,
+    fencingToken: fencingToken.value,
     adapter: adapter.value,
     effectClass: effectClass.value,
     resources: resources.value,

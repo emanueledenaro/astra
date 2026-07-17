@@ -6,6 +6,7 @@ import {
   parseExecutorClaim,
   parseOperationEventEnvelope,
   parseOperationID,
+  parseOperationReceipt,
   type ActorRef,
   type AttemptID,
   type DispatchRequest,
@@ -15,6 +16,7 @@ import {
   type OperationEventEnvelope,
   type OperationID,
   type OperationAuthority,
+  type OperationReceipt,
 } from "@astra/domain/operation-contract"
 import {
   operationStates,
@@ -38,6 +40,8 @@ import {
   OperationConcurrencyError,
   OperationEventValidationError,
   OperationTransitionError,
+  ReceiptConflictError,
+  ReceiptIngestionError,
   mapStorageError,
   type LedgerFaultPoint,
   type OperationLedgerError,
@@ -45,7 +49,7 @@ import {
 import { parseLifecyclePayload, type ParsedLifecyclePayload } from "./event-payload"
 
 const eventSchemaVersion = 1
-const storageSchemaVersion = 3
+const storageSchemaVersion = 4
 const maximumReadEvents = 256
 const maximumIntegrityEvents = 100_000
 const maximumIntegrityOperations = 10_000
@@ -120,11 +124,27 @@ export type ClaimDispatchResult = Readonly<{
   operation: OperationRecord
 }>
 
+export type IngestReceiptCommand = Readonly<{
+  receipt: OperationReceipt
+  event: Pick<OperationEventDraft, "eventID" | "schemaVersion" | "correlationID" | "redaction" | "externalBlobDigest">
+}>
+
+export type IngestReceiptResult = Readonly<{
+  kind: "ingested" | "replayed"
+  receipt: OperationReceipt
+  receiptDigest: string
+  event: PersistedOperationEvent
+  operation: OperationRecord
+}>
+
 export type DispatchSnapshot = Readonly<{
   request: DispatchRequest
   claim: ExecutorClaim | null
+  receipt: OperationReceipt | null
   createdCursor: number
   acceptedCursor: number | null
+  receiptCursor: number | null
+  recoveryStatus: "pending_outbox" | "claimed_no_receipt" | "receipt_ingested"
 }>
 
 export type RecoveryCandidate = DispatchSnapshot
@@ -149,6 +169,7 @@ export interface OperationLedger {
     commands: ReadonlyArray<AppendOperationEvent>,
   ): Effect.Effect<ReadonlyArray<AppendOperationEventResult>, OperationLedgerError>
   claimDispatch(command: ClaimDispatchCommand): Effect.Effect<ClaimDispatchResult, OperationLedgerError>
+  ingestReceipt(command: IngestReceiptCommand): Effect.Effect<IngestReceiptResult, OperationLedgerError>
   getDispatchSnapshot(
     dispatchRequestID: DispatchRequestID,
   ): Effect.Effect<DispatchSnapshot | null, OperationLedgerError>
@@ -189,6 +210,7 @@ export function makeOperationLedgerInternal(
       append: (command) => append(db, command, injectFault, clock),
       appendBatch: (commands) => appendBatch(db, commands, injectFault, clock),
       claimDispatch: (command) => claimDispatch(db, command, injectFault, clock),
+      ingestReceipt: (command) => ingestReceipt(db, command, injectFault, clock),
       getDispatchSnapshot: (dispatchRequestID) => getDispatchSnapshot(db, dispatchRequestID),
       listRecoveryCandidates: (options) => listRecoveryCandidates(db, options.limit),
       getOperation: (operationID) => getOperation(db, operationID),
@@ -273,7 +295,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
       sql`SELECT schema_version FROM ledger_meta WHERE singleton = 1 LIMIT 1`,
     )
     if (!rows[0]) return yield* Effect.fail(new LedgerNotInitializedError())
-    if (![1, 2, storageSchemaVersion].includes(rows[0].schema_version)) {
+    if (![1, 2, 3, storageSchemaVersion].includes(rows[0].schema_version)) {
       return yield* Effect.fail(new LedgerCorruptionError("Ledger metadata has an unknown storage schema"))
     }
 
@@ -349,6 +371,28 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
       )
     `)
     yield* db.run(sql`
+      CREATE TABLE IF NOT EXISTS operation_receipt (
+        receipt_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        attempt_id TEXT NOT NULL UNIQUE,
+        dispatch_request_id TEXT NOT NULL UNIQUE,
+        executor_claim_id TEXT NOT NULL UNIQUE,
+        capability_grant_id TEXT NOT NULL UNIQUE,
+        fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+        receipt_json TEXT NOT NULL,
+        receipt_digest TEXT NOT NULL,
+        outcome_event_name TEXT NOT NULL CHECK (
+          outcome_event_name IN ('effect.observed', 'execution.failed_without_effect', 'effect.unknown')
+        ),
+        event_id TEXT NOT NULL UNIQUE,
+        event_cursor INTEGER NOT NULL UNIQUE CHECK (event_cursor > 0),
+        FOREIGN KEY (dispatch_request_id) REFERENCES dispatch_outbox(dispatch_request_id),
+        FOREIGN KEY (executor_claim_id) REFERENCES executor_claim(executor_claim_id),
+        FOREIGN KEY (capability_grant_id) REFERENCES capability_consumption(capability_grant_id),
+        FOREIGN KEY (event_id) REFERENCES operation_event(event_id)
+      )
+    `)
+    yield* db.run(sql`
       UPDATE operation_projection SET
         baseline_trust_digest = COALESCE(baseline_trust_digest, (
           SELECT json_extract(payload_json, '$.baseline.trustDigest') FROM operation_event
@@ -387,6 +431,9 @@ function append(
   if (command.event.name === "executor.accepted") {
     return Effect.fail(new DispatchClaimError("unbound", "specialized_claim_required"))
   }
+  if (isReceiptEvent(command.event.name)) {
+    return Effect.fail(new ReceiptIngestionError("unbound", "specialized_ingestion_required"))
+  }
 
   return db
     .transaction(
@@ -421,6 +468,9 @@ function appendBatch(
     if (validation) return Effect.fail(validation)
     if (command.event.name === "executor.accepted") {
       return Effect.fail(new DispatchClaimError("unbound", "specialized_claim_required"))
+    }
+    if (isReceiptEvent(command.event.name)) {
+      return Effect.fail(new ReceiptIngestionError("unbound", "specialized_ingestion_required"))
     }
   }
 
@@ -696,6 +746,182 @@ function replayDispatchClaim(
   }).pipe(Effect.mapError(mapStorageError("Failed to replay the executor claim")))
 }
 
+function ingestReceipt(
+  db: Database,
+  command: IngestReceiptCommand,
+  injectFault: LedgerFault,
+  clock: LedgerClock,
+): Effect.Effect<IngestReceiptResult, OperationLedgerError> {
+  const parsed = parseOperationReceipt(command.receipt)
+  if (!parsed.ok) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        `Invalid operation receipt at ${parsed.issue.path}`,
+        parsed.issue.path,
+        parsed.issue.reason,
+      ),
+    )
+  }
+  const receipt = parsed.value
+  const receiptDigest = digestEvent({ ...receipt })
+  return db
+    .transaction(
+      (tx) =>
+        Effect.gen(function* () {
+          const meta = yield* requireInitialized(tx)
+          yield* verifyLedgerIntegrity(tx, meta)
+          const existingRows = yield* readReceiptConflictRows(tx, receipt)
+          if (existingRows[0]) {
+            return yield* replayIngestedReceipt(tx, command, receipt, receiptDigest, existingRows[0])
+          }
+
+          const dispatchRows = yield* readDispatchRows(tx, receipt.dispatchRequestID)
+          if (!dispatchRows[0]) {
+            return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "dispatch_not_found"))
+          }
+          const snapshot = yield* decodeDispatchSnapshot(dispatchRows[0])
+          if (!snapshot.claim) {
+            return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "claim_not_accepted"))
+          }
+          const trustedNow = requireTrustedNow(clock)
+          if (!receiptMatchesDispatch(receipt, snapshot)) {
+            return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "binding_mismatch"))
+          }
+          if (
+            Date.parse(receipt.startedAt) < Date.parse(snapshot.claim.acceptedAt) ||
+            Date.parse(receipt.endedAt) > Date.parse(snapshot.claim.claimExpiresAt) ||
+            Date.parse(receipt.endedAt) > Date.parse(trustedNow)
+          ) {
+            return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "stale_claim"))
+          }
+          const consumption = yield* tx.all<CapabilityConsumptionRow>(sql`
+            SELECT * FROM capability_consumption
+            WHERE capability_grant_id = ${receipt.capabilityGrantID}
+              AND operation_id = ${receipt.operationID}
+              AND attempt_id = ${receipt.attemptID}
+              AND dispatch_request_id = ${receipt.dispatchRequestID}
+            LIMIT 1
+          `)
+          if (!consumption[0]) {
+            return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "binding_mismatch"))
+          }
+          const replay = yield* loadAndVerifyOperation(tx, receipt.operationID, maximumReadEvents)
+          if (
+            !replay ||
+            replay.operation.state !== "dispatched" ||
+            replay.operation.attemptID !== receipt.attemptID ||
+            replay.operation.dispatchRequestID !== receipt.dispatchRequestID
+          ) {
+            return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "claim_not_accepted"))
+          }
+          const admission = yield* parseStoredLifecycle(replay.events[0])
+          if (
+            receipt.effectClass !== admission.effectClass ||
+            digestEvent({ resources: receipt.resources }) !== digestEvent({ resources: admission.resources })
+          ) {
+            return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "binding_mismatch"))
+          }
+          const eventName = receiptEventName(receipt)
+          const result = yield* appendWithinTransaction(
+            tx,
+            {
+              expectedState: "dispatched",
+              expectedSequence: replay.operation.sequence,
+              event: {
+                ...command.event,
+                operationID: receipt.operationID,
+                name: eventName,
+                recordedAt: trustedNow,
+                observedAt: trustedNow,
+                actor: {
+                  kind: "system",
+                  subject: snapshot.request.executor,
+                  componentDigest: snapshot.request.adapterDigest,
+                },
+                causationID: dispatchRows[0].accepted_event_id,
+                attemptID: receipt.attemptID,
+                payload: receipt,
+              },
+            },
+            injectFault,
+            trustedNow,
+          )
+          yield* injectFault("after_receipt_event_insert")
+          yield* insertOperationReceipt(tx, receipt, receiptDigest, eventName, result.event)
+          yield* injectFault("after_receipt_insert")
+          return {
+            kind: "ingested" as const,
+            receipt,
+            receiptDigest,
+            event: result.event,
+            operation: result.operation,
+          }
+        }),
+      { behavior: "immediate" },
+    )
+    .pipe(Effect.mapError(mapStorageError("Failed to ingest the executor receipt")))
+}
+
+function replayIngestedReceipt(
+  tx: QueryExecutor,
+  command: IngestReceiptCommand,
+  receipt: OperationReceipt,
+  receiptDigest: string,
+  row: ReceiptRow,
+): Effect.Effect<IngestReceiptResult, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const stored = yield* decodeOperationReceiptJson(row.receipt_json, row.receipt_id)
+    if (
+      row.receipt_id !== receipt.receiptID ||
+      row.receipt_digest !== receiptDigest ||
+      digestEvent({ ...stored }) !== receiptDigest ||
+      row.event_id !== command.event.eventID
+    ) {
+      return yield* Effect.fail(new ReceiptConflictError(receipt.receiptID))
+    }
+    const eventRows = yield* tx.all<EventRow>(sql`
+      SELECT * FROM operation_event WHERE event_id = ${row.event_id} LIMIT 1
+    `)
+    if (!eventRows[0]) return yield* Effect.fail(new LedgerCorruptionError("Receipt has no lifecycle event"))
+    const event = yield* decodeEventRow(eventRows[0])
+    if (
+      event.schemaVersion !== command.event.schemaVersion ||
+      event.correlationID !== command.event.correlationID ||
+      event.redaction !== command.event.redaction ||
+      event.externalBlobDigest !== command.event.externalBlobDigest
+    ) {
+      return yield* Effect.fail(new ReceiptConflictError(receipt.receiptID))
+    }
+    const operation = yield* loadAndVerifyOperation(tx, receipt.operationID, maximumReadEvents)
+    if (!operation) return yield* Effect.fail(new LedgerCorruptionError("Receipt has no operation projection"))
+    return { kind: "replayed" as const, receipt: stored, receiptDigest, event, operation: operation.operation }
+  }).pipe(Effect.mapError(mapStorageError("Failed to replay the ingested receipt")))
+}
+
+function receiptMatchesDispatch(receipt: OperationReceipt, snapshot: DispatchSnapshot) {
+  return (
+    snapshot.claim !== null &&
+    receipt.operationID === snapshot.request.operationID &&
+    receipt.attemptID === snapshot.request.attemptID &&
+    receipt.dispatchRequestID === snapshot.request.dispatchRequestID &&
+    receipt.executorClaimID === snapshot.claim.executorClaimID &&
+    receipt.capabilityGrantID === snapshot.request.capabilityGrantID &&
+    receipt.fencingToken === snapshot.claim.fencingToken &&
+    receipt.adapter.identity === snapshot.request.executor &&
+    receipt.adapter.digest === snapshot.request.adapterDigest
+  )
+}
+
+function receiptEventName(receipt: OperationReceipt): OperationEvent {
+  if (receipt.observation.kind === "effect_observed") return "effect.observed"
+  if (receipt.observation.kind === "no_effect_proved") return "execution.failed_without_effect"
+  return "effect.unknown"
+}
+
+function isReceiptEvent(name: OperationEvent) {
+  return name === "effect.observed" || name === "execution.failed_without_effect" || name === "effect.unknown"
+}
+
 function getDispatchSnapshot(
   db: Database,
   dispatchRequestID: DispatchRequestID,
@@ -732,9 +958,14 @@ function listRecoveryCandidates(
         executor_claim.claim_json,
         executor_claim.claim_digest,
         executor_claim.accepted_event_id,
-        executor_claim.accepted_cursor
+        executor_claim.accepted_cursor,
+        operation_receipt.receipt_id,
+        operation_receipt.receipt_json,
+        operation_receipt.receipt_digest,
+        operation_receipt.event_cursor AS receipt_cursor
       FROM dispatch_outbox
       LEFT JOIN executor_claim USING (dispatch_request_id)
+      LEFT JOIN operation_receipt USING (dispatch_request_id)
       ORDER BY dispatch_outbox.created_cursor ASC
       LIMIT ${limit}
     `)
@@ -861,6 +1092,7 @@ function verifyLedgerIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effect<
     }
     yield* verifyDispatchIntegrity(db, meta)
     yield* verifyCapabilityIntegrity(db)
+    yield* verifyReceiptIntegrity(db)
     return undefined
   }).pipe(Effect.mapError(mapStorageError("Failed to verify ledger integrity")))
 }
@@ -937,9 +1169,14 @@ function verifyDispatchIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effec
         executor_claim.claim_json,
         executor_claim.claim_digest,
         executor_claim.accepted_event_id,
-        executor_claim.accepted_cursor
+        executor_claim.accepted_cursor,
+        operation_receipt.receipt_id,
+        operation_receipt.receipt_json,
+        operation_receipt.receipt_digest,
+        operation_receipt.event_cursor AS receipt_cursor
       FROM dispatch_outbox
       LEFT JOIN executor_claim USING (dispatch_request_id)
+      LEFT JOIN operation_receipt USING (dispatch_request_id)
       ORDER BY dispatch_outbox.created_cursor ASC
       LIMIT ${maximumIntegrityEvents + 1}
     `)
@@ -988,8 +1225,7 @@ function verifyDispatchIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effec
       if (
         !projectionRows[0] ||
         projectionRows[0].dispatch_request_id !== row.dispatch_request_id ||
-        (snapshot.claim === null && projectionRows[0].state !== "dispatch_pending") ||
-        (snapshot.claim !== null && projectionRows[0].state !== "dispatched")
+        projectionRows[0].state !== dispatchSnapshotState(snapshot)
       ) {
         return yield* Effect.fail(new LedgerCorruptionError("A dispatch snapshot does not match its operation"))
       }
@@ -1018,6 +1254,55 @@ function verifyDispatchIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effec
     }
     return undefined
   }).pipe(Effect.mapError(mapStorageError("Failed to verify dispatch integrity")))
+}
+
+function dispatchSnapshotState(snapshot: DispatchSnapshot): OperationState {
+  if (!snapshot.claim) return "dispatch_pending"
+  if (!snapshot.receipt) return "dispatched"
+  if (snapshot.receipt.observation.kind === "effect_observed") return "effect_observed"
+  if (snapshot.receipt.observation.kind === "no_effect_proved") return "failed"
+  return "reconciliation_required"
+}
+
+function verifyReceiptIntegrity(db: QueryExecutor): Effect.Effect<void, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const receipts = yield* db.all<ReceiptRow>(sql`
+      SELECT * FROM operation_receipt ORDER BY event_cursor ASC LIMIT ${maximumIntegrityEvents + 1}
+    `)
+    const events = yield* db.all<EventRow>(sql`
+      SELECT * FROM operation_event
+      WHERE name IN ('effect.observed', 'execution.failed_without_effect', 'effect.unknown')
+      ORDER BY global_cursor ASC LIMIT ${maximumIntegrityEvents + 1}
+    `)
+    if (receipts.length > maximumIntegrityEvents || receipts.length !== events.length) {
+      return yield* Effect.fail(new LedgerCorruptionError("Receipt events and immutable receipts diverge"))
+    }
+    for (const [index, row] of receipts.entries()) {
+      const eventRow = events[index]
+      const receipt = yield* decodeOperationReceiptJson(row.receipt_json, row.receipt_id)
+      if (
+        !eventRow ||
+        row.receipt_id !== receipt.receiptID ||
+        row.operation_id !== receipt.operationID ||
+        row.attempt_id !== receipt.attemptID ||
+        row.dispatch_request_id !== receipt.dispatchRequestID ||
+        row.executor_claim_id !== receipt.executorClaimID ||
+        row.capability_grant_id !== receipt.capabilityGrantID ||
+        row.fencing_token !== receipt.fencingToken ||
+        row.receipt_digest !== digestEvent({ ...receipt }) ||
+        row.outcome_event_name !== receiptEventName(receipt) ||
+        row.event_id !== eventRow.event_id ||
+        row.event_cursor !== eventRow.global_cursor
+      ) {
+        return yield* Effect.fail(new LedgerCorruptionError("An immutable receipt does not match its event"))
+      }
+      const lifecycle = yield* parseStoredLifecycle(yield* decodeEventRow(eventRow))
+      if (!lifecycle.receipt || digestEvent({ ...lifecycle.receipt }) !== row.receipt_digest) {
+        return yield* Effect.fail(new LedgerCorruptionError("A receipt event does not match its immutable receipt"))
+      }
+    }
+    return undefined
+  }).pipe(Effect.mapError(mapStorageError("Failed to verify operation receipt integrity")))
 }
 
 function decodeDispatchRequestJson(
@@ -1078,6 +1363,11 @@ function loadAndVerifyOperation(
     let dispatchExecutor: string | null = null
     let dispatchAdapterDigest: string | null = null
     let dispatchRequestedAt: string | null = null
+    let executorClaimID: ExecutorClaimID | null = null
+    let fencingToken: number | null = null
+    let executorAcceptedAt: string | null = null
+    let effectClass: string | null = null
+    let resources: ReadonlyArray<string> | null = null
     for (const [index, row] of rows.entries()) {
       const event = yield* decodeEventRow(row)
       const lifecycle = yield* parseStoredLifecycle(event)
@@ -1098,6 +1388,8 @@ function loadAndVerifyOperation(
         admission = lifecycle.admissionKey
         baselineTrustDigest = lifecycle.baselineTrustDigest
         baselineAdapterDigest = lifecycle.baselineAdapterDigest
+        effectClass = lifecycle.effectClass
+        resources = lifecycle.resources
       }
       if (event.name === "policy.ask") decision = lifecycle.decisionID
       if (
@@ -1171,6 +1463,41 @@ function loadAndVerifyOperation(
       ) {
         return yield* Effect.fail(
           new LedgerCorruptionError(`Operation ${operationID} executor envelope is inconsistent`),
+        )
+      }
+      if (lifecycle.executorClaim) {
+        executorClaimID = lifecycle.executorClaim.executorClaimID
+        fencingToken = lifecycle.executorClaim.fencingToken
+        executorAcceptedAt = lifecycle.executorClaim.acceptedAt
+      }
+      if (
+        lifecycle.receipt &&
+        (lifecycle.receipt.operationID !== operationID ||
+          lifecycle.receipt.attemptID !== attemptID ||
+          lifecycle.receipt.dispatchRequestID !== dispatchRequestID ||
+          lifecycle.receipt.executorClaimID !== executorClaimID ||
+          lifecycle.receipt.capabilityGrantID !== capabilityGrantID ||
+          lifecycle.receipt.fencingToken !== fencingToken ||
+          lifecycle.receipt.adapter.identity !== dispatchExecutor ||
+          lifecycle.receipt.adapter.digest !== dispatchAdapterDigest ||
+          lifecycle.receipt.effectClass !== effectClass ||
+          digestEvent({ resources: lifecycle.receipt.resources }) !== digestEvent({ resources }))
+      ) {
+        return yield* Effect.fail(new LedgerCorruptionError(`Operation ${operationID} receipt binding is inconsistent`))
+      }
+      if (
+        lifecycle.receipt &&
+        (event.attemptID !== attemptID ||
+          event.observedAt !== event.recordedAt ||
+          event.causationID !== events.at(-1)?.eventID ||
+          event.actor.kind !== "system" ||
+          event.actor.subject !== dispatchExecutor ||
+          event.actor.componentDigest !== dispatchAdapterDigest ||
+          Date.parse(lifecycle.receipt.startedAt) < Date.parse(executorAcceptedAt ?? "") ||
+          Date.parse(lifecycle.receipt.endedAt) > Date.parse(event.observedAt))
+      ) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(`Operation ${operationID} receipt envelope is inconsistent`),
         )
       }
       state = transition.state
@@ -1346,6 +1673,23 @@ function validateLifecycleLink(
       ),
     )
   }
+  if (
+    lifecycle.receipt &&
+    (lifecycle.receipt.operationID !== operation?.operationID ||
+      lifecycle.receipt.attemptID !== operation.attemptID ||
+      lifecycle.receipt.dispatchRequestID !== operation.dispatchRequestID ||
+      lifecycle.receipt.capabilityGrantID !== operation.capabilityGrantID ||
+      lifecycle.receipt.adapter.identity !== operation.dispatchExecutor ||
+      lifecycle.receipt.adapter.digest !== operation.dispatchAdapterDigest)
+  ) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        "Receipt must bind the active dispatch, capability, and adapter",
+        "$.payload",
+        "receipt_binding_mismatch",
+      ),
+    )
+  }
   return Effect.void
 }
 
@@ -1419,6 +1763,24 @@ function validateTrustedLifecycle(
       event.actor.componentDigest !== operation.dispatchAdapterDigest
     ) {
       return invalidLifecycle("Executor actor does not match the authorized adapter", "$.actor", "executor_mismatch")
+    }
+  }
+  if (lifecycle.receipt) {
+    if (event.attemptID !== lifecycle.receipt.attemptID) {
+      return invalidLifecycle("Receipt event must bind its attempt", "$.attemptID", "attempt_mismatch")
+    }
+    if (event.observedAt !== event.recordedAt || Date.parse(lifecycle.receipt.endedAt) > Date.parse(event.observedAt)) {
+      return invalidLifecycle("Receipt time must be ledger observed", "$.observedAt", "timestamp_mismatch")
+    }
+    if (event.causationID !== operation?.lastEventID) {
+      return invalidLifecycle("Receipt must be caused by executor acceptance", "$.causationID", "causation_mismatch")
+    }
+    if (
+      event.actor.kind !== "system" ||
+      event.actor.subject !== operation?.dispatchExecutor ||
+      event.actor.componentDigest !== operation.dispatchAdapterDigest
+    ) {
+      return invalidLifecycle("Receipt actor does not match the authorized adapter", "$.actor", "executor_mismatch")
     }
   }
   return Effect.void
@@ -1574,6 +1936,57 @@ function insertExecutorClaim(
     .pipe(Effect.asVoid, Effect.mapError(mapStorageError("Failed to consume the dispatch outbox")))
 }
 
+function insertOperationReceipt(
+  db: QueryExecutor,
+  receipt: OperationReceipt,
+  receiptDigest: string,
+  outcomeEventName: OperationEvent,
+  event: PersistedOperationEvent,
+): Effect.Effect<void, OperationLedgerError> {
+  return db
+    .run(
+      sql`
+      INSERT INTO operation_receipt (
+        receipt_id, operation_id, attempt_id, dispatch_request_id, executor_claim_id,
+        capability_grant_id, fencing_token, receipt_json, receipt_digest,
+        outcome_event_name, event_id, event_cursor
+      ) VALUES (
+        ${receipt.receiptID}, ${receipt.operationID}, ${receipt.attemptID}, ${receipt.dispatchRequestID},
+        ${receipt.executorClaimID}, ${receipt.capabilityGrantID}, ${receipt.fencingToken},
+        ${JSON.stringify(receipt)}, ${receiptDigest}, ${outcomeEventName}, ${event.eventID}, ${event.globalCursor}
+      )
+    `,
+    )
+    .pipe(Effect.asVoid, Effect.mapError(mapStorageError("Failed to store the immutable operation receipt")))
+}
+
+function readReceiptConflictRows(db: QueryExecutor, receipt: OperationReceipt) {
+  return db.all<ReceiptRow>(sql`
+    SELECT * FROM operation_receipt
+    WHERE receipt_id = ${receipt.receiptID}
+      OR operation_id = ${receipt.operationID}
+      OR attempt_id = ${receipt.attemptID}
+      OR dispatch_request_id = ${receipt.dispatchRequestID}
+      OR executor_claim_id = ${receipt.executorClaimID}
+      OR capability_grant_id = ${receipt.capabilityGrantID}
+    LIMIT 1
+  `)
+}
+
+function decodeOperationReceiptJson(
+  value: string,
+  context: string,
+): Effect.Effect<OperationReceipt, LedgerCorruptionError> {
+  return Effect.try({
+    try: () => {
+      const result = parseOperationReceipt(JSON.parse(value))
+      if (!result.ok) throw new Error(result.issue.reason)
+      return result.value
+    },
+    catch: (cause) => new LedgerCorruptionError(`Operation receipt ${context} is malformed`, cause),
+  })
+}
+
 function readDispatchRows(db: QueryExecutor, dispatchRequestID: DispatchRequestID) {
   return db.all<DispatchJoinRow>(sql`
     SELECT
@@ -1583,9 +1996,14 @@ function readDispatchRows(db: QueryExecutor, dispatchRequestID: DispatchRequestI
       executor_claim.claim_json,
       executor_claim.claim_digest,
       executor_claim.accepted_event_id,
-      executor_claim.accepted_cursor
+      executor_claim.accepted_cursor,
+      operation_receipt.receipt_id,
+      operation_receipt.receipt_json,
+      operation_receipt.receipt_digest,
+      operation_receipt.event_cursor AS receipt_cursor
     FROM dispatch_outbox
     LEFT JOIN executor_claim USING (dispatch_request_id)
+    LEFT JOIN operation_receipt USING (dispatch_request_id)
     WHERE dispatch_outbox.dispatch_request_id = ${dispatchRequestID}
     LIMIT 1
   `)
@@ -1613,11 +2031,23 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
           row.claim_json !== null ||
           row.claim_digest !== null ||
           row.accepted_event_id !== null ||
-          row.accepted_cursor !== null
+          row.accepted_cursor !== null ||
+          row.receipt_id !== null ||
+          row.receipt_json !== null ||
+          row.receipt_digest !== null ||
+          row.receipt_cursor !== null
         ) {
           throw new Error("partial_claim_row")
         }
-        return { request: requestResult.value, claim: null, createdCursor: row.created_cursor, acceptedCursor: null }
+        return {
+          request: requestResult.value,
+          claim: null,
+          receipt: null,
+          createdCursor: row.created_cursor,
+          acceptedCursor: null,
+          receiptCursor: null,
+          recoveryStatus: "pending_outbox" as const,
+        }
       }
       if (
         row.fencing_token === null ||
@@ -1642,11 +2072,46 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
       ) {
         throw new Error("executor_claim_columns_mismatch")
       }
+      if (row.receipt_id === null) {
+        if (row.receipt_json !== null || row.receipt_digest !== null || row.receipt_cursor !== null) {
+          throw new Error("partial_receipt_row")
+        }
+        return {
+          request: requestResult.value,
+          claim: claimResult.value,
+          receipt: null,
+          createdCursor: row.created_cursor,
+          acceptedCursor: row.accepted_cursor,
+          receiptCursor: null,
+          recoveryStatus: "claimed_no_receipt" as const,
+        }
+      }
+      if (row.receipt_json === null || row.receipt_digest === null || row.receipt_cursor === null) {
+        throw new Error("partial_receipt_row")
+      }
+      const receiptResult = parseOperationReceipt(JSON.parse(row.receipt_json))
+      if (!receiptResult.ok || digestEvent({ ...receiptResult.value }) !== row.receipt_digest) {
+        throw new Error("operation_receipt_corrupted")
+      }
+      if (
+        receiptResult.value.receiptID !== row.receipt_id ||
+        receiptResult.value.operationID !== requestResult.value.operationID ||
+        receiptResult.value.attemptID !== requestResult.value.attemptID ||
+        receiptResult.value.dispatchRequestID !== requestResult.value.dispatchRequestID ||
+        receiptResult.value.executorClaimID !== claimResult.value.executorClaimID ||
+        receiptResult.value.capabilityGrantID !== requestResult.value.capabilityGrantID ||
+        receiptResult.value.fencingToken !== claimResult.value.fencingToken
+      ) {
+        throw new Error("operation_receipt_columns_mismatch")
+      }
       return {
         request: requestResult.value,
         claim: claimResult.value,
+        receipt: receiptResult.value,
         createdCursor: row.created_cursor,
         acceptedCursor: row.accepted_cursor,
+        receiptCursor: row.receipt_cursor,
+        recoveryStatus: "receipt_ingested" as const,
       }
     },
     catch: (cause) => new LedgerCorruptionError(`Dispatch ${row.dispatch_request_id} is malformed or corrupted`, cause),
@@ -1876,6 +2341,21 @@ type ClaimRow = Readonly<{
   accepted_cursor: number
 }>
 
+type ReceiptRow = Readonly<{
+  receipt_id: string
+  operation_id: string
+  attempt_id: string
+  dispatch_request_id: string
+  executor_claim_id: string
+  capability_grant_id: string
+  fencing_token: number
+  receipt_json: string
+  receipt_digest: string
+  outcome_event_name: string
+  event_id: string
+  event_cursor: number
+}>
+
 type DispatchJoinRow = OutboxRow &
   Readonly<{
     executor_claim_id: string | null
@@ -1884,6 +2364,10 @@ type DispatchJoinRow = OutboxRow &
     claim_digest: string | null
     accepted_event_id: string | null
     accepted_cursor: number | null
+    receipt_id: string | null
+    receipt_json: string | null
+    receipt_digest: string | null
+    receipt_cursor: number | null
   }>
 
 type CapabilityReservationRow = Readonly<{
