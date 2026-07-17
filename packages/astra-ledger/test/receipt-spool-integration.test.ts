@@ -4,6 +4,7 @@ import { join } from "node:path"
 import { expect, test } from "bun:test"
 import { parseOperationReceipt, type OperationReceipt } from "@astra/domain/operation-contract"
 import { makeReceiptSpool } from "@astra/executor"
+import { createCoordinatorReceiptSpoolFactory } from "../../astra-executor/src/spool"
 import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
 import type { SqlClient as SqlClientService } from "effect/unstable/sql/SqlClient"
@@ -19,10 +20,12 @@ import {
   eventIDs,
   executorClaimID,
   operationID,
+  receiptVerificationContext,
 } from "./ledger.fixture"
 
 const withDatabase = <A, E>(filename: string, effect: Effect.Effect<A, E, SqlClientService>) =>
   Effect.runPromise(effect.pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped))
+const makeCoordinatorReceiptSpool = createCoordinatorReceiptSpoolFactory()
 
 const receipt = requireReceipt({
   receiptID: "0196e4cb-5d80-7b1d-8fb2-263b81670436",
@@ -42,6 +45,7 @@ const receipt = requireReceipt({
     beforeDigest: null,
     afterDigest: `sha256:${"8".repeat(64)}`,
   },
+  verificationContext: receiptVerificationContext,
   output: { digest: `sha256:${"7".repeat(64)}`, bytes: 5, preview: "wrote marker.txt" },
 })
 
@@ -127,9 +131,9 @@ test("recovers an unacknowledged spool receipt through exact ledger replay", asy
     await withDatabase(
       spoolFilename,
       Effect.gen(function* () {
-        const spool = yield* makeReceiptSpool()
+        const spool = yield* makeCoordinatorReceiptSpool()
         yield* spool.initialize()
-        yield* spool.markIngested({
+        yield* spool.acknowledgeIngestedReceipt({
           receiptID: receipt.receiptID,
           ledgerEventID: replayed.event.eventID,
           ledgerEventDigest: replayed.event.digest,

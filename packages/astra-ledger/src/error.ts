@@ -163,6 +163,60 @@ export class ReceiptConflictError extends Error {
   }
 }
 
+export class ClaimUncertaintyError extends Error {
+  readonly _tag = "ClaimUncertaintyError"
+
+  constructor(
+    readonly uncertaintyID: string,
+    readonly code:
+      | "dispatch_not_found"
+      | "claim_not_accepted"
+      | "receipt_already_ingested"
+      | "binding_mismatch"
+      | "claim_still_active"
+      | "specialized_recording_required",
+  ) {
+    super(`Cannot record claim uncertainty ${uncertaintyID}: ${code}`)
+    this.name = this._tag
+  }
+}
+
+export class ClaimUncertaintyConflictError extends Error {
+  readonly _tag = "ClaimUncertaintyConflictError"
+
+  constructor(readonly uncertaintyID: string) {
+    super(`Claim uncertainty ${uncertaintyID} conflicts with immutable ledger facts`)
+    this.name = this._tag
+  }
+}
+
+export class EvidenceIngestionError extends Error {
+  readonly _tag = "EvidenceIngestionError"
+
+  constructor(
+    readonly evidenceID: string,
+    readonly code:
+      | "receipt_not_found"
+      | "effect_not_observed"
+      | "binding_mismatch"
+      | "criteria_mismatch"
+      | "future_observation"
+      | "specialized_ingestion_required",
+  ) {
+    super(`Cannot ingest verification evidence ${evidenceID}: ${code}`)
+    this.name = this._tag
+  }
+}
+
+export class EvidenceConflictError extends Error {
+  readonly _tag = "EvidenceConflictError"
+
+  constructor(readonly evidenceID: string) {
+    super(`Verification evidence ${evidenceID} conflicts with immutable ledger facts`)
+    this.name = this._tag
+  }
+}
+
 export type LedgerFaultPoint =
   | "after_event_insert"
   | "after_projection_update"
@@ -173,6 +227,11 @@ export type LedgerFaultPoint =
   | "after_capability_consumption"
   | "after_receipt_event_insert"
   | "after_receipt_insert"
+  | "after_uncertainty_event_insert"
+  | "after_uncertainty_insert"
+  | "after_verification_started_insert"
+  | "after_verification_terminal_insert"
+  | "after_evidence_insert"
 
 export type OperationLedgerError =
   | LedgerStorageError
@@ -189,6 +248,10 @@ export type OperationLedgerError =
   | CapabilityConflictError
   | ReceiptIngestionError
   | ReceiptConflictError
+  | ClaimUncertaintyError
+  | ClaimUncertaintyConflictError
+  | EvidenceIngestionError
+  | EvidenceConflictError
 
 export function mapStorageError(message: string) {
   return (cause: unknown): OperationLedgerError =>
@@ -210,6 +273,10 @@ function isOperationLedgerError(cause: unknown): cause is OperationLedgerError {
     cause instanceof DispatchClaimError ||
     cause instanceof CapabilityConflictError ||
     cause instanceof ReceiptIngestionError ||
-    cause instanceof ReceiptConflictError
+    cause instanceof ReceiptConflictError ||
+    cause instanceof ClaimUncertaintyError ||
+    cause instanceof ClaimUncertaintyConflictError ||
+    cause instanceof EvidenceIngestionError ||
+    cause instanceof EvidenceConflictError
   )
 }

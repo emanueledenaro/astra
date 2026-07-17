@@ -57,14 +57,17 @@ export interface ReceiptSpool {
   put(receipt: OperationReceipt): Effect.Effect<PutReceiptResult, ReceiptSpoolError>
   get(receiptID: ReceiptID): Effect.Effect<SpoolEntry | null, ReceiptSpoolError>
   listPending(options: Readonly<{ limit: number }>): Effect.Effect<ReadonlyArray<SpoolEntry>, ReceiptSpoolError>
-  markIngested(
+  readDurability(): Effect.Effect<ReceiptSpoolDurability, ReceiptSpoolError>
+}
+
+export interface CoordinatorReceiptSpool extends ReceiptSpool {
+  acknowledgeIngestedReceipt(
     input: Readonly<{
       receiptID: ReceiptID
       ledgerEventID: string
       ledgerEventDigest: string
     }>,
   ): Effect.Effect<MarkIngestedResult, ReceiptSpoolError>
-  readDurability(): Effect.Effect<ReceiptSpoolDurability, ReceiptSpoolError>
 }
 
 type SpoolFault = (point: ReceiptSpoolFaultPoint) => Effect.Effect<void, ReceiptSpoolInjectedFault>
@@ -75,16 +78,19 @@ export function makeReceiptSpool(): Effect.Effect<
   never,
   import("effect/unstable/sql/SqlClient").SqlClient
 > {
-  return makeReceiptSpoolInternal(
-    () => Effect.void,
-    () => new Date().toISOString(),
+  return Effect.map(
+    makeReceiptSpoolInternal(
+      () => Effect.void,
+      () => new Date().toISOString(),
+    ),
+    publicReceiptSpool,
   )
 }
 
 export function makeReceiptSpoolInternal(
   injectFault: SpoolFault,
   clock: ReceiptSpoolClock = () => new Date().toISOString(),
-): Effect.Effect<ReceiptSpool, never, import("effect/unstable/sql/SqlClient").SqlClient> {
+): Effect.Effect<CoordinatorReceiptSpool, never, import("effect/unstable/sql/SqlClient").SqlClient> {
   return Effect.gen(function* () {
     const db = yield* makeDatabase
     return {
@@ -92,10 +98,33 @@ export function makeReceiptSpoolInternal(
       put: (receipt) => put(db, receipt, injectFault, clock),
       get: (receiptID) => get(db, receiptID),
       listPending: (options) => listPending(db, options.limit),
-      markIngested: (input) => markIngested(db, input, injectFault, clock),
+      acknowledgeIngestedReceipt: (input) => markIngested(db, input, injectFault, clock),
       readDurability: () => readDurability(db),
     }
   })
+}
+
+const coordinatorAuthority = Symbol("astra.executor.coordinator")
+
+export function createCoordinatorReceiptSpoolFactory() {
+  const authority = coordinatorAuthority
+  return (): Effect.Effect<CoordinatorReceiptSpool, never, import("effect/unstable/sql/SqlClient").SqlClient> => {
+    if (authority !== coordinatorAuthority) throw new TypeError("Receipt acknowledgement authority is invalid")
+    return makeReceiptSpoolInternal(
+      () => Effect.void,
+      () => new Date().toISOString(),
+    )
+  }
+}
+
+function publicReceiptSpool(spool: CoordinatorReceiptSpool): ReceiptSpool {
+  return {
+    initialize: () => spool.initialize(),
+    put: (receipt) => spool.put(receipt),
+    get: (receiptID) => spool.get(receiptID),
+    listPending: (options) => spool.listPending(options),
+    readDurability: () => spool.readDurability(),
+  }
 }
 
 function initialize(db: Database): Effect.Effect<void, ReceiptSpoolError> {

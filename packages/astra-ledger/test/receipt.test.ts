@@ -23,6 +23,7 @@ import {
   eventIDs,
   executorClaimID,
   operationID,
+  receiptVerificationContext,
 } from "./ledger.fixture"
 
 const withDatabase = <A, E>(filename: string, effect: Effect.Effect<A, E, SqlClientService>) =>
@@ -313,6 +314,7 @@ function makeReceipt(observation: OperationReceipt["observation"]): OperationRec
     startedAt: "2026-07-17T10:00:04.000Z",
     endedAt: "2026-07-17T10:00:04.000Z",
     observation,
+    verificationContext: receiptVerificationContext,
     output: { digest: `sha256:${"7".repeat(64)}`, bytes: 5, preview: "wrote marker.txt" },
   })
 }

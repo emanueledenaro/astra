@@ -11,7 +11,6 @@ export { makeReceiptSpool } from "./spool"
 
 export type { ReceiptSpoolError, ReceiptSpoolFaultPoint } from "./error"
 export type {
-  MarkIngestedResult,
   PutReceiptResult,
   ReceiptAcknowledgement,
   ReceiptSpool,

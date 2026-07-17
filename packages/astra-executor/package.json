@@ -5,8 +5,7 @@
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts",
-    "./testing": "./src/testing.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "test": "bun test",

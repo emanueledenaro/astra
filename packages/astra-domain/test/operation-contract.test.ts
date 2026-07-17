@@ -279,6 +279,14 @@ describe("Operation contract decoding", () => {
       startedAt: "2026-07-17T10:00:00.000Z",
       endedAt: "2026-07-17T10:00:00.010Z",
       observation: { kind: "effect_observed", beforeDigest: null, afterDigest: nextDigest },
+      verificationContext: {
+        admittedBaselineDigest: digest,
+        postEffectWorkspaceDigest: nextDigest,
+        workspaceIdentity: { device: "1", inode: "2" },
+        targetIdentity: { device: "1", inode: "3" },
+        preflightLimits: { maxEntries: 128, maxFileBytes: 65536, maxTotalBytes: 262144, maxDurationMs: 1000 },
+        activationGuard: "allowed",
+      },
       output: { digest, bytes: 0, preview: "" },
     }
 

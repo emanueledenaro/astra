@@ -3,20 +3,27 @@ import {
   parseDispatchRequest,
   parseExecutorClaim,
   parseOperationAuthority,
+  parseOperationEffectUncertainty,
   parseOperationEffectSpecification,
+  parseOperationEvidence,
   parseOperationIntent,
   parseOperationReceipt,
   parseOperationResources,
   parseOperationReversibility,
   parseOperationRisk,
   parseOperationVerificationPlan,
+  parseOperationVerificationStart,
   parseRetryBudget,
   parseWorkspaceBaseline,
   type OperationEventEnvelope,
   type DispatchRequest,
   type ExecutorClaim,
   type OperationAuthority,
+  type OperationEffectUncertainty,
+  type OperationEvidence,
   type OperationReceipt,
+  type OperationVerificationPlan,
+  type OperationVerificationStart,
 } from "@astra/domain/operation-contract"
 import type { OperationEvent } from "@astra/domain/operation"
 import { OperationEventValidationError } from "./error"
@@ -31,6 +38,10 @@ export type ParsedLifecyclePayload = Readonly<{
   dispatchRequest: DispatchRequest | null
   executorClaim: ExecutorClaim | null
   receipt: OperationReceipt | null
+  uncertainty: OperationEffectUncertainty | null
+  verificationStart: OperationVerificationStart | null
+  evidence: OperationEvidence | null
+  verificationPlan: OperationVerificationPlan | null
   effectClass: string | null
   resources: ReadonlyArray<string> | null
   baselineTrustDigest: string | null
@@ -44,8 +55,13 @@ export function parseLifecyclePayload(name: OperationEvent, payload: NormalizedJ
   if (name === "approval.granted") return parseApprovalGrantedPayload(payload)
   if (name === "dispatch.requested") return parseDispatchRequestedPayload(payload)
   if (name === "executor.accepted") return parseExecutorAcceptedPayload(payload)
+  if (name === "effect.unknown" && "uncertaintyID" in payload) return parseUncertaintyPayload(payload)
   if (name === "effect.observed" || name === "execution.failed_without_effect" || name === "effect.unknown") {
     return parseReceiptPayload(name, payload)
+  }
+  if (name === "verification.started") return parseVerificationStartedPayload(payload)
+  if (name === "verification.passed" || name === "verification.failed" || name === "verification.unknown") {
+    return parseVerificationEvidencePayload(name, payload)
   }
   throw new OperationEventValidationError(
     `Event ${name} is not supported by the first durable ledger increment`,
@@ -88,6 +104,10 @@ function parseAdmittedPayload(payload: NormalizedJsonObject): ParsedLifecyclePay
     dispatchRequest: null,
     executorClaim: null,
     receipt: null,
+    uncertainty: null,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan,
     effectClass: effectSpecification.effectClass,
     resources,
     baselineTrustDigest: baseline.trustDigest,
@@ -115,6 +135,10 @@ function parsePolicyAskPayload(payload: NormalizedJsonObject): ParsedLifecyclePa
     dispatchRequest: null,
     executorClaim: null,
     receipt: null,
+    uncertainty: null,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan: null,
     effectClass: null,
     resources: null,
     baselineTrustDigest: null,
@@ -139,6 +163,10 @@ function parseApprovalRejectedPayload(payload: NormalizedJsonObject): ParsedLife
     dispatchRequest: null,
     executorClaim: null,
     receipt: null,
+    uncertainty: null,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan: null,
     effectClass: null,
     resources: null,
     baselineTrustDigest: null,
@@ -159,6 +187,10 @@ function parseApprovalGrantedPayload(payload: NormalizedJsonObject): ParsedLifec
     dispatchRequest: null,
     executorClaim: null,
     receipt: null,
+    uncertainty: null,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan: null,
     effectClass: null,
     resources: null,
     baselineTrustDigest: null,
@@ -176,6 +208,10 @@ function parseDispatchRequestedPayload(payload: NormalizedJsonObject): ParsedLif
     dispatchRequest,
     executorClaim: null,
     receipt: null,
+    uncertainty: null,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan: null,
     effectClass: null,
     resources: null,
     baselineTrustDigest: null,
@@ -193,6 +229,10 @@ function parseExecutorAcceptedPayload(payload: NormalizedJsonObject): ParsedLife
     dispatchRequest: null,
     executorClaim,
     receipt: null,
+    uncertainty: null,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan: null,
     effectClass: null,
     resources: null,
     baselineTrustDigest: null,
@@ -223,11 +263,93 @@ function parseReceiptPayload(name: OperationEvent, payload: NormalizedJsonObject
     dispatchRequest: null,
     executorClaim: null,
     receipt,
+    uncertainty: null,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan: null,
     effectClass: null,
     resources: null,
     baselineTrustDigest: null,
     baselineAdapterDigest: null,
     payload: receipt,
+  }
+}
+
+function parseUncertaintyPayload(payload: NormalizedJsonObject): ParsedLifecyclePayload {
+  const uncertainty = requireParsed(parseOperationEffectUncertainty(payload), "$.payload")
+  return {
+    admissionKey: null,
+    decisionID: null,
+    authority: null,
+    dispatchRequest: null,
+    executorClaim: null,
+    receipt: null,
+    uncertainty,
+    verificationStart: null,
+    evidence: null,
+    verificationPlan: null,
+    effectClass: null,
+    resources: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
+    payload: uncertainty,
+  }
+}
+
+function parseVerificationStartedPayload(payload: NormalizedJsonObject): ParsedLifecyclePayload {
+  const verificationStart = requireParsed(parseOperationVerificationStart(payload), "$.payload")
+  return {
+    admissionKey: null,
+    decisionID: null,
+    authority: null,
+    dispatchRequest: null,
+    executorClaim: null,
+    receipt: null,
+    uncertainty: null,
+    verificationStart,
+    evidence: null,
+    verificationPlan: null,
+    effectClass: null,
+    resources: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
+    payload: verificationStart,
+  }
+}
+
+function parseVerificationEvidencePayload(
+  name: "verification.passed" | "verification.failed" | "verification.unknown",
+  payload: NormalizedJsonObject,
+): ParsedLifecyclePayload {
+  const evidence = requireParsed(parseOperationEvidence(payload), "$.payload")
+  const expectedName = evidence.criteria.every((criterion) => criterion.result === "passed")
+    ? "verification.passed"
+    : evidence.criteria.some((criterion) => criterion.result === "failed")
+      ? "verification.failed"
+      : "verification.unknown"
+  if (name !== expectedName) {
+    throw new OperationEventValidationError(
+      "Verification evidence does not match its lifecycle event",
+      "$.payload.criteria",
+      "verification_outcome_mismatch",
+    )
+  }
+  return {
+    admissionKey: null,
+    decisionID: null,
+    authority: null,
+    dispatchRequest: null,
+    executorClaim: null,
+    receipt: null,
+    uncertainty: null,
+    verificationStart: null,
+    evidence,
+    verificationPlan: null,
+    effectClass: null,
+    resources: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
+    payload: evidence,
   }
 }
 

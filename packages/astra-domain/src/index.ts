@@ -53,15 +53,18 @@ export type {
   OperationEventID,
   OperationEventName,
   OperationEvidence,
+  OperationEffectUncertainty,
   OperationID,
   OperationIntent,
   OperationReceipt,
+  OperationVerificationStart,
   OperationReversibility,
   OperationRisk,
   OperationVerificationPlan,
   ReceiptID,
   RetryBudget,
   VerificationPlanID,
+  UncertaintyID,
   WorkspaceBaseline,
 } from "./operation-contract"
 

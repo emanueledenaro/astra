@@ -4,9 +4,12 @@ import {
   parseDispatchRequest,
   parseDispatchRequestID,
   parseExecutorClaim,
+  parseOperationEffectUncertainty,
+  parseOperationEvidence,
   parseOperationEventEnvelope,
   parseOperationID,
   parseOperationReceipt,
+  parseWorkspaceBaseline,
   type ActorRef,
   type AttemptID,
   type DispatchRequest,
@@ -14,9 +17,13 @@ import {
   type ExecutorClaim,
   type ExecutorClaimID,
   type OperationEventEnvelope,
+  type OperationEffectUncertainty,
+  type OperationEvidence,
   type OperationID,
   type OperationAuthority,
   type OperationReceipt,
+  type OperationVerificationPlan,
+  type OperationVerificationStart,
 } from "@astra/domain/operation-contract"
 import {
   operationStates,
@@ -31,8 +38,12 @@ import { digestEvent } from "./digest"
 import {
   AdmissionConflictError,
   CapabilityConflictError,
+  ClaimUncertaintyConflictError,
+  ClaimUncertaintyError,
   DispatchClaimError,
   EventConflictError,
+  EvidenceConflictError,
+  EvidenceIngestionError,
   LedgerCorruptionError,
   LedgerInjectedFault,
   LedgerNotInitializedError,
@@ -49,7 +60,7 @@ import {
 import { parseLifecyclePayload, type ParsedLifecyclePayload } from "./event-payload"
 
 const eventSchemaVersion = 1
-const storageSchemaVersion = 4
+const storageSchemaVersion = 5
 const maximumReadEvents = 256
 const maximumIntegrityEvents = 100_000
 const maximumIntegrityOperations = 10_000
@@ -137,14 +148,57 @@ export type IngestReceiptResult = Readonly<{
   operation: OperationRecord
 }>
 
+export type RecordClaimUncertaintyCommand = Readonly<{
+  uncertainty: OperationEffectUncertainty
+  event: Pick<
+    OperationEventDraft,
+    "eventID" | "schemaVersion" | "correlationID" | "redaction" | "externalBlobDigest" | "actor"
+  >
+}>
+
+export type RecordClaimUncertaintyResult = Readonly<{
+  kind: "recorded" | "replayed"
+  uncertainty: OperationEffectUncertainty
+  uncertaintyDigest: string
+  event: PersistedOperationEvent
+  operation: OperationRecord
+}>
+
+export type IngestEvidenceCommand = Readonly<{
+  evidence: OperationEvidence
+  startedEvent: Pick<
+    OperationEventDraft,
+    "eventID" | "schemaVersion" | "correlationID" | "redaction" | "externalBlobDigest"
+  >
+  terminalEvent: Pick<
+    OperationEventDraft,
+    "eventID" | "schemaVersion" | "correlationID" | "redaction" | "externalBlobDigest"
+  >
+}>
+
+export type VerificationRecord = Readonly<{
+  evidence: OperationEvidence
+  evidenceDigest: string
+  startedEvent: PersistedOperationEvent
+  terminalEvent: PersistedOperationEvent
+}>
+
+export type IngestEvidenceResult = VerificationRecord &
+  Readonly<{
+    kind: "ingested" | "replayed"
+    operation: OperationRecord
+  }>
+
 export type DispatchSnapshot = Readonly<{
   request: DispatchRequest
   claim: ExecutorClaim | null
   receipt: OperationReceipt | null
+  uncertainty: OperationEffectUncertainty | null
   createdCursor: number
   acceptedCursor: number | null
   receiptCursor: number | null
-  recoveryStatus: "pending_outbox" | "claimed_no_receipt" | "receipt_ingested"
+  uncertaintyCursor: number | null
+  recoveryStatus: "pending_outbox" | "claimed_no_receipt" | "receipt_ingested" | "claim_uncertain"
 }>
 
 export type RecoveryCandidate = DispatchSnapshot
@@ -170,6 +224,10 @@ export interface OperationLedger {
   ): Effect.Effect<ReadonlyArray<AppendOperationEventResult>, OperationLedgerError>
   claimDispatch(command: ClaimDispatchCommand): Effect.Effect<ClaimDispatchResult, OperationLedgerError>
   ingestReceipt(command: IngestReceiptCommand): Effect.Effect<IngestReceiptResult, OperationLedgerError>
+  recordClaimUncertainty(
+    command: RecordClaimUncertaintyCommand,
+  ): Effect.Effect<RecordClaimUncertaintyResult, OperationLedgerError>
+  getVerification(operationID: OperationID): Effect.Effect<VerificationRecord | null, OperationLedgerError>
   getDispatchSnapshot(
     dispatchRequestID: DispatchRequestID,
   ): Effect.Effect<DispatchSnapshot | null, OperationLedgerError>
@@ -183,6 +241,42 @@ export interface OperationLedger {
   ): Effect.Effect<ReadonlyArray<PersistedOperationEvent>, OperationLedgerError>
   readGlobalCursor(): Effect.Effect<number, OperationLedgerError>
   readDurability(): Effect.Effect<LedgerDurability, OperationLedgerError>
+}
+
+export interface VerificationOperationLedger extends OperationLedger {
+  ingestEvidence(command: IngestEvidenceCommand): Effect.Effect<IngestEvidenceResult, OperationLedgerError>
+}
+
+export type ValidateEffectAuthorityCommand = Readonly<{
+  operationID: OperationID
+  dispatchRequestID: DispatchRequestID
+  attemptID: AttemptID
+  capabilityGrantID: string
+  executorClaimID: ExecutorClaimID
+  fencingToken: number
+  executor: string
+  adapterDigest: string
+  baselineDigest: string
+  minimumRemainingLeaseMilliseconds: number
+}>
+
+export type EffectAuthorityValidation =
+  | Readonly<{
+      allowed: true
+      trustedAt: string
+      claimExpiresAt: string
+      authorizationExpiresAt: string
+    }>
+  | Readonly<{
+      allowed: false
+      trustedAt: string
+      reason: "binding_mismatch" | "inactive_operation" | "lease_too_short" | "missing_dispatch"
+    }>
+
+export interface CoordinatorOperationLedger extends OperationLedger {
+  validateEffectAuthority(
+    command: ValidateEffectAuthorityCommand,
+  ): Effect.Effect<EffectAuthorityValidation, OperationLedgerError>
 }
 
 type LedgerFault = (point: LedgerFaultPoint) => Effect.Effect<void, LedgerInjectedFault>
@@ -205,20 +299,75 @@ export function makeOperationLedgerInternal(
 ): Effect.Effect<OperationLedger, never, import("effect/unstable/sql/SqlClient").SqlClient> {
   return Effect.gen(function* () {
     const db = yield* makeDatabase
+    return publicLedger(db, injectFault, clock)
+  })
+}
+
+const verifierAuthority = Symbol("astra.ledger.verifier")
+const coordinatorAuthority = Symbol("astra.ledger.coordinator")
+
+export function createVerificationLedgerFactory() {
+  const authority = verifierAuthority
+  return (
+    injectFault: LedgerFault = () => Effect.void,
+    clock: LedgerClock = () => new Date().toISOString(),
+  ): Effect.Effect<VerificationOperationLedger, never, import("effect/unstable/sql/SqlClient").SqlClient> =>
+    makeVerificationLedger(authority, injectFault, clock)
+}
+
+export function createCoordinatorLedgerFactory() {
+  const authority = coordinatorAuthority
+  return (
+    clock: LedgerClock = () => new Date().toISOString(),
+  ): Effect.Effect<CoordinatorOperationLedger, never, import("effect/unstable/sql/SqlClient").SqlClient> =>
+    makeCoordinatorLedger(authority, clock)
+}
+
+function makeVerificationLedger(
+  authority: symbol,
+  injectFault: LedgerFault,
+  clock: LedgerClock,
+): Effect.Effect<VerificationOperationLedger, never, import("effect/unstable/sql/SqlClient").SqlClient> {
+  if (authority !== verifierAuthority) throw new TypeError("Verification ledger authority is invalid")
+  return Effect.gen(function* () {
+    const db = yield* makeDatabase
     return {
-      initialize: () => initialize(db),
-      append: (command) => append(db, command, injectFault, clock),
-      appendBatch: (commands) => appendBatch(db, commands, injectFault, clock),
-      claimDispatch: (command) => claimDispatch(db, command, injectFault, clock),
-      ingestReceipt: (command) => ingestReceipt(db, command, injectFault, clock),
-      getDispatchSnapshot: (dispatchRequestID) => getDispatchSnapshot(db, dispatchRequestID),
-      listRecoveryCandidates: (options) => listRecoveryCandidates(db, options.limit),
-      getOperation: (operationID) => getOperation(db, operationID),
-      readEvents: (operationID, options) => readEvents(db, operationID, options.limit),
-      readGlobalCursor: () => readGlobalCursor(db),
-      readDurability: () => readDurability(db),
+      ...publicLedger(db, injectFault, clock),
+      ingestEvidence: (command) => ingestEvidence(db, command, injectFault, clock),
     }
   })
+}
+
+function makeCoordinatorLedger(
+  authority: symbol,
+  clock: LedgerClock,
+): Effect.Effect<CoordinatorOperationLedger, never, import("effect/unstable/sql/SqlClient").SqlClient> {
+  if (authority !== coordinatorAuthority) throw new TypeError("Coordinator ledger authority is invalid")
+  return Effect.gen(function* () {
+    const db = yield* makeDatabase
+    return {
+      ...publicLedger(db, () => Effect.void, clock),
+      validateEffectAuthority: (command) => validateEffectAuthority(db, command, clock),
+    }
+  })
+}
+
+function publicLedger(db: Database, injectFault: LedgerFault, clock: LedgerClock): OperationLedger {
+  return {
+    initialize: () => initialize(db),
+    append: (command) => append(db, command, injectFault, clock),
+    appendBatch: (commands) => appendBatch(db, commands, injectFault, clock),
+    claimDispatch: (command) => claimDispatch(db, command, injectFault, clock),
+    ingestReceipt: (command) => ingestReceipt(db, command, injectFault, clock),
+    recordClaimUncertainty: (command) => recordClaimUncertainty(db, command, injectFault, clock),
+    getVerification: (operationID) => getVerification(db, operationID),
+    getDispatchSnapshot: (dispatchRequestID) => getDispatchSnapshot(db, dispatchRequestID),
+    listRecoveryCandidates: (options) => listRecoveryCandidates(db, options.limit),
+    getOperation: (operationID) => getOperation(db, operationID),
+    readEvents: (operationID, options) => readEvents(db, operationID, options.limit),
+    readGlobalCursor: () => readGlobalCursor(db),
+    readDurability: () => readDurability(db),
+  }
 }
 
 function initialize(db: Database): Effect.Effect<void, OperationLedgerError> {
@@ -295,7 +444,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
       sql`SELECT schema_version FROM ledger_meta WHERE singleton = 1 LIMIT 1`,
     )
     if (!rows[0]) return yield* Effect.fail(new LedgerNotInitializedError())
-    if (![1, 2, 3, storageSchemaVersion].includes(rows[0].schema_version)) {
+    if (![1, 2, 3, 4, storageSchemaVersion].includes(rows[0].schema_version)) {
       return yield* Effect.fail(new LedgerCorruptionError("Ledger metadata has an unknown storage schema"))
     }
 
@@ -393,6 +542,42 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
       )
     `)
     yield* db.run(sql`
+      CREATE TABLE IF NOT EXISTS claim_uncertainty (
+        uncertainty_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        attempt_id TEXT NOT NULL UNIQUE,
+        dispatch_request_id TEXT NOT NULL UNIQUE,
+        executor_claim_id TEXT NOT NULL UNIQUE,
+        uncertainty_json TEXT NOT NULL,
+        uncertainty_digest TEXT NOT NULL,
+        event_id TEXT NOT NULL UNIQUE,
+        event_cursor INTEGER NOT NULL UNIQUE CHECK (event_cursor > 0),
+        FOREIGN KEY (dispatch_request_id) REFERENCES dispatch_outbox(dispatch_request_id),
+        FOREIGN KEY (executor_claim_id) REFERENCES executor_claim(executor_claim_id),
+        FOREIGN KEY (event_id) REFERENCES operation_event(event_id)
+      )
+    `)
+    yield* db.run(sql`
+      CREATE TABLE IF NOT EXISTS operation_evidence (
+        evidence_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        receipt_id TEXT NOT NULL UNIQUE,
+        verification_plan_id TEXT NOT NULL UNIQUE,
+        evidence_json TEXT NOT NULL,
+        evidence_digest TEXT NOT NULL,
+        started_event_id TEXT NOT NULL UNIQUE,
+        started_cursor INTEGER NOT NULL UNIQUE CHECK (started_cursor > 0),
+        terminal_event_name TEXT NOT NULL CHECK (
+          terminal_event_name IN ('verification.passed', 'verification.failed', 'verification.unknown')
+        ),
+        terminal_event_id TEXT NOT NULL UNIQUE,
+        terminal_cursor INTEGER NOT NULL UNIQUE CHECK (terminal_cursor > 0),
+        FOREIGN KEY (receipt_id) REFERENCES operation_receipt(receipt_id),
+        FOREIGN KEY (started_event_id) REFERENCES operation_event(event_id),
+        FOREIGN KEY (terminal_event_id) REFERENCES operation_event(event_id)
+      )
+    `)
+    yield* db.run(sql`
       UPDATE operation_projection SET
         baseline_trust_digest = COALESCE(baseline_trust_digest, (
           SELECT json_extract(payload_json, '$.baseline.trustDigest') FROM operation_event
@@ -431,8 +616,14 @@ function append(
   if (command.event.name === "executor.accepted") {
     return Effect.fail(new DispatchClaimError("unbound", "specialized_claim_required"))
   }
+  if (command.event.name === "effect.unknown" && "uncertaintyID" in command.event.payload) {
+    return Effect.fail(new ClaimUncertaintyError("unbound", "specialized_recording_required"))
+  }
   if (isReceiptEvent(command.event.name)) {
     return Effect.fail(new ReceiptIngestionError("unbound", "specialized_ingestion_required"))
+  }
+  if (isVerificationEvent(command.event.name)) {
+    return Effect.fail(new EvidenceIngestionError("unbound", "specialized_ingestion_required"))
   }
 
   return db
@@ -469,8 +660,14 @@ function appendBatch(
     if (command.event.name === "executor.accepted") {
       return Effect.fail(new DispatchClaimError("unbound", "specialized_claim_required"))
     }
+    if (command.event.name === "effect.unknown" && "uncertaintyID" in command.event.payload) {
+      return Effect.fail(new ClaimUncertaintyError("unbound", "specialized_recording_required"))
+    }
     if (isReceiptEvent(command.event.name)) {
       return Effect.fail(new ReceiptIngestionError("unbound", "specialized_ingestion_required"))
+    }
+    if (isVerificationEvent(command.event.name)) {
+      return Effect.fail(new EvidenceIngestionError("unbound", "specialized_ingestion_required"))
     }
   }
 
@@ -815,9 +1012,17 @@ function ingestReceipt(
             return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "claim_not_accepted"))
           }
           const admission = yield* parseStoredLifecycle(replay.events[0])
+          const admittedBaseline = parseWorkspaceBaseline(admission.payload.baseline)
+          if (!admittedBaseline.ok) {
+            return yield* Effect.fail(new LedgerCorruptionError("The admitted workspace baseline cannot be decoded"))
+          }
           if (
             receipt.effectClass !== admission.effectClass ||
-            digestEvent({ resources: receipt.resources }) !== digestEvent({ resources: admission.resources })
+            digestEvent({ resources: receipt.resources }) !== digestEvent({ resources: admission.resources }) ||
+            receipt.verificationContext.admittedBaselineDigest !== admittedBaseline.value.trustDigest ||
+            receipt.verificationContext.admittedBaselineDigest !== snapshot.request.baselineDigest ||
+            receipt.verificationContext.workspaceIdentity.device !== admittedBaseline.value.workspaceIdentity.device ||
+            receipt.verificationContext.workspaceIdentity.inode !== admittedBaseline.value.workspaceIdentity.inode
           ) {
             return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "binding_mismatch"))
           }
@@ -898,6 +1103,375 @@ function replayIngestedReceipt(
   }).pipe(Effect.mapError(mapStorageError("Failed to replay the ingested receipt")))
 }
 
+function recordClaimUncertainty(
+  db: Database,
+  command: RecordClaimUncertaintyCommand,
+  injectFault: LedgerFault,
+  clock: LedgerClock,
+): Effect.Effect<RecordClaimUncertaintyResult, OperationLedgerError> {
+  const parsed = parseOperationEffectUncertainty(command.uncertainty)
+  if (!parsed.ok) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        `Invalid claim uncertainty at ${parsed.issue.path}`,
+        parsed.issue.path,
+        parsed.issue.reason,
+      ),
+    )
+  }
+  if (command.event.actor.kind !== "system") {
+    return Effect.fail(
+      new OperationEventValidationError(
+        "Claim uncertainty must be recorded by a system actor",
+        "$.event.actor",
+        "system_actor_required",
+      ),
+    )
+  }
+  const uncertainty = parsed.value
+  const uncertaintyDigest = digestEvent({ ...uncertainty })
+  return db
+    .transaction(
+      (tx) =>
+        Effect.gen(function* () {
+          const meta = yield* requireInitialized(tx)
+          yield* verifyLedgerIntegrity(tx, meta)
+          const existingRows = yield* readUncertaintyConflictRows(tx, uncertainty)
+          if (existingRows[0]) {
+            return yield* replayClaimUncertainty(tx, command, uncertainty, uncertaintyDigest, existingRows[0])
+          }
+
+          const dispatchRows = yield* readDispatchRows(tx, uncertainty.dispatchRequestID)
+          if (!dispatchRows[0]) {
+            return yield* Effect.fail(new ClaimUncertaintyError(uncertainty.uncertaintyID, "dispatch_not_found"))
+          }
+          const snapshot = yield* decodeDispatchSnapshot(dispatchRows[0])
+          if (!snapshot.claim) {
+            return yield* Effect.fail(new ClaimUncertaintyError(uncertainty.uncertaintyID, "claim_not_accepted"))
+          }
+          if (snapshot.receipt) {
+            return yield* Effect.fail(new ClaimUncertaintyError(uncertainty.uncertaintyID, "receipt_already_ingested"))
+          }
+          if (!uncertaintyMatchesDispatch(uncertainty, snapshot)) {
+            return yield* Effect.fail(new ClaimUncertaintyError(uncertainty.uncertaintyID, "binding_mismatch"))
+          }
+          const trustedNow = requireTrustedNow(clock)
+          if (Date.parse(trustedNow) < Date.parse(snapshot.claim.claimExpiresAt)) {
+            return yield* Effect.fail(new ClaimUncertaintyError(uncertainty.uncertaintyID, "claim_still_active"))
+          }
+          if (Date.parse(uncertainty.observedAt) > Date.parse(trustedNow)) {
+            return yield* Effect.fail(
+              new OperationEventValidationError(
+                "Claim uncertainty cannot be observed in the future",
+                "$.uncertainty.observedAt",
+                "future_observation",
+              ),
+            )
+          }
+          const replay = yield* loadAndVerifyOperation(tx, uncertainty.operationID, maximumReadEvents)
+          if (
+            !replay ||
+            replay.operation.state !== "dispatched" ||
+            replay.operation.attemptID !== uncertainty.attemptID ||
+            replay.operation.dispatchRequestID !== uncertainty.dispatchRequestID
+          ) {
+            return yield* Effect.fail(new ClaimUncertaintyError(uncertainty.uncertaintyID, "claim_not_accepted"))
+          }
+          const result = yield* appendWithinTransaction(
+            tx,
+            {
+              expectedState: "dispatched",
+              expectedSequence: replay.operation.sequence,
+              event: {
+                ...command.event,
+                operationID: uncertainty.operationID,
+                name: "effect.unknown",
+                recordedAt: trustedNow,
+                observedAt: uncertainty.observedAt,
+                causationID: dispatchRows[0].accepted_event_id,
+                attemptID: uncertainty.attemptID,
+                payload: uncertainty,
+              },
+            },
+            injectFault,
+            trustedNow,
+          )
+          yield* injectFault("after_uncertainty_event_insert")
+          yield* insertClaimUncertainty(tx, uncertainty, uncertaintyDigest, result.event)
+          yield* injectFault("after_uncertainty_insert")
+          return {
+            kind: "recorded" as const,
+            uncertainty,
+            uncertaintyDigest,
+            event: result.event,
+            operation: result.operation,
+          }
+        }),
+      { behavior: "immediate" },
+    )
+    .pipe(Effect.mapError(mapStorageError("Failed to record claim uncertainty")))
+}
+
+function ingestEvidence(
+  db: Database,
+  command: IngestEvidenceCommand,
+  injectFault: LedgerFault,
+  clock: LedgerClock,
+): Effect.Effect<IngestEvidenceResult, OperationLedgerError> {
+  const parsed = parseOperationEvidence(command.evidence)
+  if (!parsed.ok) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        `Invalid verification evidence at ${parsed.issue.path}`,
+        parsed.issue.path,
+        parsed.issue.reason,
+      ),
+    )
+  }
+  if (command.startedEvent.eventID === command.terminalEvent.eventID) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        "Verification events must use distinct IDs",
+        "$.terminalEvent.eventID",
+        "duplicate_event_id",
+      ),
+    )
+  }
+  const evidence = parsed.value
+  const evidenceDigest = digestEvent({ ...evidence })
+  return db
+    .transaction(
+      (tx) =>
+        Effect.gen(function* () {
+          const meta = yield* requireInitialized(tx)
+          yield* verifyLedgerIntegrity(tx, meta)
+          const existingRows = yield* readEvidenceConflictRows(tx, evidence)
+          if (existingRows[0]) {
+            return yield* replayIngestedEvidence(tx, command, evidence, evidenceDigest, existingRows[0])
+          }
+
+          const receiptRows = yield* tx.all<ReceiptRow>(sql`
+            SELECT * FROM operation_receipt
+            WHERE receipt_id = ${evidence.receiptID}
+              OR operation_id = ${evidence.operationID}
+            LIMIT 1
+          `)
+          if (!receiptRows[0]) {
+            return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "receipt_not_found"))
+          }
+          if (
+            receiptRows[0].receipt_id !== evidence.receiptID ||
+            receiptRows[0].operation_id !== evidence.operationID ||
+            receiptRows[0].outcome_event_name !== "effect.observed"
+          ) {
+            return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "binding_mismatch"))
+          }
+          const replay = yield* loadAndVerifyOperation(tx, evidence.operationID, maximumReadEvents)
+          if (!replay || replay.operation.state !== "effect_observed") {
+            return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "effect_not_observed"))
+          }
+          const admission = yield* parseStoredLifecycle(replay.events[0])
+          if (!admission.verificationPlan || !evidenceMatchesPlan(evidence, admission.verificationPlan)) {
+            return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "binding_mismatch"))
+          }
+          if (!evidenceCriteriaMatchPlan(evidence, admission.verificationPlan)) {
+            return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "criteria_mismatch"))
+          }
+          const trustedNow = requireTrustedNow(clock)
+          if (Date.parse(evidence.observedAt) > Date.parse(trustedNow)) {
+            return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "future_observation"))
+          }
+          const verificationStart: OperationVerificationStart = {
+            evidenceID: evidence.evidenceID,
+            operationID: evidence.operationID,
+            receiptID: evidence.receiptID,
+            verificationPlanID: evidence.verificationPlanID,
+            verifier: evidence.verifier,
+            snapshotDigest: evidence.snapshotDigest,
+            observedAt: evidence.observedAt,
+          }
+          const actor = {
+            kind: "system" as const,
+            subject: evidence.verifier.identity,
+            componentDigest: evidence.verifier.digest,
+          }
+          const started = yield* appendWithinTransaction(
+            tx,
+            {
+              expectedState: "effect_observed",
+              expectedSequence: replay.operation.sequence,
+              event: {
+                ...command.startedEvent,
+                operationID: evidence.operationID,
+                name: "verification.started",
+                recordedAt: trustedNow,
+                observedAt: evidence.observedAt,
+                actor,
+                causationID: receiptRows[0].event_id,
+                attemptID: replay.operation.attemptID,
+                payload: verificationStart,
+              },
+            },
+            injectFault,
+            trustedNow,
+          )
+          yield* injectFault("after_verification_started_insert")
+          const terminal = yield* appendWithinTransaction(
+            tx,
+            {
+              expectedState: "verifying",
+              expectedSequence: started.operation.sequence,
+              event: {
+                ...command.terminalEvent,
+                operationID: evidence.operationID,
+                name: evidenceEventName(evidence),
+                recordedAt: trustedNow,
+                observedAt: evidence.observedAt,
+                actor,
+                causationID: started.event.eventID,
+                attemptID: replay.operation.attemptID,
+                payload: evidence,
+              },
+            },
+            injectFault,
+            trustedNow,
+          )
+          yield* injectFault("after_verification_terminal_insert")
+          yield* insertOperationEvidence(tx, evidence, evidenceDigest, started.event, terminal.event)
+          yield* injectFault("after_evidence_insert")
+          return {
+            kind: "ingested" as const,
+            evidence,
+            evidenceDigest,
+            startedEvent: started.event,
+            terminalEvent: terminal.event,
+            operation: terminal.operation,
+          }
+        }),
+      { behavior: "immediate" },
+    )
+    .pipe(Effect.mapError(mapStorageError("Failed to ingest independent verification evidence")))
+}
+
+function getVerification(
+  db: Database,
+  operationID: OperationID,
+): Effect.Effect<VerificationRecord | null, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const parsed = parseOperationID(operationID)
+    if (!parsed.ok) {
+      return yield* Effect.fail(
+        new OperationEventValidationError("Invalid operation ID", parsed.issue.path, parsed.issue.reason),
+      )
+    }
+    const meta = yield* requireInitialized(db)
+    yield* verifyLedgerIntegrity(db, meta)
+    const rows = yield* db.all<EvidenceRow>(sql`
+      SELECT * FROM operation_evidence WHERE operation_id = ${parsed.value} LIMIT 1
+    `)
+    return rows[0] ? yield* decodeVerificationRecord(db, rows[0]) : null
+  }).pipe(Effect.mapError(mapStorageError("Failed to read verification evidence")))
+}
+
+function replayClaimUncertainty(
+  tx: QueryExecutor,
+  command: RecordClaimUncertaintyCommand,
+  uncertainty: OperationEffectUncertainty,
+  uncertaintyDigest: string,
+  row: UncertaintyRow,
+): Effect.Effect<RecordClaimUncertaintyResult, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const stored = yield* decodeOperationUncertaintyJson(row.uncertainty_json, row.uncertainty_id)
+    if (
+      row.uncertainty_id !== uncertainty.uncertaintyID ||
+      row.uncertainty_digest !== uncertaintyDigest ||
+      digestEvent({ ...stored }) !== uncertaintyDigest ||
+      row.event_id !== command.event.eventID
+    ) {
+      return yield* Effect.fail(new ClaimUncertaintyConflictError(uncertainty.uncertaintyID))
+    }
+    const eventRows = yield* tx.all<EventRow>(sql`
+      SELECT * FROM operation_event WHERE event_id = ${row.event_id} LIMIT 1
+    `)
+    if (!eventRows[0]) return yield* Effect.fail(new LedgerCorruptionError("Claim uncertainty has no lifecycle event"))
+    const event = yield* decodeEventRow(eventRows[0])
+    if (
+      event.schemaVersion !== command.event.schemaVersion ||
+      event.correlationID !== command.event.correlationID ||
+      event.redaction !== command.event.redaction ||
+      event.externalBlobDigest !== command.event.externalBlobDigest ||
+      digestEvent({ ...event.actor }) !== digestEvent({ ...command.event.actor })
+    ) {
+      return yield* Effect.fail(new ClaimUncertaintyConflictError(uncertainty.uncertaintyID))
+    }
+    const operation = yield* loadAndVerifyOperation(tx, uncertainty.operationID, maximumReadEvents)
+    if (!operation) return yield* Effect.fail(new LedgerCorruptionError("Claim uncertainty has no projection"))
+    return {
+      kind: "replayed" as const,
+      uncertainty: stored,
+      uncertaintyDigest,
+      event,
+      operation: operation.operation,
+    }
+  }).pipe(Effect.mapError(mapStorageError("Failed to replay claim uncertainty")))
+}
+
+function replayIngestedEvidence(
+  tx: QueryExecutor,
+  command: IngestEvidenceCommand,
+  evidence: OperationEvidence,
+  evidenceDigest: string,
+  row: EvidenceRow,
+): Effect.Effect<IngestEvidenceResult, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const stored = yield* decodeOperationEvidenceJson(row.evidence_json, row.evidence_id)
+    if (
+      row.evidence_id !== evidence.evidenceID ||
+      row.evidence_digest !== evidenceDigest ||
+      digestEvent({ ...stored }) !== evidenceDigest ||
+      row.started_event_id !== command.startedEvent.eventID ||
+      row.terminal_event_id !== command.terminalEvent.eventID
+    ) {
+      return yield* Effect.fail(new EvidenceConflictError(evidence.evidenceID))
+    }
+    const record = yield* decodeVerificationRecord(tx, row)
+    if (
+      record.startedEvent.schemaVersion !== command.startedEvent.schemaVersion ||
+      record.startedEvent.correlationID !== command.startedEvent.correlationID ||
+      record.startedEvent.redaction !== command.startedEvent.redaction ||
+      record.startedEvent.externalBlobDigest !== command.startedEvent.externalBlobDigest ||
+      record.terminalEvent.schemaVersion !== command.terminalEvent.schemaVersion ||
+      record.terminalEvent.correlationID !== command.terminalEvent.correlationID ||
+      record.terminalEvent.redaction !== command.terminalEvent.redaction ||
+      record.terminalEvent.externalBlobDigest !== command.terminalEvent.externalBlobDigest
+    ) {
+      return yield* Effect.fail(new EvidenceConflictError(evidence.evidenceID))
+    }
+    const operation = yield* loadAndVerifyOperation(tx, evidence.operationID, maximumReadEvents)
+    if (!operation) return yield* Effect.fail(new LedgerCorruptionError("Verification evidence has no projection"))
+    return { kind: "replayed" as const, ...record, operation: operation.operation }
+  })
+}
+
+function decodeVerificationRecord(
+  db: QueryExecutor,
+  row: EvidenceRow,
+): Effect.Effect<VerificationRecord, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const evidence = yield* decodeOperationEvidenceJson(row.evidence_json, row.evidence_id)
+    const events = yield* db.all<EventRow>(sql`
+      SELECT * FROM operation_event
+      WHERE event_id IN (${row.started_event_id}, ${row.terminal_event_id})
+      ORDER BY global_cursor ASC
+    `)
+    if (events.length !== 2)
+      return yield* Effect.fail(new LedgerCorruptionError("Verification evidence events are missing"))
+    const startedEvent = yield* decodeEventRow(events[0])
+    const terminalEvent = yield* decodeEventRow(events[1])
+    return { evidence, evidenceDigest: row.evidence_digest, startedEvent, terminalEvent }
+  }).pipe(Effect.mapError(mapStorageError("Failed to decode verification evidence")))
+}
+
 function receiptMatchesDispatch(receipt: OperationReceipt, snapshot: DispatchSnapshot) {
   return (
     snapshot.claim !== null &&
@@ -912,6 +1486,42 @@ function receiptMatchesDispatch(receipt: OperationReceipt, snapshot: DispatchSna
   )
 }
 
+function uncertaintyMatchesDispatch(uncertainty: OperationEffectUncertainty, snapshot: DispatchSnapshot) {
+  return (
+    snapshot.claim !== null &&
+    uncertainty.operationID === snapshot.request.operationID &&
+    uncertainty.attemptID === snapshot.request.attemptID &&
+    uncertainty.dispatchRequestID === snapshot.request.dispatchRequestID &&
+    uncertainty.executorClaimID === snapshot.claim.executorClaimID &&
+    uncertainty.capabilityGrantID === snapshot.request.capabilityGrantID &&
+    uncertainty.fencingToken === snapshot.claim.fencingToken
+  )
+}
+
+function evidenceMatchesPlan(evidence: OperationEvidence, plan: OperationVerificationPlan) {
+  return (
+    evidence.verificationPlanID === plan.verificationPlanID &&
+    evidence.verifier.identity === plan.verifier.identity &&
+    evidence.verifier.version === plan.verifier.version &&
+    evidence.verifier.digest === plan.verifier.digest
+  )
+}
+
+function evidenceCriteriaMatchPlan(evidence: OperationEvidence, plan: OperationVerificationPlan) {
+  if (evidence.criteria.length !== plan.criteria.length) return false
+  return plan.criteria.every((criterion, index) => {
+    const observed = evidence.criteria[index]
+    if (!observed || observed.criterionID !== criterion.criterionID) return false
+    return observed.result !== "passed" || observed.observationDigest === criterion.expectedObservationDigest
+  })
+}
+
+function evidenceEventName(evidence: OperationEvidence): OperationEvent {
+  if (evidence.criteria.every((criterion) => criterion.result === "passed")) return "verification.passed"
+  if (evidence.criteria.some((criterion) => criterion.result === "failed")) return "verification.failed"
+  return "verification.unknown"
+}
+
 function receiptEventName(receipt: OperationReceipt): OperationEvent {
   if (receipt.observation.kind === "effect_observed") return "effect.observed"
   if (receipt.observation.kind === "no_effect_proved") return "execution.failed_without_effect"
@@ -920,6 +1530,15 @@ function receiptEventName(receipt: OperationReceipt): OperationEvent {
 
 function isReceiptEvent(name: OperationEvent) {
   return name === "effect.observed" || name === "execution.failed_without_effect" || name === "effect.unknown"
+}
+
+function isVerificationEvent(name: OperationEvent) {
+  return (
+    name === "verification.started" ||
+    name === "verification.passed" ||
+    name === "verification.failed" ||
+    name === "verification.unknown"
+  )
 }
 
 function getDispatchSnapshot(
@@ -938,6 +1557,71 @@ function getDispatchSnapshot(
     const rows = yield* readDispatchRows(db, parsedID.value)
     return rows[0] ? yield* decodeDispatchSnapshot(rows[0]) : null
   }).pipe(Effect.mapError(mapStorageError("Failed to read the dispatch snapshot")))
+}
+
+function validateEffectAuthority(
+  db: Database,
+  command: ValidateEffectAuthorityCommand,
+  clock: LedgerClock,
+): Effect.Effect<EffectAuthorityValidation, OperationLedgerError> {
+  return Effect.gen(function* () {
+    if (
+      !Number.isSafeInteger(command.minimumRemainingLeaseMilliseconds) ||
+      command.minimumRemainingLeaseMilliseconds < 1
+    ) {
+      return yield* Effect.fail(
+        new OperationEventValidationError(
+          "Invalid minimum effect lease",
+          "$.minimumRemainingLeaseMilliseconds",
+          "expected_positive_integer",
+        ),
+      )
+    }
+    const trustedAt = requireTrustedNow(clock)
+    const snapshot = yield* getDispatchSnapshot(db, command.dispatchRequestID)
+    const operation = yield* getOperation(db, command.operationID)
+    if (!snapshot || !snapshot.claim || !operation) {
+      return { allowed: false as const, trustedAt, reason: "missing_dispatch" as const }
+    }
+    if (operation.state !== "dispatched") {
+      return { allowed: false as const, trustedAt, reason: "inactive_operation" as const }
+    }
+    if (
+      snapshot.request.operationID !== command.operationID ||
+      snapshot.request.attemptID !== command.attemptID ||
+      snapshot.request.capabilityGrantID !== command.capabilityGrantID ||
+      snapshot.request.executor !== command.executor ||
+      snapshot.request.adapterDigest !== command.adapterDigest ||
+      snapshot.request.baselineDigest !== command.baselineDigest ||
+      snapshot.claim.executorClaimID !== command.executorClaimID ||
+      snapshot.claim.operationID !== command.operationID ||
+      snapshot.claim.attemptID !== command.attemptID ||
+      snapshot.claim.executor !== command.executor ||
+      snapshot.claim.fencingToken !== command.fencingToken ||
+      operation.attemptID !== command.attemptID ||
+      operation.capabilityGrantID !== command.capabilityGrantID ||
+      operation.dispatchRequestID !== command.dispatchRequestID ||
+      operation.dispatchExecutor !== command.executor ||
+      operation.dispatchAdapterDigest !== command.adapterDigest ||
+      operation.baselineTrustDigest !== command.baselineDigest ||
+      operation.baselineAdapterDigest !== command.adapterDigest
+    ) {
+      return { allowed: false as const, trustedAt, reason: "binding_mismatch" as const }
+    }
+    const requiredUntil = Date.parse(trustedAt) + command.minimumRemainingLeaseMilliseconds
+    if (
+      requiredUntil >= Date.parse(snapshot.claim.claimExpiresAt) ||
+      requiredUntil >= Date.parse(snapshot.request.authorizationExpiresAt)
+    ) {
+      return { allowed: false as const, trustedAt, reason: "lease_too_short" as const }
+    }
+    return {
+      allowed: true as const,
+      trustedAt,
+      claimExpiresAt: snapshot.claim.claimExpiresAt,
+      authorizationExpiresAt: snapshot.request.authorizationExpiresAt,
+    }
+  }).pipe(Effect.mapError(mapStorageError("Failed to validate effect authority")))
 }
 
 function listRecoveryCandidates(
@@ -962,10 +1646,15 @@ function listRecoveryCandidates(
         operation_receipt.receipt_id,
         operation_receipt.receipt_json,
         operation_receipt.receipt_digest,
-        operation_receipt.event_cursor AS receipt_cursor
+        operation_receipt.event_cursor AS receipt_cursor,
+        claim_uncertainty.uncertainty_id,
+        claim_uncertainty.uncertainty_json,
+        claim_uncertainty.uncertainty_digest,
+        claim_uncertainty.event_cursor AS uncertainty_cursor
       FROM dispatch_outbox
       LEFT JOIN executor_claim USING (dispatch_request_id)
       LEFT JOIN operation_receipt USING (dispatch_request_id)
+      LEFT JOIN claim_uncertainty USING (dispatch_request_id)
       ORDER BY dispatch_outbox.created_cursor ASC
       LIMIT ${limit}
     `)
@@ -1093,6 +1782,8 @@ function verifyLedgerIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effect<
     yield* verifyDispatchIntegrity(db, meta)
     yield* verifyCapabilityIntegrity(db)
     yield* verifyReceiptIntegrity(db)
+    yield* verifyUncertaintyIntegrity(db)
+    yield* verifyEvidenceIntegrity(db)
     return undefined
   }).pipe(Effect.mapError(mapStorageError("Failed to verify ledger integrity")))
 }
@@ -1173,10 +1864,15 @@ function verifyDispatchIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effec
         operation_receipt.receipt_id,
         operation_receipt.receipt_json,
         operation_receipt.receipt_digest,
-        operation_receipt.event_cursor AS receipt_cursor
+        operation_receipt.event_cursor AS receipt_cursor,
+        claim_uncertainty.uncertainty_id,
+        claim_uncertainty.uncertainty_json,
+        claim_uncertainty.uncertainty_digest,
+        claim_uncertainty.event_cursor AS uncertainty_cursor
       FROM dispatch_outbox
       LEFT JOIN executor_claim USING (dispatch_request_id)
       LEFT JOIN operation_receipt USING (dispatch_request_id)
+      LEFT JOIN claim_uncertainty USING (dispatch_request_id)
       ORDER BY dispatch_outbox.created_cursor ASC
       LIMIT ${maximumIntegrityEvents + 1}
     `)
@@ -1222,10 +1918,12 @@ function verifyDispatchIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effec
       const projectionRows = yield* db.all<ProjectionRow>(
         sql`SELECT * FROM operation_projection WHERE operation_id = ${snapshot.request.operationID} LIMIT 1`,
       )
+      const projection = projectionRows[0]
       if (
-        !projectionRows[0] ||
-        projectionRows[0].dispatch_request_id !== row.dispatch_request_id ||
-        projectionRows[0].state !== dispatchSnapshotState(snapshot)
+        !projection ||
+        projection.dispatch_request_id !== row.dispatch_request_id ||
+        !isOperationState(projection.state) ||
+        !dispatchSnapshotStates(snapshot).includes(projection.state)
       ) {
         return yield* Effect.fail(new LedgerCorruptionError("A dispatch snapshot does not match its operation"))
       }
@@ -1256,12 +1954,15 @@ function verifyDispatchIntegrity(db: QueryExecutor, meta: MetaRow): Effect.Effec
   }).pipe(Effect.mapError(mapStorageError("Failed to verify dispatch integrity")))
 }
 
-function dispatchSnapshotState(snapshot: DispatchSnapshot): OperationState {
-  if (!snapshot.claim) return "dispatch_pending"
-  if (!snapshot.receipt) return "dispatched"
-  if (snapshot.receipt.observation.kind === "effect_observed") return "effect_observed"
-  if (snapshot.receipt.observation.kind === "no_effect_proved") return "failed"
-  return "reconciliation_required"
+function dispatchSnapshotStates(snapshot: DispatchSnapshot): ReadonlyArray<OperationState> {
+  if (!snapshot.claim) return ["dispatch_pending"]
+  if (snapshot.uncertainty) return ["reconciliation_required"]
+  if (!snapshot.receipt) return ["dispatched"]
+  if (snapshot.receipt.observation.kind === "effect_observed") {
+    return ["effect_observed", "verifying", "succeeded", "failed", "reconciliation_required"]
+  }
+  if (snapshot.receipt.observation.kind === "no_effect_proved") return ["failed"]
+  return ["reconciliation_required"]
 }
 
 function verifyReceiptIntegrity(db: QueryExecutor): Effect.Effect<void, OperationLedgerError> {
@@ -1270,9 +1971,9 @@ function verifyReceiptIntegrity(db: QueryExecutor): Effect.Effect<void, Operatio
       SELECT * FROM operation_receipt ORDER BY event_cursor ASC LIMIT ${maximumIntegrityEvents + 1}
     `)
     const events = yield* db.all<EventRow>(sql`
-      SELECT * FROM operation_event
-      WHERE name IN ('effect.observed', 'execution.failed_without_effect', 'effect.unknown')
-      ORDER BY global_cursor ASC LIMIT ${maximumIntegrityEvents + 1}
+      SELECT operation_event.* FROM operation_event
+      INNER JOIN operation_receipt ON operation_receipt.event_id = operation_event.event_id
+      ORDER BY operation_event.global_cursor ASC LIMIT ${maximumIntegrityEvents + 1}
     `)
     if (receipts.length > maximumIntegrityEvents || receipts.length !== events.length) {
       return yield* Effect.fail(new LedgerCorruptionError("Receipt events and immutable receipts diverge"))
@@ -1303,6 +2004,82 @@ function verifyReceiptIntegrity(db: QueryExecutor): Effect.Effect<void, Operatio
     }
     return undefined
   }).pipe(Effect.mapError(mapStorageError("Failed to verify operation receipt integrity")))
+}
+
+function verifyUncertaintyIntegrity(db: QueryExecutor): Effect.Effect<void, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const rows = yield* db.all<UncertaintyRow>(sql`
+      SELECT * FROM claim_uncertainty ORDER BY event_cursor ASC LIMIT ${maximumIntegrityEvents + 1}
+    `)
+    if (rows.length > maximumIntegrityEvents) {
+      return yield* Effect.fail(new LedgerCorruptionError("Claim uncertainty exceeds integrity scan bounds"))
+    }
+    for (const row of rows) {
+      const uncertainty = yield* decodeOperationUncertaintyJson(row.uncertainty_json, row.uncertainty_id)
+      const events = yield* db.all<EventRow>(sql`
+        SELECT * FROM operation_event WHERE event_id = ${row.event_id} LIMIT 1
+      `)
+      if (
+        !events[0] ||
+        row.uncertainty_id !== uncertainty.uncertaintyID ||
+        row.operation_id !== uncertainty.operationID ||
+        row.attempt_id !== uncertainty.attemptID ||
+        row.dispatch_request_id !== uncertainty.dispatchRequestID ||
+        row.executor_claim_id !== uncertainty.executorClaimID ||
+        row.uncertainty_digest !== digestEvent({ ...uncertainty }) ||
+        row.event_cursor !== events[0].global_cursor ||
+        events[0].name !== "effect.unknown"
+      ) {
+        return yield* Effect.fail(new LedgerCorruptionError("Claim uncertainty does not match its event"))
+      }
+      const lifecycle = yield* parseStoredLifecycle(yield* decodeEventRow(events[0]))
+      if (!lifecycle.uncertainty || digestEvent({ ...lifecycle.uncertainty }) !== row.uncertainty_digest) {
+        return yield* Effect.fail(new LedgerCorruptionError("Claim uncertainty event payload diverges"))
+      }
+    }
+    return undefined
+  }).pipe(Effect.mapError(mapStorageError("Failed to verify claim uncertainty integrity")))
+}
+
+function verifyEvidenceIntegrity(db: QueryExecutor): Effect.Effect<void, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const rows = yield* db.all<EvidenceRow>(sql`
+      SELECT * FROM operation_evidence ORDER BY started_cursor ASC LIMIT ${maximumIntegrityEvents + 1}
+    `)
+    if (rows.length > maximumIntegrityEvents) {
+      return yield* Effect.fail(new LedgerCorruptionError("Verification evidence exceeds integrity scan bounds"))
+    }
+    for (const row of rows) {
+      const record = yield* decodeVerificationRecord(db, row)
+      if (
+        row.evidence_id !== record.evidence.evidenceID ||
+        row.operation_id !== record.evidence.operationID ||
+        row.receipt_id !== record.evidence.receiptID ||
+        row.verification_plan_id !== record.evidence.verificationPlanID ||
+        row.evidence_digest !== digestEvent({ ...record.evidence }) ||
+        row.started_event_id !== record.startedEvent.eventID ||
+        row.started_cursor !== record.startedEvent.globalCursor ||
+        row.terminal_event_name !== record.terminalEvent.name ||
+        row.terminal_event_id !== record.terminalEvent.eventID ||
+        row.terminal_cursor !== record.terminalEvent.globalCursor ||
+        record.startedEvent.name !== "verification.started" ||
+        record.terminalEvent.name !== evidenceEventName(record.evidence)
+      ) {
+        return yield* Effect.fail(new LedgerCorruptionError("Verification evidence does not match its events"))
+      }
+      const started = yield* parseStoredLifecycle(record.startedEvent)
+      const terminal = yield* parseStoredLifecycle(record.terminalEvent)
+      if (
+        !started.verificationStart ||
+        !terminal.evidence ||
+        started.verificationStart.evidenceID !== record.evidence.evidenceID ||
+        digestEvent({ ...terminal.evidence }) !== row.evidence_digest
+      ) {
+        return yield* Effect.fail(new LedgerCorruptionError("Verification lifecycle payloads diverge from evidence"))
+      }
+    }
+    return undefined
+  }).pipe(Effect.mapError(mapStorageError("Failed to verify operation evidence integrity")))
 }
 
 function decodeDispatchRequestJson(
@@ -1356,6 +2133,7 @@ function loadAndVerifyOperation(
     let decision: string | null = null
     let baselineTrustDigest: string | null = null
     let baselineAdapterDigest: string | null = null
+    let baselineWorkspaceIdentity: Readonly<{ device: string; inode: string }> | null = null
     let attemptID: AttemptID | null = null
     let capabilityGrantID: string | null = null
     let authorityExpiresAt: string | null = null
@@ -1368,6 +2146,11 @@ function loadAndVerifyOperation(
     let executorAcceptedAt: string | null = null
     let effectClass: string | null = null
     let resources: ReadonlyArray<string> | null = null
+    let verificationPlan: OperationVerificationPlan | null = null
+    let receiptID: string | null = null
+    let verificationEvidenceID: string | null = null
+    let verificationSnapshotDigest: string | null = null
+    let verificationObservedAt: string | null = null
     for (const [index, row] of rows.entries()) {
       const event = yield* decodeEventRow(row)
       const lifecycle = yield* parseStoredLifecycle(event)
@@ -1385,11 +2168,17 @@ function loadAndVerifyOperation(
         )
       }
       if (event.name === "operation.admitted") {
+        const decodedBaseline = parseWorkspaceBaseline(lifecycle.payload.baseline)
+        if (!decodedBaseline.ok) {
+          return yield* Effect.fail(new LedgerCorruptionError(`Operation ${operationID} baseline is malformed`))
+        }
         admission = lifecycle.admissionKey
         baselineTrustDigest = lifecycle.baselineTrustDigest
         baselineAdapterDigest = lifecycle.baselineAdapterDigest
+        baselineWorkspaceIdentity = decodedBaseline.value.workspaceIdentity
         effectClass = lifecycle.effectClass
         resources = lifecycle.resources
+        verificationPlan = lifecycle.verificationPlan
       }
       if (event.name === "policy.ask") decision = lifecycle.decisionID
       if (
@@ -1481,9 +2270,100 @@ function loadAndVerifyOperation(
           lifecycle.receipt.adapter.identity !== dispatchExecutor ||
           lifecycle.receipt.adapter.digest !== dispatchAdapterDigest ||
           lifecycle.receipt.effectClass !== effectClass ||
-          digestEvent({ resources: lifecycle.receipt.resources }) !== digestEvent({ resources }))
+          digestEvent({ resources: lifecycle.receipt.resources }) !== digestEvent({ resources }) ||
+          lifecycle.receipt.verificationContext.admittedBaselineDigest !== baselineTrustDigest ||
+          lifecycle.receipt.verificationContext.workspaceIdentity.device !== baselineWorkspaceIdentity?.device ||
+          lifecycle.receipt.verificationContext.workspaceIdentity.inode !== baselineWorkspaceIdentity?.inode)
       ) {
         return yield* Effect.fail(new LedgerCorruptionError(`Operation ${operationID} receipt binding is inconsistent`))
+      }
+      if (lifecycle.receipt) receiptID = lifecycle.receipt.receiptID
+      if (
+        lifecycle.uncertainty &&
+        (lifecycle.uncertainty.operationID !== operationID ||
+          lifecycle.uncertainty.attemptID !== attemptID ||
+          lifecycle.uncertainty.dispatchRequestID !== dispatchRequestID ||
+          lifecycle.uncertainty.executorClaimID !== executorClaimID ||
+          lifecycle.uncertainty.capabilityGrantID !== capabilityGrantID ||
+          lifecycle.uncertainty.fencingToken !== fencingToken)
+      ) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(`Operation ${operationID} claim uncertainty binding is inconsistent`),
+        )
+      }
+      if (
+        lifecycle.uncertainty &&
+        (event.attemptID !== attemptID ||
+          event.observedAt !== lifecycle.uncertainty.observedAt ||
+          event.causationID !== events.at(-1)?.eventID ||
+          event.actor.kind !== "system")
+      ) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(`Operation ${operationID} claim uncertainty envelope is inconsistent`),
+        )
+      }
+      if (
+        lifecycle.verificationStart &&
+        (!verificationPlan ||
+          lifecycle.verificationStart.operationID !== operationID ||
+          lifecycle.verificationStart.receiptID !== receiptID ||
+          lifecycle.verificationStart.verificationPlanID !== verificationPlan.verificationPlanID ||
+          lifecycle.verificationStart.verifier.identity !== verificationPlan.verifier.identity ||
+          lifecycle.verificationStart.verifier.version !== verificationPlan.verifier.version ||
+          lifecycle.verificationStart.verifier.digest !== verificationPlan.verifier.digest)
+      ) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(`Operation ${operationID} verification start binding is inconsistent`),
+        )
+      }
+      if (
+        lifecycle.verificationStart &&
+        (event.attemptID !== attemptID ||
+          event.observedAt !== lifecycle.verificationStart.observedAt ||
+          event.causationID !== events.at(-1)?.eventID ||
+          event.actor.kind !== "system" ||
+          event.actor.subject !== lifecycle.verificationStart.verifier.identity ||
+          event.actor.componentDigest !== lifecycle.verificationStart.verifier.digest)
+      ) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(`Operation ${operationID} verification start envelope is inconsistent`),
+        )
+      }
+      if (lifecycle.verificationStart) {
+        verificationEvidenceID = lifecycle.verificationStart.evidenceID
+        verificationSnapshotDigest = lifecycle.verificationStart.snapshotDigest
+        verificationObservedAt = lifecycle.verificationStart.observedAt
+      }
+      if (
+        lifecycle.evidence &&
+        (!verificationPlan ||
+          lifecycle.evidence.evidenceID !== verificationEvidenceID ||
+          lifecycle.evidence.snapshotDigest !== verificationSnapshotDigest ||
+          lifecycle.evidence.observedAt !== verificationObservedAt ||
+          lifecycle.evidence.operationID !== operationID ||
+          lifecycle.evidence.receiptID !== receiptID ||
+          lifecycle.evidence.verificationPlanID !== verificationPlan.verificationPlanID ||
+          lifecycle.evidence.verifier.identity !== verificationPlan.verifier.identity ||
+          lifecycle.evidence.verifier.version !== verificationPlan.verifier.version ||
+          lifecycle.evidence.verifier.digest !== verificationPlan.verifier.digest ||
+          !evidenceCriteriaMatchPlan(lifecycle.evidence, verificationPlan))
+      ) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(`Operation ${operationID} verification evidence binding is inconsistent`),
+        )
+      }
+      if (
+        lifecycle.evidence &&
+        (event.attemptID !== attemptID ||
+          event.observedAt !== lifecycle.evidence.observedAt ||
+          event.causationID !== events.at(-1)?.eventID ||
+          event.actor.kind !== "system" ||
+          event.actor.subject !== lifecycle.evidence.verifier.identity ||
+          event.actor.componentDigest !== lifecycle.evidence.verifier.digest)
+      ) {
+        return yield* Effect.fail(
+          new LedgerCorruptionError(`Operation ${operationID} verification evidence envelope is inconsistent`),
+        )
       }
       if (
         lifecycle.receipt &&
@@ -1690,6 +2570,39 @@ function validateLifecycleLink(
       ),
     )
   }
+  if (
+    lifecycle.uncertainty &&
+    (lifecycle.uncertainty.operationID !== operation?.operationID ||
+      lifecycle.uncertainty.attemptID !== operation.attemptID ||
+      lifecycle.uncertainty.dispatchRequestID !== operation.dispatchRequestID ||
+      lifecycle.uncertainty.capabilityGrantID !== operation.capabilityGrantID)
+  ) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        "Claim uncertainty must bind the active accepted dispatch",
+        "$.payload",
+        "claim_binding_mismatch",
+      ),
+    )
+  }
+  if (lifecycle.verificationStart && lifecycle.verificationStart.operationID !== operation?.operationID) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        "Verification start must bind the active operation",
+        "$.payload.operationID",
+        "operation_mismatch",
+      ),
+    )
+  }
+  if (lifecycle.evidence && lifecycle.evidence.operationID !== operation?.operationID) {
+    return Effect.fail(
+      new OperationEventValidationError(
+        "Verification evidence must bind the active operation",
+        "$.payload.operationID",
+        "operation_mismatch",
+      ),
+    )
+  }
   return Effect.void
 }
 
@@ -1781,6 +2694,55 @@ function validateTrustedLifecycle(
       event.actor.componentDigest !== operation.dispatchAdapterDigest
     ) {
       return invalidLifecycle("Receipt actor does not match the authorized adapter", "$.actor", "executor_mismatch")
+    }
+  }
+  if (lifecycle.uncertainty) {
+    if (event.attemptID !== lifecycle.uncertainty.attemptID) {
+      return invalidLifecycle("Claim uncertainty must bind its attempt", "$.attemptID", "attempt_mismatch")
+    }
+    if (event.observedAt !== lifecycle.uncertainty.observedAt) {
+      return invalidLifecycle("Claim uncertainty must bind observation time", "$.observedAt", "timestamp_mismatch")
+    }
+    if (event.causationID !== operation?.lastEventID || event.actor.kind !== "system") {
+      return invalidLifecycle(
+        "Claim uncertainty must be caused by executor acceptance and recorded by a system actor",
+        "$.causationID",
+        "causation_mismatch",
+      )
+    }
+  }
+  if (lifecycle.verificationStart) {
+    if (event.observedAt !== lifecycle.verificationStart.observedAt) {
+      return invalidLifecycle("Verification start must bind observation time", "$.observedAt", "timestamp_mismatch")
+    }
+    if (
+      event.causationID !== operation?.lastEventID ||
+      event.actor.kind !== "system" ||
+      event.actor.subject !== lifecycle.verificationStart.verifier.identity ||
+      event.actor.componentDigest !== lifecycle.verificationStart.verifier.digest
+    ) {
+      return invalidLifecycle(
+        "Verification start must be caused by the receipt and recorded by the bound verifier",
+        "$.causationID",
+        "verifier_mismatch",
+      )
+    }
+  }
+  if (lifecycle.evidence) {
+    if (event.observedAt !== lifecycle.evidence.observedAt) {
+      return invalidLifecycle("Verification evidence must bind observation time", "$.observedAt", "timestamp_mismatch")
+    }
+    if (
+      event.causationID !== operation?.lastEventID ||
+      event.actor.kind !== "system" ||
+      event.actor.subject !== lifecycle.evidence.verifier.identity ||
+      event.actor.componentDigest !== lifecycle.evidence.verifier.digest
+    ) {
+      return invalidLifecycle(
+        "Verification evidence must be caused by verification start and recorded by the bound verifier",
+        "$.causationID",
+        "verifier_mismatch",
+      )
     }
   }
   return Effect.void
@@ -1987,6 +2949,104 @@ function decodeOperationReceiptJson(
   })
 }
 
+function insertClaimUncertainty(
+  db: QueryExecutor,
+  uncertainty: OperationEffectUncertainty,
+  uncertaintyDigest: string,
+  event: PersistedOperationEvent,
+) {
+  return db
+    .run(
+      sql`
+      INSERT INTO claim_uncertainty (
+        uncertainty_id, operation_id, attempt_id, dispatch_request_id, executor_claim_id,
+        uncertainty_json, uncertainty_digest, event_id, event_cursor
+      ) VALUES (
+        ${uncertainty.uncertaintyID}, ${uncertainty.operationID}, ${uncertainty.attemptID},
+        ${uncertainty.dispatchRequestID}, ${uncertainty.executorClaimID}, ${JSON.stringify(uncertainty)},
+        ${uncertaintyDigest}, ${event.eventID}, ${event.globalCursor}
+      )
+    `,
+    )
+    .pipe(Effect.asVoid, Effect.mapError(mapStorageError("Failed to store immutable claim uncertainty")))
+}
+
+function readUncertaintyConflictRows(db: QueryExecutor, uncertainty: OperationEffectUncertainty) {
+  return db.all<UncertaintyRow>(sql`
+    SELECT * FROM claim_uncertainty
+    WHERE uncertainty_id = ${uncertainty.uncertaintyID}
+      OR operation_id = ${uncertainty.operationID}
+      OR attempt_id = ${uncertainty.attemptID}
+      OR dispatch_request_id = ${uncertainty.dispatchRequestID}
+      OR executor_claim_id = ${uncertainty.executorClaimID}
+    LIMIT 1
+  `)
+}
+
+function decodeOperationUncertaintyJson(
+  value: string,
+  context: string,
+): Effect.Effect<OperationEffectUncertainty, LedgerCorruptionError> {
+  return Effect.try({
+    try: () => {
+      const result = parseOperationEffectUncertainty(JSON.parse(value))
+      if (!result.ok) throw new Error(result.issue.reason)
+      return result.value
+    },
+    catch: (cause) => new LedgerCorruptionError(`Claim uncertainty ${context} is malformed`, cause),
+  })
+}
+
+function insertOperationEvidence(
+  db: QueryExecutor,
+  evidence: OperationEvidence,
+  evidenceDigest: string,
+  startedEvent: PersistedOperationEvent,
+  terminalEvent: PersistedOperationEvent,
+) {
+  return db
+    .run(
+      sql`
+      INSERT INTO operation_evidence (
+        evidence_id, operation_id, receipt_id, verification_plan_id,
+        evidence_json, evidence_digest, started_event_id, started_cursor,
+        terminal_event_name, terminal_event_id, terminal_cursor
+      ) VALUES (
+        ${evidence.evidenceID}, ${evidence.operationID}, ${evidence.receiptID},
+        ${evidence.verificationPlanID}, ${JSON.stringify(evidence)}, ${evidenceDigest},
+        ${startedEvent.eventID}, ${startedEvent.globalCursor}, ${terminalEvent.name},
+        ${terminalEvent.eventID}, ${terminalEvent.globalCursor}
+      )
+    `,
+    )
+    .pipe(Effect.asVoid, Effect.mapError(mapStorageError("Failed to store immutable verification evidence")))
+}
+
+function readEvidenceConflictRows(db: QueryExecutor, evidence: OperationEvidence) {
+  return db.all<EvidenceRow>(sql`
+    SELECT * FROM operation_evidence
+    WHERE evidence_id = ${evidence.evidenceID}
+      OR operation_id = ${evidence.operationID}
+      OR receipt_id = ${evidence.receiptID}
+      OR verification_plan_id = ${evidence.verificationPlanID}
+    LIMIT 1
+  `)
+}
+
+function decodeOperationEvidenceJson(
+  value: string,
+  context: string,
+): Effect.Effect<OperationEvidence, LedgerCorruptionError> {
+  return Effect.try({
+    try: () => {
+      const result = parseOperationEvidence(JSON.parse(value))
+      if (!result.ok) throw new Error(result.issue.reason)
+      return result.value
+    },
+    catch: (cause) => new LedgerCorruptionError(`Verification evidence ${context} is malformed`, cause),
+  })
+}
+
 function readDispatchRows(db: QueryExecutor, dispatchRequestID: DispatchRequestID) {
   return db.all<DispatchJoinRow>(sql`
     SELECT
@@ -2000,10 +3060,15 @@ function readDispatchRows(db: QueryExecutor, dispatchRequestID: DispatchRequestI
       operation_receipt.receipt_id,
       operation_receipt.receipt_json,
       operation_receipt.receipt_digest,
-      operation_receipt.event_cursor AS receipt_cursor
+      operation_receipt.event_cursor AS receipt_cursor,
+      claim_uncertainty.uncertainty_id,
+      claim_uncertainty.uncertainty_json,
+      claim_uncertainty.uncertainty_digest,
+      claim_uncertainty.event_cursor AS uncertainty_cursor
     FROM dispatch_outbox
     LEFT JOIN executor_claim USING (dispatch_request_id)
     LEFT JOIN operation_receipt USING (dispatch_request_id)
+    LEFT JOIN claim_uncertainty USING (dispatch_request_id)
     WHERE dispatch_outbox.dispatch_request_id = ${dispatchRequestID}
     LIMIT 1
   `)
@@ -2035,7 +3100,11 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
           row.receipt_id !== null ||
           row.receipt_json !== null ||
           row.receipt_digest !== null ||
-          row.receipt_cursor !== null
+          row.receipt_cursor !== null ||
+          row.uncertainty_id !== null ||
+          row.uncertainty_json !== null ||
+          row.uncertainty_digest !== null ||
+          row.uncertainty_cursor !== null
         ) {
           throw new Error("partial_claim_row")
         }
@@ -2043,9 +3112,11 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
           request: requestResult.value,
           claim: null,
           receipt: null,
+          uncertainty: null,
           createdCursor: row.created_cursor,
           acceptedCursor: null,
           receiptCursor: null,
+          uncertaintyCursor: null,
           recoveryStatus: "pending_outbox" as const,
         }
       }
@@ -2076,18 +3147,67 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
         if (row.receipt_json !== null || row.receipt_digest !== null || row.receipt_cursor !== null) {
           throw new Error("partial_receipt_row")
         }
+        if (row.uncertainty_id !== null) {
+          if (row.uncertainty_json === null || row.uncertainty_digest === null || row.uncertainty_cursor === null) {
+            throw new Error("partial_uncertainty_row")
+          }
+          const uncertaintyResult = parseOperationEffectUncertainty(JSON.parse(row.uncertainty_json))
+          if (!uncertaintyResult.ok || digestEvent({ ...uncertaintyResult.value }) !== row.uncertainty_digest) {
+            throw new Error("claim_uncertainty_corrupted")
+          }
+          if (
+            uncertaintyResult.value.uncertaintyID !== row.uncertainty_id ||
+            !uncertaintyMatchesDispatch(uncertaintyResult.value, {
+              request: requestResult.value,
+              claim: claimResult.value,
+              receipt: null,
+              uncertainty: null,
+              createdCursor: row.created_cursor,
+              acceptedCursor: row.accepted_cursor,
+              receiptCursor: null,
+              uncertaintyCursor: null,
+              recoveryStatus: "claimed_no_receipt",
+            })
+          ) {
+            throw new Error("claim_uncertainty_columns_mismatch")
+          }
+          return {
+            request: requestResult.value,
+            claim: claimResult.value,
+            receipt: null,
+            uncertainty: uncertaintyResult.value,
+            createdCursor: row.created_cursor,
+            acceptedCursor: row.accepted_cursor,
+            receiptCursor: null,
+            uncertaintyCursor: row.uncertainty_cursor,
+            recoveryStatus: "claim_uncertain" as const,
+          }
+        }
+        if (row.uncertainty_json !== null || row.uncertainty_digest !== null || row.uncertainty_cursor !== null) {
+          throw new Error("partial_uncertainty_row")
+        }
         return {
           request: requestResult.value,
           claim: claimResult.value,
           receipt: null,
+          uncertainty: null,
           createdCursor: row.created_cursor,
           acceptedCursor: row.accepted_cursor,
           receiptCursor: null,
+          uncertaintyCursor: null,
           recoveryStatus: "claimed_no_receipt" as const,
         }
       }
       if (row.receipt_json === null || row.receipt_digest === null || row.receipt_cursor === null) {
         throw new Error("partial_receipt_row")
+      }
+      if (
+        row.uncertainty_id !== null ||
+        row.uncertainty_json !== null ||
+        row.uncertainty_digest !== null ||
+        row.uncertainty_cursor !== null
+      ) {
+        throw new Error("receipt_and_uncertainty_conflict")
       }
       const receiptResult = parseOperationReceipt(JSON.parse(row.receipt_json))
       if (!receiptResult.ok || digestEvent({ ...receiptResult.value }) !== row.receipt_digest) {
@@ -2108,9 +3228,11 @@ function decodeDispatchSnapshot(row: DispatchJoinRow): Effect.Effect<DispatchSna
         request: requestResult.value,
         claim: claimResult.value,
         receipt: receiptResult.value,
+        uncertainty: null,
         createdCursor: row.created_cursor,
         acceptedCursor: row.accepted_cursor,
         receiptCursor: row.receipt_cursor,
+        uncertaintyCursor: null,
         recoveryStatus: "receipt_ingested" as const,
       }
     },
@@ -2356,6 +3478,32 @@ type ReceiptRow = Readonly<{
   event_cursor: number
 }>
 
+type UncertaintyRow = Readonly<{
+  uncertainty_id: string
+  operation_id: string
+  attempt_id: string
+  dispatch_request_id: string
+  executor_claim_id: string
+  uncertainty_json: string
+  uncertainty_digest: string
+  event_id: string
+  event_cursor: number
+}>
+
+type EvidenceRow = Readonly<{
+  evidence_id: string
+  operation_id: string
+  receipt_id: string
+  verification_plan_id: string
+  evidence_json: string
+  evidence_digest: string
+  started_event_id: string
+  started_cursor: number
+  terminal_event_name: string
+  terminal_event_id: string
+  terminal_cursor: number
+}>
+
 type DispatchJoinRow = OutboxRow &
   Readonly<{
     executor_claim_id: string | null
@@ -2368,6 +3516,10 @@ type DispatchJoinRow = OutboxRow &
     receipt_json: string | null
     receipt_digest: string | null
     receipt_cursor: number | null
+    uncertainty_id: string | null
+    uncertainty_json: string | null
+    uncertainty_digest: string | null
+    uncertainty_cursor: number | null
   }>
 
 type CapabilityReservationRow = Readonly<{

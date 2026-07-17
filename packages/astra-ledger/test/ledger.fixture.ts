@@ -32,6 +32,14 @@ export const secondExecutorClaimID = requireExecutorClaimID("0196e4cb-5d80-7b1d-
 export const alternateContentDigest = requireContentDigest(`sha256:${"9".repeat(64)}`)
 export const secondDecisionID = "0196e4cb-5d80-7b1d-8fb2-263b81670474"
 export const idempotencyKey = `sha256:${"b".repeat(64)}`
+export const receiptVerificationContext = {
+  admittedBaselineDigest: contentDigest,
+  postEffectWorkspaceDigest: contentDigest,
+  workspaceIdentity: { device: "16777233", inode: "42" },
+  targetIdentity: { device: "16777233", inode: "43" },
+  preflightLimits: { maxEntries: 128, maxFileBytes: 65536, maxTotalBytes: 262144, maxDurationMs: 1000 },
+  activationGuard: "allowed",
+} as const
 
 const actor: ActorRef = { kind: "user", subject: "user:emanuele" }
 

@@ -30,6 +30,7 @@ export type IdempotencyKey = Brand<string, "IdempotencyKey">
 export type ContentDigest = Brand<string, "ContentDigest">
 export type DispatchRequestID = Brand<string, "DispatchRequestID">
 export type ExecutorClaimID = Brand<string, "ExecutorClaimID">
+export type UncertaintyID = Brand<string, "UncertaintyID">
 
 export type UserActorRef = Readonly<{ kind: "user"; subject: string }>
 export type SystemActorRef = Readonly<{ kind: "system"; subject: string; componentDigest: ContentDigest }>
@@ -161,6 +162,19 @@ export type OperationReceipt = Readonly<{
     | Readonly<{ kind: "effect_observed"; beforeDigest: ContentDigest | null; afterDigest: ContentDigest }>
     | Readonly<{ kind: "no_effect_proved"; proofDigest: ContentDigest }>
     | Readonly<{ kind: "effect_unknown"; observationDigest: ContentDigest }>
+  verificationContext: Readonly<{
+    admittedBaselineDigest: ContentDigest
+    postEffectWorkspaceDigest: ContentDigest | null
+    workspaceIdentity: Readonly<{ device: string; inode: string }>
+    targetIdentity: Readonly<{ device: string; inode: string }> | null
+    preflightLimits: Readonly<{
+      maxEntries: number
+      maxFileBytes: number
+      maxTotalBytes: number
+      maxDurationMs: number
+    }>
+    activationGuard: "allowed" | "blocked"
+  }>
   output: Readonly<{ digest: ContentDigest; bytes: number; preview: string }>
 }>
 
@@ -180,6 +194,32 @@ export type OperationEvidence = Readonly<{
     }>
   >
   limitations: ReadonlyArray<string>
+}>
+
+export type OperationVerificationStart = Readonly<{
+  evidenceID: EvidenceID
+  operationID: OperationID
+  receiptID: ReceiptID
+  verificationPlanID: VerificationPlanID
+  verifier: Readonly<{ identity: string; version: string; digest: ContentDigest }>
+  snapshotDigest: ContentDigest
+  observedAt: string
+}>
+
+export type OperationEffectUncertainty = Readonly<{
+  uncertaintyID: UncertaintyID
+  operationID: OperationID
+  attemptID: AttemptID
+  dispatchRequestID: DispatchRequestID
+  executorClaimID: ExecutorClaimID
+  capabilityGrantID: CapabilityGrantID
+  fencingToken: number
+  reason: "claimed_without_receipt"
+  observedAt: string
+  targetObservation: Readonly<{
+    state: "absent" | "present" | "unavailable"
+    digest: ContentDigest
+  }>
 }>
 
 export type OperationEventName = OperationEvent
@@ -240,6 +280,10 @@ export function parseDispatchRequestID(input: unknown, path = "$"): OperationCon
 
 export function parseExecutorClaimID(input: unknown, path = "$"): OperationContractParseResult<ExecutorClaimID> {
   return parseUUID<ExecutorClaimID>(input, path)
+}
+
+export function parseUncertaintyID(input: unknown, path = "$"): OperationContractParseResult<UncertaintyID> {
+  return parseUUID<UncertaintyID>(input, path)
 }
 
 export function parseOperationIdentity(
@@ -663,6 +707,7 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
       "startedAt",
       "endedAt",
       "observation",
+      "verificationContext",
       "output",
     ],
     path,
@@ -695,6 +740,11 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
   if (Date.parse(endedAt.value) < Date.parse(startedAt.value)) return rejected(`${path}.endedAt`, "precedes_started_at")
   const observation = parseReceiptObservation(record.value.observation, `${path}.observation`)
   if (!observation.ok) return observation
+  const verificationContext = parseReceiptVerificationContext(
+    record.value.verificationContext,
+    `${path}.verificationContext`,
+  )
+  if (!verificationContext.ok) return verificationContext
   const output = parseReceiptOutput(record.value.output, `${path}.output`)
   if (!output.ok) return output
   return parsed({
@@ -711,6 +761,7 @@ export function parseOperationReceipt(input: unknown, path = "$"): OperationCont
     startedAt: startedAt.value,
     endedAt: endedAt.value,
     observation: observation.value,
+    verificationContext: verificationContext.value,
     output: output.value,
   })
 }
@@ -763,6 +814,109 @@ export function parseOperationEvidence(input: unknown, path = "$"): OperationCon
     observedAt: observedAt.value,
     criteria: criteria.value,
     limitations: limitations.value,
+  })
+}
+
+export function parseOperationVerificationStart(
+  input: unknown,
+  path = "$",
+): OperationContractParseResult<OperationVerificationStart> {
+  const record = parseExactRecord(
+    input,
+    ["evidenceID", "operationID", "receiptID", "verificationPlanID", "verifier", "snapshotDigest", "observedAt"],
+    path,
+  )
+  if (!record.ok) return record
+  const evidenceID = parseUUID<EvidenceID>(record.value.evidenceID, `${path}.evidenceID`)
+  if (!evidenceID.ok) return evidenceID
+  const operationID = parseOperationID(record.value.operationID, `${path}.operationID`)
+  if (!operationID.ok) return operationID
+  const receiptID = parseUUID<ReceiptID>(record.value.receiptID, `${path}.receiptID`)
+  if (!receiptID.ok) return receiptID
+  const verificationPlanID = parseUUID<VerificationPlanID>(
+    record.value.verificationPlanID,
+    `${path}.verificationPlanID`,
+  )
+  if (!verificationPlanID.ok) return verificationPlanID
+  const verifier = parseAdapter(record.value.verifier, `${path}.verifier`)
+  if (!verifier.ok) return verifier
+  const snapshotDigest = parseDigest<ContentDigest>(record.value.snapshotDigest, `${path}.snapshotDigest`)
+  if (!snapshotDigest.ok) return snapshotDigest
+  const observedAt = parseCanonicalTimestamp(record.value.observedAt, `${path}.observedAt`)
+  if (!observedAt.ok) return observedAt
+  return parsed({
+    evidenceID: evidenceID.value,
+    operationID: operationID.value,
+    receiptID: receiptID.value,
+    verificationPlanID: verificationPlanID.value,
+    verifier: verifier.value,
+    snapshotDigest: snapshotDigest.value,
+    observedAt: observedAt.value,
+  })
+}
+
+export function parseOperationEffectUncertainty(
+  input: unknown,
+  path = "$",
+): OperationContractParseResult<OperationEffectUncertainty> {
+  const record = parseExactRecord(
+    input,
+    [
+      "uncertaintyID",
+      "operationID",
+      "attemptID",
+      "dispatchRequestID",
+      "executorClaimID",
+      "capabilityGrantID",
+      "fencingToken",
+      "reason",
+      "observedAt",
+      "targetObservation",
+    ],
+    path,
+  )
+  if (!record.ok) return record
+  const uncertaintyID = parseUUID<UncertaintyID>(record.value.uncertaintyID, `${path}.uncertaintyID`)
+  if (!uncertaintyID.ok) return uncertaintyID
+  const operationID = parseOperationID(record.value.operationID, `${path}.operationID`)
+  if (!operationID.ok) return operationID
+  const attemptID = parseAttemptID(record.value.attemptID, `${path}.attemptID`)
+  if (!attemptID.ok) return attemptID
+  const dispatchRequestID = parseDispatchRequestID(record.value.dispatchRequestID, `${path}.dispatchRequestID`)
+  if (!dispatchRequestID.ok) return dispatchRequestID
+  const executorClaimID = parseExecutorClaimID(record.value.executorClaimID, `${path}.executorClaimID`)
+  if (!executorClaimID.ok) return executorClaimID
+  const capabilityGrantID = parseCapabilityGrantID(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
+  if (!capabilityGrantID.ok) return capabilityGrantID
+  const fencingToken = parsePositiveInteger(record.value.fencingToken, `${path}.fencingToken`)
+  if (!fencingToken.ok) return fencingToken
+  if (record.value.reason !== "claimed_without_receipt") {
+    return rejected(`${path}.reason`, "unsupported_uncertainty_reason")
+  }
+  const observedAt = parseCanonicalTimestamp(record.value.observedAt, `${path}.observedAt`)
+  if (!observedAt.ok) return observedAt
+  const observation = parseExactRecord(record.value.targetObservation, ["state", "digest"], `${path}.targetObservation`)
+  if (!observation.ok) return observation
+  if (
+    observation.value.state !== "absent" &&
+    observation.value.state !== "present" &&
+    observation.value.state !== "unavailable"
+  ) {
+    return rejected(`${path}.targetObservation.state`, "unsupported_target_observation")
+  }
+  const observationDigest = parseDigest<ContentDigest>(observation.value.digest, `${path}.targetObservation.digest`)
+  if (!observationDigest.ok) return observationDigest
+  return parsed({
+    uncertaintyID: uncertaintyID.value,
+    operationID: operationID.value,
+    attemptID: attemptID.value,
+    dispatchRequestID: dispatchRequestID.value,
+    executorClaimID: executorClaimID.value,
+    capabilityGrantID: capabilityGrantID.value,
+    fencingToken: fencingToken.value,
+    reason: record.value.reason,
+    observedAt: observedAt.value,
+    targetObservation: { state: observation.value.state, digest: observationDigest.value },
   })
 }
 
@@ -1012,6 +1166,72 @@ function parseReceiptObservation(
     return parsed({ kind: "effect_unknown", observationDigest: observationDigest.value })
   }
   return rejected(`${path}.kind`, "unsupported_receipt_observation")
+}
+
+function parseReceiptVerificationContext(
+  input: unknown,
+  path: string,
+): OperationContractParseResult<OperationReceipt["verificationContext"]> {
+  const record = parseExactRecord(
+    input,
+    [
+      "admittedBaselineDigest",
+      "postEffectWorkspaceDigest",
+      "workspaceIdentity",
+      "targetIdentity",
+      "preflightLimits",
+      "activationGuard",
+    ],
+    path,
+  )
+  if (!record.ok) return record
+  const admittedBaselineDigest = parseDigest<ContentDigest>(
+    record.value.admittedBaselineDigest,
+    `${path}.admittedBaselineDigest`,
+  )
+  if (!admittedBaselineDigest.ok) return admittedBaselineDigest
+  const postEffectWorkspaceDigest = parseNullableDigest(
+    record.value.postEffectWorkspaceDigest,
+    `${path}.postEffectWorkspaceDigest`,
+  )
+  if (!postEffectWorkspaceDigest.ok) return postEffectWorkspaceDigest
+  const workspaceIdentity = parseWorkspaceIdentity(record.value.workspaceIdentity, `${path}.workspaceIdentity`)
+  if (!workspaceIdentity.ok) return workspaceIdentity
+  const targetIdentity =
+    record.value.targetIdentity === null
+      ? parsed(null)
+      : parseWorkspaceIdentity(record.value.targetIdentity, `${path}.targetIdentity`)
+  if (!targetIdentity.ok) return targetIdentity
+  const limitsRecord = parseExactRecord(
+    record.value.preflightLimits,
+    ["maxEntries", "maxFileBytes", "maxTotalBytes", "maxDurationMs"],
+    `${path}.preflightLimits`,
+  )
+  if (!limitsRecord.ok) return limitsRecord
+  const maxEntries = parsePositiveInteger(limitsRecord.value.maxEntries, `${path}.preflightLimits.maxEntries`)
+  if (!maxEntries.ok) return maxEntries
+  const maxFileBytes = parsePositiveInteger(limitsRecord.value.maxFileBytes, `${path}.preflightLimits.maxFileBytes`)
+  if (!maxFileBytes.ok) return maxFileBytes
+  const maxTotalBytes = parsePositiveInteger(limitsRecord.value.maxTotalBytes, `${path}.preflightLimits.maxTotalBytes`)
+  if (!maxTotalBytes.ok) return maxTotalBytes
+  const maxDurationMs = parsePositiveInteger(limitsRecord.value.maxDurationMs, `${path}.preflightLimits.maxDurationMs`)
+  if (!maxDurationMs.ok) return maxDurationMs
+  if (record.value.activationGuard !== "allowed" && record.value.activationGuard !== "blocked") {
+    return rejected(`${path}.activationGuard`, "unsupported_activation_guard")
+  }
+  return parsed({
+    admittedBaselineDigest: admittedBaselineDigest.value,
+    postEffectWorkspaceDigest: postEffectWorkspaceDigest.value,
+    workspaceIdentity: workspaceIdentity.value,
+    targetIdentity: targetIdentity.value,
+    preflightLimits: {
+      maxEntries: maxEntries.value,
+      maxFileBytes: maxFileBytes.value,
+      maxTotalBytes: maxTotalBytes.value,
+      maxDurationMs: maxDurationMs.value,
+    },
+    activationGuard: record.value.activationGuard,
+  })
 }
 
 function parseReceiptOutput(input: unknown, path: string): OperationContractParseResult<OperationReceipt["output"]> {

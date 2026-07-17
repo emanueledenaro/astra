@@ -7,7 +7,7 @@ import { SqliteClient } from "@effect/sql-sqlite-bun"
 import { Effect } from "effect"
 import type { SqlClient as SqlClientService } from "effect/unstable/sql/SqlClient"
 import { makeReceiptSpool } from "../src"
-import { makeReceiptSpoolWithFault } from "../src/testing"
+import { makeReceiptSpoolWithClock, makeReceiptSpoolWithFault } from "../src/testing"
 
 const withDatabase = <A, E>(filename: string, effect: Effect.Effect<A, E, SqlClientService>) =>
   Effect.runPromise(effect.pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped))
@@ -33,6 +33,14 @@ const receipt = requireReceipt({
     kind: "effect_observed",
     beforeDigest: null,
     afterDigest: `sha256:${"8".repeat(64)}`,
+  },
+  verificationContext: {
+    admittedBaselineDigest: `sha256:${"d".repeat(64)}`,
+    postEffectWorkspaceDigest: `sha256:${"e".repeat(64)}`,
+    workspaceIdentity: { device: "1", inode: "2" },
+    targetIdentity: { device: "1", inode: "3" },
+    preflightLimits: { maxEntries: 128, maxFileBytes: 65536, maxTotalBytes: 262144, maxDurationMs: 1000 },
+    activationGuard: "allowed",
   },
   output: {
     digest: `sha256:${"7".repeat(64)}`,
@@ -60,6 +68,7 @@ describe("durable executor receipt spool", () => {
           expect((yield* spool.put(receipt)).kind).toBe("inserted")
           expect((yield* spool.put(receipt)).kind).toBe("replayed")
           expect("delete" in spool).toBeFalse()
+          expect("markIngested" in spool).toBeFalse()
         }),
       )
       await withDatabase(
@@ -102,17 +111,17 @@ describe("durable executor receipt spool", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const spool = yield* makeReceiptSpool()
+        const spool = yield* makeReceiptSpoolWithClock(() => "2026-07-17T10:00:06.000Z")
         yield* spool.initialize()
         yield* spool.put(receipt)
-        const acknowledged = yield* spool.markIngested(acknowledgement)
+        const acknowledged = yield* spool.acknowledgeIngestedReceipt(acknowledgement)
         expect(acknowledged.kind).toBe("acknowledged")
-        expect((yield* spool.markIngested(acknowledgement)).kind).toBe("replayed")
+        expect((yield* spool.acknowledgeIngestedReceipt(acknowledgement)).kind).toBe("replayed")
         expect(yield* spool.listPending({ limit: 10 })).toEqual([])
         expect((yield* spool.get(receipt.receiptID))?.receipt).toEqual(receipt)
 
         const conflict = yield* spool
-          .markIngested({ ...acknowledgement, ledgerEventDigest: `sha256:${"5".repeat(64)}` })
+          .acknowledgeIngestedReceipt({ ...acknowledgement, ledgerEventDigest: `sha256:${"5".repeat(64)}` })
           .pipe(Effect.flip)
         expect(conflict._tag).toBe("ReceiptSpoolConflictError")
       }),
@@ -132,9 +141,9 @@ describe("durable executor receipt spool", () => {
         yield* spool.put(receipt)
 
         const acknowledgementFaultSpool = yield* makeReceiptSpoolWithFault("after_acknowledgement_insert")
-        expect((yield* acknowledgementFaultSpool.markIngested(acknowledgement).pipe(Effect.flip))._tag).toBe(
-          "ReceiptSpoolInjectedFault",
-        )
+        expect(
+          (yield* acknowledgementFaultSpool.acknowledgeIngestedReceipt(acknowledgement).pipe(Effect.flip))._tag,
+        ).toBe("ReceiptSpoolInjectedFault")
         expect(yield* spool.listPending({ limit: 10 })).toHaveLength(1)
       }),
     )
