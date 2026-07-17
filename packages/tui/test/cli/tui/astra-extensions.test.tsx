@@ -13,6 +13,7 @@ import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 import type { AstraExtensionInventoryClient } from "../../../src/astra/extension-inventory-client"
+import type { AstraMcpActivationClient } from "../../../src/astra/mcp-activation-client"
 import { parseContentDigest } from "@astra/domain/operation-contract"
 
 test("keeps the Astra Extensions surface out of non-Astra OpenCode", () => {
@@ -75,7 +76,7 @@ test("opens Astra /extensions inertly, previews exact authority, and shows inact
       },
     } satisfies TuiPluginApi
 
-    registerAstraAppFeatures(api, authority, undefined, undefined, undefined, undefined, undefined, undefined, inventoryClient)
+    registerAstraAppFeatures(api, authority, undefined, undefined, undefined, undefined, undefined, undefined, inventoryClient, undefined, mcpClient)
     const open = commands.get("astra.extensions.open")
     expect(open?.slashName).toBe("extensions")
     void keymap.dispatchCommand("astra.extensions.open")
@@ -100,7 +101,7 @@ test("opens Astra /extensions inertly, previews exact authority, and shows inact
     expect(frame).toContain("NOT INSPECTED • NOT VERIFIED")
     expect(frame).toContain("STATIC JSON/JSONC • NO ACTIVATION")
     expect(frame).toContain("NO AUTOMATIC discovery, initialization, or activation")
-    expect(frame).toContain("no plugin or MCP is activated")
+    expect(frame).toContain("M activate eligible MCP")
     expect(effects).toEqual([])
     expect(current.name).toBe("astra-extensions")
     dispatchCommand("astra.extensions.inventory")
@@ -113,6 +114,18 @@ test("opens Astra /extensions inertly, previews exact authority, and shows inact
     const completed = await app.waitForFrame((value) => value.includes("Plugin candidate abcdef12"))
     expect(completed).toContain("INACTIVE • NOT VERIFIED")
     expect(calls).toEqual(["prepare", "approve"])
+    dispatchCommand("astra.extensions.mcp.prepare")
+    const mcpPreview = await app.waitForFrame((value) => value.includes("MCP ACTIVATION • AWAITING_DECISION"))
+    expect(mcpPreview).toContain("NETWORK EGRESS — EXACT DESTINATION")
+    expect(mcpPreview).toContain("NO CREDENTIALS • NO WORKSPACE ROOT • INSTRUCTIONS WITHHELD")
+    expect(mcpPreview).toContain("CATALOG ONLY • INVOCATION FORBIDDEN")
+    dispatchCommand("astra.extensions.mcp.approve")
+    const activeMcp = await app.waitForFrame((value) => value.includes("1 tools observed • S stop"))
+    expect(activeMcp).toContain("MCP ACTIVATION • ACTIVE • NOT VERIFIED")
+    dispatchCommand("astra.extensions.mcp.stop")
+    const stoppedMcp = await app.waitForFrame((value) => value.includes("COMPLETED_OBSERVED_NOT_VERIFIED"))
+    expect(stoppedMcp).toContain("1 tools")
+    expect(mcpCalls).toEqual(["prepare", "approve", "stop"])
     dispatchCommand("astra.extensions.inventory")
     const nextPreview = await app.waitForFrame((value) => value.includes("AWAITING A/D"))
     expect(nextPreview).not.toContain("Plugin candidate abcdef12")
@@ -180,6 +193,17 @@ const inventoryClient = {
           state: "inactive",
           verification: "not_verified",
         },
+        {
+          candidateID: contentDigest("d"),
+          kind: "mcp",
+          displayName: "MCP candidate deadbeef",
+          source: "config",
+          sourcePath: "opencode.json",
+          referenceClass: "remote",
+          referenceDigest: contentDigest("e"),
+          state: "inactive",
+          verification: "not_verified",
+        },
       ],
       verification: "not_verified",
     } as const
@@ -187,10 +211,63 @@ const inventoryClient = {
   dispose() {},
 } satisfies AstraExtensionInventoryClient
 
+const mcpCalls: string[] = []
+let completeMcp: ((result: Awaited<ReturnType<AstraMcpActivationClient["decide"]>>) => void) | undefined
+const mcpProposalID = "50000000-0000-4000-8000-000000000001"
+const mcpClient = {
+  async prepare(candidateID) {
+    mcpCalls.push("prepare")
+    expect(candidateID).toBe(contentDigest("d"))
+    return {
+      schemaVersion: 1,
+      requestId: "60000000-0000-4000-8000-000000000001",
+      status: "prepared",
+      preview: {
+        schemaVersion: 1,
+        proposalID: mcpProposalID,
+        candidateID: plainDigest("d"),
+        displayName: "MCP candidate deadbeef",
+        sourcePath: "opencode.json",
+        transport: "streamable_http",
+        destination: "public_https_withheld",
+        leaseExpiresAt: "2026-07-18T12:15:00.000Z",
+        capabilityDigest: plainDigest("f"),
+        boundaryLabel: "HOST EXECUTION — NO SANDBOX",
+        networkLabel: "NETWORK EGRESS — EXACT DESTINATION",
+        requestBudget: ["initialize", "notifications/initialized", "tools/list"],
+        credentials: "none",
+        workspaceRootShared: "none",
+        redirects: "forbidden",
+        retries: "none",
+        reconnect: "none",
+        instructions: "withheld",
+        toolInvocation: "forbidden",
+        verification: "not_verified",
+      },
+    } as const
+  },
+  decide(proposalID, decision, onProgress) {
+    mcpCalls.push(decision)
+    expect(proposalID).toBe(mcpProposalID)
+    onProgress?.({ schemaVersion: 1, requestId: "70000000-0000-4000-8000-000000000001", proposalID, operationID: proposalID, status: "active", catalogCount: 1, leaseExpiresAt: "2026-07-18T12:15:00.000Z", verification: "not_verified" })
+    return new Promise((complete) => { completeMcp = complete })
+  },
+  async stop(proposalID) {
+    mcpCalls.push("stop")
+    completeMcp?.({ schemaVersion: 1, requestId: "80000000-0000-4000-8000-000000000001", proposalID, operationID: proposalID, status: "completed_observed_not_verified", receiptID: "90000000-0000-4000-8000-000000000001", catalogCount: 1, verification: "not_verified" })
+    return { schemaVersion: 1, requestId: "a0000000-0000-4000-8000-000000000001", proposalID, status: "stop_requested" } as const
+  },
+  dispose() {},
+} satisfies AstraMcpActivationClient
+
 function contentDigest(character: string) {
   const parsed = parseContentDigest(`sha256:${character.repeat(64)}`)
   if (!parsed.ok) throw new Error("Invalid digest fixture")
   return parsed.value
+}
+
+function plainDigest(character: string): `sha256:${string}` {
+  return `sha256:${character.repeat(64)}`
 }
 
 const authority = {

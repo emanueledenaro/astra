@@ -20,7 +20,12 @@ import { createAstraGitUnstageControl } from "./git-unstage-control"
 import { createAstraGitStageControl } from "./git-stage-control"
 import { createAstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
 import { createAstraExtensionInventoryControl } from "./extension-inventory-control"
-import { inspectTrustedExtensionInventoryHelper } from "@astra/runtime/extension-inventory-operation"
+import {
+  createParentPrivateMcpRegistry,
+  inspectTrustedExtensionInventoryHelper,
+} from "@astra/runtime/extension-inventory-operation"
+import { createAstraMcpActivationControl } from "./mcp-activation-control"
+import { createAstraMcpActivationAdapter } from "./mcp-activation-adapter"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -130,6 +135,7 @@ export async function launchAstraTui(session: OpenedWorkspace) {
   let provider: AstraProviderControlServer | undefined
   let authReader: ParentAnthropicAuthReaderHandle | undefined
   let child: ReturnType<typeof Bun.spawn> | undefined
+  const mcpRegistry = createParentPrivateMcpRegistry()
   const terminate = (signal: NodeJS.Signals) => {
     if (child && child.exitCode === null) child.kill(signal)
   }
@@ -155,6 +161,13 @@ export async function launchAstraTui(session: OpenedWorkspace) {
       ),
       ledgerFilename: operationLedgerPath(),
       spoolFilename: receiptSpoolPath(),
+      mcpRegistry,
+    })
+    const mcpActivationControl = createAstraMcpActivationControl(session, {
+      registry: mcpRegistry,
+      adapter: createAstraMcpActivationAdapter(),
+      ledgerFilename: operationLedgerPath(),
+      spoolFilename: receiptSpoolPath(),
     })
     control = await startAstraTuiControlServer({
       directory: authority.directory,
@@ -178,6 +191,7 @@ export async function launchAstraTui(session: OpenedWorkspace) {
       }),
       skillActivationControl,
       extensionInventoryControl,
+      mcpActivationControl,
     })
     authReader = await loadParentAnthropicAuthReader()
     const credentialBroker = createParentProviderCredentialBroker({ auth: authReader })
@@ -214,6 +228,7 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         await control?.close()
       }
     } finally {
+      mcpRegistry.clear()
       await rm(authority.directory, { recursive: true, force: true })
     }
   }

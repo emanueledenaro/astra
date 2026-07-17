@@ -18,6 +18,10 @@ import {
   type ExtensionInventoryControlRequest,
 } from "@astra/domain/extension-inventory-control"
 import {
+  parseMcpActivationControlRequest,
+  type McpActivationControlRequest,
+} from "@astra/domain/mcp-activation-control"
+import {
   controlledWriteBoundaryLabel,
   controlledWriteNetworkWarning,
   parseControlledWriteDecisionRequest,
@@ -63,6 +67,9 @@ import { serveAstraGovernedWorkspaceSearchControlRequest } from "./governed-work
 import type { AstraExtensionInventoryControl } from "./extension-inventory-control"
 import { createAstraExtensionInventoryControlHandler } from "./extension-inventory-control-handler"
 import { serveAstraExtensionInventoryControlRequest } from "./extension-inventory-control-server-hook"
+import type { AstraMcpActivationControl } from "./mcp-activation-control"
+import { createAstraMcpActivationControlHandler } from "./mcp-activation-control-handler"
+import { serveAstraMcpActivationControlRequest } from "./mcp-activation-control-server-hook"
 
 const requestLimitBytes = 32 * 1_024
 const maximumRequestsPerSession = 1_024
@@ -93,6 +100,7 @@ type ControlRequest =
   | ControlledWriteDecisionRequest
   | SkillControlRequest
   | ExtensionInventoryControlRequest
+  | McpActivationControlRequest
 
 export type AstraTuiControlServer = Readonly<{
   socketPath: string
@@ -111,6 +119,7 @@ export type AstraTuiControlServerInput = Readonly<{
   skillActivationControl?: AstraSkillActivationControl
   governedWorkspaceSearchControl?: AstraGovernedWorkspaceSearchControl
   extensionInventoryControl?: AstraExtensionInventoryControl
+  mcpActivationControl?: AstraMcpActivationControl
 }>
 
 export type AstraTuiControlServerDependencies = Readonly<{
@@ -170,6 +179,13 @@ export async function startAstraTuiControlServer(
         timeoutMs: dependencies.extensionInventoryTimeoutMs ?? defaultExtensionInventoryTimeoutMs,
       })
     : undefined
+  const mcpActivationHandler = input.mcpActivationControl
+    ? createAstraMcpActivationControlHandler({
+        sessionID: input.sessionID,
+        token,
+        control: input.mcpActivationControl,
+      })
+    : undefined
   let activeRequestID: string | undefined
   let cancelActiveInspection: (() => void) | undefined
   let accepting = true
@@ -220,6 +236,15 @@ export async function startAstraTuiControlServer(
           }
           socket.setTimeout(0)
           await serveAstraExtensionInventoryControlRequest(socket, request, extensionInventoryHandler)
+          return
+        }
+        if (isMcpActivationRequest(request)) {
+          if (!mcpActivationHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraMcpActivationControlRequest(socket, request, mcpActivationHandler)
           return
         }
         if (!authorized(request, input.sessionID, token)) {
@@ -314,9 +339,10 @@ export async function startAstraTuiControlServer(
       accepting = false
       cancelActiveInspection?.()
       cancelActiveInspection = undefined
+      await mcpActivationHandler?.close()
       for (const socket of sockets) socket.destroy()
       await closeServer(server)
-      await Promise.allSettled(pending)
+      await Promise.race([Promise.allSettled(pending), boundedDelay(5_000)])
       await rm(socketPath, { force: true })
     },
   }
@@ -363,6 +389,8 @@ function parseRequest(input: string): ControlRequest | null {
     if (workspaceSearch.ok) return workspaceSearch.value
     const extensionInventory = parseExtensionInventoryControlRequest(value)
     if (extensionInventory.ok) return extensionInventory.value
+    const mcpActivation = parseMcpActivationControlRequest(value)
+    if (mcpActivation.ok) return mcpActivation.value
     const gitUnstage = parseGitUnstageControlRequest(value)
     if (gitUnstage.ok) return gitUnstage.value
     const prepare = parseControlledWritePrepareRequest(value)
@@ -419,6 +447,10 @@ function isWorkspaceSearchRequest(request: ControlRequest): request is Workspace
 
 function isExtensionInventoryRequest(request: ControlRequest): request is ExtensionInventoryControlRequest {
   return request.method === "extension-inventory.prepare" || request.method === "extension-inventory.decide"
+}
+
+function isMcpActivationRequest(request: ControlRequest): request is McpActivationControlRequest {
+  return request.method === "mcp-activation.prepare" || request.method === "mcp-activation.decide" || request.method === "mcp-activation.stop"
 }
 
 function isSkillRequest(request: ControlRequest): request is SkillControlRequest {
@@ -971,6 +1003,9 @@ function encodeBlockedTerminal(request: ControlRequest, reason: string) {
   if (isExtensionInventoryRequest(request)) {
     throw new Error("Extension inventory requests are owned by their dedicated handler")
   }
+  if (isMcpActivationRequest(request)) {
+    throw new Error("MCP activation requests are owned by their dedicated handler")
+  }
   if (request.method === "git.inspect") return encodeTerminal(request.requestId, blocked(mapControlBlockReason(reason)))
   if (isSkillRequest(request)) return encodeSkillTerminal(request.requestId, blockedSkillResult(request, reason))
   if (request.method === "controlled-write.prepare") {
@@ -989,6 +1024,13 @@ function mapControlBlockReason(reason: string): GitControlInspectionBlockReason 
 function write(socket: Socket, value: string) {
   return new Promise<boolean>((complete) => {
     socket.write(value, (error) => complete(error === undefined || error === null))
+  })
+}
+
+function boundedDelay(milliseconds: number) {
+  return new Promise<void>((complete) => {
+    const timer = setTimeout(complete, milliseconds)
+    timer.unref?.()
   })
 }
 

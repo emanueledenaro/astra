@@ -19,6 +19,7 @@ import {
 } from "./governed-workspace-search-client"
 import { registerAstraGovernedWorkspaceSearch } from "../feature-plugins/system/astra-governed-workspace-search"
 import { createAstraExtensionInventoryClient, type AstraExtensionInventoryClient } from "./extension-inventory-client"
+import { createAstraMcpActivationClient, type AstraMcpActivationClient } from "./mcp-activation-client"
 
 /** Registers built-in Astra surfaces from the authority validated at process admission. */
 export function registerAstraAppFeatures(
@@ -32,6 +33,7 @@ export function registerAstraAppFeatures(
   governedWorkspaceSearchClient?: AstraGovernedWorkspaceSearchClient,
   extensionInventoryClient?: AstraExtensionInventoryClient,
   gitStageClient?: AstraGitStageClient,
+  mcpActivationClient?: AstraMcpActivationClient,
 ) {
   registerAstraChat(api, authority, providerClient)
   registerAstraGitControlPlane(
@@ -83,5 +85,6 @@ export function registerAstraAppFeatures(
     api,
     authority,
     extensionInventoryClient ?? createAstraExtensionInventoryClient(process.env, authority.sessionID, authority.mode),
+    mcpActivationClient ?? createAstraMcpActivationClient(process.env, authority.sessionID, authority.mode),
   )
 }

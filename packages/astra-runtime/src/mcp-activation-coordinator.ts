@@ -112,6 +112,7 @@ export type McpActivationDependencies = Readonly<{
   onClaimPersisted?: () => void
   onSourceRevalidated?: () => void
   onActive?: (active: Readonly<{ operationID: string; catalogCount: number; leaseExpiresAt: string }>) => void
+  abortSignal?: AbortSignal
 }>
 
 export type DurableMcpActivationResult = Readonly<{
@@ -318,6 +319,7 @@ export async function executeMcpActivation(
           dependencies.adapter,
           { endpoint: facts.proposal.candidate.endpoint, leaseExpiresAt: facts.leaseExpiresAt },
           Math.max(1, Date.parse(facts.leaseExpiresAt) - now()),
+          dependencies.abortSignal,
         ),
       )
     } catch {
@@ -330,6 +332,28 @@ export async function executeMcpActivation(
         new Date(now()).toISOString(),
         { kind: "effect_unknown" },
       )
+    }
+    if (dependencies.abortSignal?.aborted) {
+      try {
+        await closeBounded(active.close, Math.min(5_000, Math.max(1, Date.parse(facts.leaseExpiresAt) - now())))
+      } catch {
+        dependencies.sessionGate.quarantine(facts.operationID)
+        return recordReceipt(
+          input,
+          facts,
+          claimed.claim.fencingToken,
+          startedAt,
+          new Date(now()).toISOString(),
+          { kind: "effect_unknown" },
+        )
+      }
+      dependencies.sessionGate.release(facts.operationID)
+      return recordReceipt(input, facts, claimed.claim.fencingToken, startedAt, new Date(now()).toISOString(), {
+        kind: "closed_observed",
+        catalog: active.catalog,
+        protocolVersion: active.protocolVersion,
+        server: active.server,
+      })
     }
     const activeView = Object.freeze({
       operationID: facts.operationID,
@@ -388,18 +412,27 @@ function connectBounded(
   adapter: McpActivationAdapter,
   input: Readonly<{ endpoint: string; leaseExpiresAt: string }>,
   timeoutMilliseconds: number,
+  externalSignal?: AbortSignal,
 ) {
   const controller = new AbortController()
   return new Promise<Awaited<ReturnType<McpActivationAdapter["connect"]>>>((resolveConnect, rejectConnect) => {
     let settled = false
-    const timer = setTimeout(() => {
+    const fail = () => {
       if (settled) return
       settled = true
+      clearTimeout(timer)
+      externalSignal?.removeEventListener("abort", fail)
       controller.abort()
       rejectConnect(new Error("The controlled MCP connection deadline elapsed"))
-    }, timeoutMilliseconds)
+    }
+    const timer = setTimeout(fail, timeoutMilliseconds)
     timer.unref?.()
-    void adapter.connect({ ...input, signal: controller.signal }).then(
+    if (externalSignal?.aborted) {
+      fail()
+      return
+    }
+    externalSignal?.addEventListener("abort", fail, { once: true })
+    void Promise.resolve().then(() => adapter.connect({ ...input, signal: controller.signal })).then(
       (active) => {
         if (settled) {
           void active.close().catch(() => undefined)
@@ -407,12 +440,14 @@ function connectBounded(
         }
         settled = true
         clearTimeout(timer)
+        externalSignal?.removeEventListener("abort", fail)
         resolveConnect(active)
       },
       () => {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        externalSignal?.removeEventListener("abort", fail)
         rejectConnect(new Error("The controlled MCP connection failed"))
       },
     )

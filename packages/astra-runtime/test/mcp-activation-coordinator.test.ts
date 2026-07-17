@@ -191,6 +191,36 @@ describe("durable MCP activation coordinator", () => {
     expect(calls).toBe(0)
   })
 
+  test("session shutdown aborts a connecting adapter and records uncertainty without late activation", async () => {
+    const fixture = await makeFixture("approved")
+    const controller = new AbortController()
+    let notifyStarted: (() => void) | undefined
+    const started = new Promise<void>((complete) => { notifyStarted = complete })
+    let aborted = false
+    const operation = executeMcpActivation(fixture.input, {
+      sessionGate: createMcpActivationSessionGate(),
+      adapter: {
+        descriptor: "astra-opencode:controlled-remote-mcp:v1",
+        connect(input) {
+          notifyStarted?.()
+          return new Promise((_, reject) => {
+            input.signal.addEventListener("abort", () => {
+              aborted = true
+              reject(new Error("aborted"))
+            }, { once: true })
+          })
+        },
+      },
+      awaitStop: async () => "session_close",
+      abortSignal: controller.signal,
+      now: fixture.now,
+    })
+    await started
+    controller.abort()
+    expect(await operation).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    expect(aborted).toBe(true)
+  })
+
   test("real loopback observes the durable claim before the exact bounded MCP exchange", async () => {
     let claimed = false
     const seen: string[] = []

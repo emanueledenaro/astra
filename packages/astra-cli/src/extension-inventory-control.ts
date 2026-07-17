@@ -6,6 +6,7 @@ import {
   ExtensionInventoryCoordinationError,
   type DurableExtensionInventoryResult,
   type ExecuteExtensionInventoryInput,
+  type ParentPrivateMcpRegistry,
 } from "@astra/runtime/extension-inventory-operation"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
 
@@ -53,6 +54,7 @@ export type AstraExtensionInventoryControlDependencies = Readonly<{
   operationID?: () => string
   propose?: typeof proposeExtensionInventory
   execute?: typeof executeExtensionInventory
+  mcpRegistry?: ParentPrivateMcpRegistry
 }>
 
 const maximumPreparedOperations = 8
@@ -131,7 +133,12 @@ export function createAstraExtensionInventoryControl(
         spoolFilename: dependencies.spoolFilename,
       }
       try {
-        return await execute(input)
+        return await execute(
+          input,
+          dependencies.mcpRegistry
+            ? { onPrivateMcpRegistrySnapshot: (snapshot) => dependencies.mcpRegistry!.replace(snapshot) }
+            : {},
+        )
       } catch (cause) {
         if (cause instanceof ExtensionInventoryCoordinationError && cause.code !== "invalid_input") {
           return Object.freeze({
