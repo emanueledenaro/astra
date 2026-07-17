@@ -1,7 +1,10 @@
+import { createHash } from "node:crypto"
+
 export const providerHostExecutionBoundaryLabel = "HOST EXECUTION — NO SANDBOX" as const
-export const providerNetworkExecutionBoundaryLabel =
-  "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX" as const
+export const providerNetworkExecutionBoundaryLabel = "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX" as const
 export const providerObservedCompletionLabel = "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED" as const
+export const providerSkillInstructionTrustLabel = "UNTRUSTED INSTRUCTION DATA" as const
+export const providerSkillInstructionAssuranceLabel = "OBSERVED NOT VERIFIED" as const
 export const providerControlRequestWireLimitBytes = 6 * 65_536 + 16_384
 export const providerControlResponseWireLimitBytes = 6 * 1_048_576 + 262_144
 
@@ -62,7 +65,9 @@ export type ProviderTurnPreview = Readonly<{
   providerID: "anthropic"
   modelID: string
   destination: Readonly<{ method: "POST"; origin: "https://api.anthropic.com"; path: "/v1/messages" }>
-  logicalPayload: Readonly<{ digest: string; bytes: number }>
+  logicalPayload: Readonly<{ digest: string; bytes: number; contextBindingDigest: string | null }>
+  providerCapabilityDigest: string
+  skillContext: ProviderTurnSkillContext | null
   headerNames: ReadonlyArray<string>
   credential: Readonly<{ accountFingerprint: string; headerName: "x-api-key" }>
   expiresAt: string
@@ -70,6 +75,39 @@ export type ProviderTurnPreview = Readonly<{
   networkBoundaryLabel: typeof providerNetworkExecutionBoundaryLabel
   assurance: "NOT VERIFIED"
 }>
+
+export type ProviderTurnSkillContext = Readonly<{
+  kind: "activated_skill"
+  activationOperationID: string
+  activationCapabilityDigest: string
+  name: string
+  provenance: "workspace_opencode"
+  instructionsDigest: string
+  trust: typeof providerSkillInstructionTrustLabel
+  resourceDiscovery: "none"
+  assurance: typeof providerSkillInstructionAssuranceLabel
+  disclosure: "included_in_provider_request"
+}>
+
+/** Computes the non-secret binding shown before provider consent. */
+export function computeProviderSkillContextBindingDigest(input: ProviderTurnSkillContext): `sha256:${string}` {
+  return `sha256:${createHash("sha256")
+    .update(
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: input.kind,
+        activationOperationID: input.activationOperationID,
+        activationCapabilityDigest: input.activationCapabilityDigest,
+        name: input.name,
+        provenance: input.provenance,
+        instructionsDigest: input.instructionsDigest,
+        trust: input.trust,
+        resourceDiscovery: input.resourceDiscovery,
+        assurance: input.assurance,
+      }),
+    )
+    .digest("hex")}`
+}
 
 export type ProviderTurnPrepareResult =
   | Readonly<{
@@ -91,6 +129,7 @@ export type ProviderTurnPrepareResult =
         | "control_busy"
         | "control_limit_reached"
         | "workspace_stale"
+        | "skill_context_unavailable"
         | "control_unavailable"
     }>
 
@@ -154,7 +193,7 @@ export type ProviderTurnDecisionResult =
         | "control_failed"
     }>
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/u
 const digestPattern = /^sha256:[0-9a-f]{64}$/u
 const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
@@ -200,10 +239,7 @@ export function parseProviderCatalogResult(input: unknown): ProviderCatalogResul
     if (record.reason !== "catalog_unavailable" && record.reason !== "control_unavailable") return null
     return record as ProviderCatalogResult
   }
-  if (
-    record.status !== "available" ||
-    !exactKeys(record, ["schemaVersion", "requestId", "status", "catalog"])
-  ) {
+  if (record.status !== "available" || !exactKeys(record, ["schemaVersion", "requestId", "status", "catalog"])) {
     return null
   }
   const catalog = parseCatalog(record.catalog)
@@ -333,7 +369,11 @@ function parseModel(input: unknown): ProviderControlModel | null {
   return {
     id: record.id,
     name: record.name,
-    limits: { context: limits.context, ...(inputLimit === undefined ? {} : { input: inputLimit }), output: limits.output },
+    limits: {
+      context: limits.context,
+      ...(inputLimit === undefined ? {} : { input: inputLimit }),
+      output: limits.output,
+    },
   }
 }
 
@@ -348,6 +388,8 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
       "modelID",
       "destination",
       "logicalPayload",
+      "providerCapabilityDigest",
+      "skillContext",
       "headerNames",
       "credential",
       "expiresAt",
@@ -370,6 +412,7 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
   const destination = plainRecord(record.destination)
   const payload = plainRecord(record.logicalPayload)
   const credential = plainRecord(record.credential)
+  const skillContext = record.skillContext === null ? null : parseSkillContext(record.skillContext)
   if (
     !destination ||
     !exactKeys(destination, ["method", "origin", "path"]) ||
@@ -377,9 +420,15 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
     destination.origin !== "https://api.anthropic.com" ||
     destination.path !== "/v1/messages" ||
     !payload ||
-    !exactKeys(payload, ["digest", "bytes"]) ||
+    !exactKeys(payload, ["digest", "bytes", "contextBindingDigest"]) ||
     !digest(payload.digest) ||
     !positive(payload.bytes) ||
+    (payload.contextBindingDigest !== null && !digest(payload.contextBindingDigest)) ||
+    !digest(record.providerCapabilityDigest) ||
+    (record.skillContext !== null && !skillContext) ||
+    (skillContext === null && payload.contextBindingDigest !== null) ||
+    (skillContext !== null &&
+      payload.contextBindingDigest !== computeProviderSkillContextBindingDigest(skillContext)) ||
     !Array.isArray(record.headerNames) ||
     record.headerNames.length !== 3 ||
     record.headerNames.some((name) => typeof name !== "string") ||
@@ -393,6 +442,39 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
     return null
   }
   return record as ProviderTurnPreview
+}
+
+function parseSkillContext(input: unknown): ProviderTurnSkillContext | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, [
+      "kind",
+      "activationOperationID",
+      "activationCapabilityDigest",
+      "name",
+      "provenance",
+      "instructionsDigest",
+      "trust",
+      "resourceDiscovery",
+      "assurance",
+      "disclosure",
+    ]) ||
+    record.kind !== "activated_skill" ||
+    !uuid(record.activationOperationID) ||
+    !digest(record.activationCapabilityDigest) ||
+    !display(record.name) ||
+    record.provenance !== "workspace_opencode" ||
+    !digest(record.instructionsDigest) ||
+    record.trust !== providerSkillInstructionTrustLabel ||
+    record.resourceDiscovery !== "none" ||
+    record.assurance !== providerSkillInstructionAssuranceLabel ||
+    record.disclosure !== "included_in_provider_request"
+  ) {
+    return null
+  }
+  // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- Exact runtime validation is the DTO boundary.
+  return record as ProviderTurnSkillContext
 }
 
 function parseResponse(input: unknown) {
@@ -422,6 +504,7 @@ const prepareBlockReasons = new Set([
   "control_busy",
   "control_limit_reached",
   "workspace_stale",
+  "skill_context_unavailable",
   "control_unavailable",
 ])
 const decisionBlockReasons = new Set([

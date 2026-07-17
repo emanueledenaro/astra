@@ -5,10 +5,7 @@ import { join, resolve } from "node:path"
 import type { GitRepositoryBaselineRevalidationResult } from "@astra/domain/git-repository-baseline"
 import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
 import type { GitRepositoryBaselineSnapshot } from "@astra/domain/git-repository-baseline"
-import type {
-  DurableSkillActivationResult,
-  SkillActivationProposal,
-} from "../../astra-runtime/src/skill-activation"
+import type { DurableSkillActivationResult, SkillActivationProposal } from "../../astra-runtime/src/skill-activation"
 import type {
   SkillInventoryCandidate,
   SkillInventoryLimits,
@@ -35,6 +32,10 @@ import type { AstraWorkspaceSessionResult } from "./workspace-session"
 type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }>
 
 export type TrustedPromptSkillBundle = Readonly<{
+  session: Readonly<{
+    sessionID: string
+    workspaceRoot: string
+  }>
   operationID: string
   capabilityDigest: `sha256:${string}`
   source: Readonly<{
@@ -52,6 +53,11 @@ export type TrustedPromptSkillBundle = Readonly<{
   assurance: "observed_not_verified"
 }>
 
+export type PromptSkillBundleTakeResult =
+  | Readonly<{ status: "none" }>
+  | Readonly<{ status: "taken"; bundle: TrustedPromptSkillBundle }>
+  | Readonly<{ status: "blocked"; reason: "bundle_busy" | "bundle_unavailable" }>
+
 export type AstraSkillActivationControl = Readonly<{
   inventory: (requestId: string) => Promise<PublicSkillInventoryResult>
   prepare: (requestId: string, inventoryID: string, candidateID: string) => Promise<SkillActivationPrepareResult>
@@ -61,7 +67,7 @@ export type AstraSkillActivationControl = Readonly<{
     decision: "approve" | "reject",
     onProgress?: (progress: SkillActivationProgress) => void,
   ) => Promise<SkillActivationDecisionResult>
-  takePromptBundle: () => Promise<TrustedPromptSkillBundle | null>
+  takePromptBundle: () => Promise<PromptSkillBundleTakeResult>
 }>
 
 type PreparedActivation = Readonly<{
@@ -114,12 +120,14 @@ export type AstraSkillActivationControlDependencies = Readonly<{
         privateRuntimeDirectory: string
       }>,
   ) => Promise<DurableSkillActivationResult>
-  cleanup: (input: Readonly<{
-    workspaceRoot: string
-    privateRuntimeDirectory: string
-    sessionID: string
-    capabilityGrantID: string
-  }>) => Promise<boolean>
+  cleanup: (
+    input: Readonly<{
+      workspaceRoot: string
+      privateRuntimeDirectory: string
+      sessionID: string
+      capabilityGrantID: string
+    }>,
+  ) => Promise<boolean>
 }>
 
 /**
@@ -309,21 +317,24 @@ export function createAstraSkillActivationControl(
     },
 
     async takePromptBundle() {
-      if (!completed || bundleTaken || bundleTaking) return null
+      if (bundleTaking) return Object.freeze({ status: "blocked", reason: "bundle_busy" })
+      if (!completed || bundleTaken) return Object.freeze({ status: "none" })
       bundleTaking = true
       const binding = completed
       try {
-        const bundle = await readPromptBundle(binding, authority.sessionID).catch(() => null)
-        if (!bundle) return null
-        const removed = await dependencies.cleanup({
-          workspaceRoot: session.report.root,
-          privateRuntimeDirectory: state.privateRuntimeDirectory,
-          sessionID: authority.sessionID,
-          capabilityGrantID: binding.capabilityGrantID,
-        }).catch(() => false)
-        if (!removed) return null
+        const bundle = await readPromptBundle(binding, authority.sessionID, session.report.root).catch(() => null)
+        if (!bundle) return Object.freeze({ status: "blocked", reason: "bundle_unavailable" })
+        const removed = await dependencies
+          .cleanup({
+            workspaceRoot: session.report.root,
+            privateRuntimeDirectory: state.privateRuntimeDirectory,
+            sessionID: authority.sessionID,
+            capabilityGrantID: binding.capabilityGrantID,
+          })
+          .catch(() => false)
+        if (!removed) return Object.freeze({ status: "blocked", reason: "bundle_unavailable" })
         bundleTaken = true
-        return bundle
+        return Object.freeze({ status: "taken", bundle })
       } finally {
         bundleTaking = false
       }
@@ -396,7 +407,8 @@ async function currentWorkspace(session: OpenedWorkspace, dependencies: AstraSki
     repository.status !== "current" ||
     repository.expectedSnapshotDigest !== session.repositoryBaseline.snapshotDigest ||
     repository.currentSnapshotDigest !== session.repositoryBaseline.snapshotDigest
-  ) return null
+  )
+    return null
   return current.report
 }
 
@@ -415,7 +427,11 @@ function publicCandidate(candidate: SkillInventoryCandidate): SkillInventoryCand
   })
 }
 
-async function readPromptBundle(binding: CompletedActivation, sessionID: string): Promise<TrustedPromptSkillBundle> {
+async function readPromptBundle(
+  binding: CompletedActivation,
+  sessionID: string,
+  workspaceRoot: string,
+): Promise<TrustedPromptSkillBundle> {
   const handle = await open(binding.bundlePath, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const facts = await handle.stat()
@@ -437,7 +453,12 @@ async function readPromptBundle(binding: CompletedActivation, sessionID: string)
     const after = await handle.stat()
     if (read.bytesRead !== facts.size || !sameFile(facts, after)) throw new Error("Private skill bundle drifted")
     const input: unknown = JSON.parse(bytes.subarray(0, read.bytesRead).toString("utf8"))
-    if (!record(input) || input.schemaVersion !== 1 || input.sessionID !== sessionID || input.operationID !== binding.operationID) {
+    if (
+      !record(input) ||
+      input.schemaVersion !== 1 ||
+      input.sessionID !== sessionID ||
+      input.operationID !== binding.operationID
+    ) {
       throw new Error("Private skill bundle binding mismatch")
     }
     if (input.capabilityDigest !== binding.capabilityDigest || input.assurance !== "observed_not_verified") {
@@ -453,8 +474,10 @@ async function readPromptBundle(binding: CompletedActivation, sessionID: string)
       digest(input.skill.instructions) !== binding.candidate.instructionsDigest ||
       input.skill.trust !== "untrusted_instruction_data" ||
       input.skill.resourceDiscovery !== "none"
-    ) throw new Error("Private skill bundle content mismatch")
+    )
+      throw new Error("Private skill bundle content mismatch")
     return Object.freeze({
+      session: Object.freeze({ sessionID, workspaceRoot }),
       operationID: binding.operationID,
       capabilityDigest: binding.capabilityDigest,
       source: Object.freeze({
@@ -483,23 +506,27 @@ function progress(
   status: SkillActivationProgress["status"],
 ) {
   try {
-    notify(Object.freeze({
-      schemaVersion: 1,
-      requestId,
-      proposalID: activation.proposalID,
-      operationID: activation.operationID,
-      status,
-      verification: "not_verified",
-    }))
+    notify(
+      Object.freeze({
+        schemaVersion: 1,
+        requestId,
+        proposalID: activation.proposalID,
+        operationID: activation.operationID,
+        status,
+        verification: "not_verified",
+      }),
+    )
   } catch {}
 }
 
 function exactProposal(proposal: SkillActivationProposal, input: PrepareInput, candidate: SkillInventoryCandidate) {
   if (candidate.candidateID !== input.plan.candidate.candidateID) return false
   const facts = makeSkillActivationOperationFacts(input)
-  return proposal.policyAskedAt === input.policyAskedAt &&
+  return (
+    proposal.policyAskedAt === input.policyAskedAt &&
     sameSkillActivationCapability(proposal.capability, facts.capability) &&
     canonicalJson(proposal.preview) === canonicalJson(facts.preview)
+  )
 }
 
 function blockedInventory(requestId: string, reason: string): PublicSkillInventoryResult {
@@ -532,18 +559,34 @@ function sameWorkspace(
   right: WorkspaceTrustReport | Readonly<{ root: string; device: string; inode: string }>,
 ) {
   if ("identity" in right) {
-    return left.root === right.root && left.identity?.device === right.identity?.device && left.identity?.inode === right.identity?.inode && left.securityDigest === right.securityDigest
+    return (
+      left.root === right.root &&
+      left.identity?.device === right.identity?.device &&
+      left.identity?.inode === right.identity?.inode &&
+      left.securityDigest === right.securityDigest
+    )
   }
   return left.root === right.root && left.identity?.device === right.device && left.identity?.inode === right.inode
 }
-function sameFile(left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>, right: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>) {
+function sameFile(
+  left: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>,
+  right: Awaited<ReturnType<Awaited<ReturnType<typeof open>>["stat"]>>,
+) {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs
 }
-function timestamp(input: number) { return new Date(input).toISOString() }
-function digest(input: string): `sha256:${string}` { return `sha256:${createHash("sha256").update(input).digest("hex")}` }
+function timestamp(input: number) {
+  return new Date(input).toISOString()
+}
+function digest(input: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(input).digest("hex")}`
+}
 function publicDigest(input: string): `sha256:${string}` {
   if (!/^sha256:[0-9a-f]{64}$/.test(input)) throw new TypeError("Invalid content digest")
   return `sha256:${input.slice(7)}`
 }
-function safeReason(input: string) { return /^[a-z][a-z0-9_]{0,63}$/.test(input) ? input : "control_failed" }
-function record(input: unknown): input is Record<string, unknown> { return typeof input === "object" && input !== null && !Array.isArray(input) }
+function safeReason(input: string) {
+  return /^[a-z][a-z0-9_]{0,63}$/.test(input) ? input : "control_failed"
+}
+function record(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input)
+}

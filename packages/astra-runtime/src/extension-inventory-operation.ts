@@ -35,7 +35,7 @@ import {
   type ExtensionInventoryHelperIdentity,
   type ExtensionInventoryProposal,
   type ExtensionInventoryReport,
-} from "../../astra-domain/src/extension-inventory-operation"
+} from "@astra/domain/extension-inventory-operation"
 import {
   canonicalJson,
   deterministicUUID,

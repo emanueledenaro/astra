@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --config=/dev/null --no-env-file --no-install
 
 import { fileURLToPath } from "node:url"
 import {
@@ -13,7 +13,7 @@ import {
 import { operationLedgerPath, receiptSpoolPath } from "./app-state"
 import { createTerminalIO } from "./terminal-io"
 import { openAstraWorkspaceSession } from "./workspace-session"
-import { launchAstraTui } from "./tui-launcher"
+import { parseAstraArguments } from "./arguments"
 
 type DeniedLedgerModule = Readonly<{
   recordDeniedControlledWrite: (
@@ -86,20 +86,30 @@ type GitInspectionModule = Readonly<{
   >
 }>
 
-type Arguments = Readonly<{
-  workspace: string
-  experience: "product" | "demo"
-  decision?: WorkspaceDecision
-  approval?: EffectApproval
-}>
+type Arguments =
+  | Readonly<{ experience: "no-workspace" }>
+  | Readonly<{ experience: "system" }>
+  | Readonly<{
+      workspace: string
+      experience: "product" | "demo"
+      decision?: WorkspaceDecision
+      approval?: EffectApproval
+    }>
 
-const parsed = parseArguments(Bun.argv.slice(2).filter((value) => value !== "--"))
+const rawArguments = Bun.argv.slice(2)
+const commandArguments = rawArguments[0] === "--" ? rawArguments.slice(1) : rawArguments
+const parsed = parseArguments(commandArguments)
 if (!parsed.ok) {
   if (parsed.message) console.error(parsed.message)
   printUsage()
   process.exitCode = parsed.help ? 0 : 1
 } else {
-  if (parsed.arguments.experience === "product") {
+  if (parsed.arguments.experience === "no-workspace") {
+    printUsage()
+    process.exitCode = 0
+  } else if (parsed.arguments.experience === "system") {
+    process.exitCode = await runSystemMode()
+  } else if (parsed.arguments.experience === "product") {
     process.exitCode =
       process.env.ASTRA_BROWSER_RUNTIME === "1"
         ? await runProduct(parsed.arguments.workspace)
@@ -148,6 +158,18 @@ if (!parsed.ok) {
   }
 }
 
+async function runSystemMode() {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    console.error("Astra System Mode requires an interactive terminal.")
+    return 1
+  }
+  const moduleName = ["@opencode-ai/tui", "astra/system-mode"].join("/")
+  const loaded: unknown = await import(moduleName)
+  if (!isSystemModeModule(loaded)) throw new Error("The Astra System Mode interface is unavailable")
+  await loaded.runAstraSystemMode()
+  return 0
+}
+
 async function relaunchProductWithBrowserRuntime(arguments_: ReadonlyArray<string>) {
   const child = Bun.spawn(
     [
@@ -190,7 +212,8 @@ async function runProduct(workspace: string) {
     },
   })
   if (result.status === "exited") return 0
-  return launchAstraTui(result)
+  const launcher = await import("./tui-launcher")
+  return launcher.launchAstraTui(result)
 }
 
 async function loadWorkspaceGateModule() {
@@ -228,19 +251,14 @@ function isWorkspaceGateModule(value: unknown): value is WorkspaceGateModule {
 function parseArguments(
   values: ReadonlyArray<string>,
 ): Readonly<{ ok: true; arguments: Arguments }> | Readonly<{ ok: false; help: boolean; message?: string }> {
-  if (values.length === 0 || values[0] === "--help" || values[0] === "-h") return { ok: false, help: true }
+  if (values[0] === "--help" || values[0] === "-h") return { ok: false, help: true }
   if (values[0] === "inspect-git") {
     if (values.length !== 2 || !values[1] || values[1].startsWith("--")) {
       return { ok: false, help: false, message: "The `inspect-git` command requires exactly one workspace path." }
     }
     return { ok: true, arguments: { workspace: values[1], experience: "demo", decision: "inspect-git" } }
   }
-  if (values[0] !== "open") {
-    if (values.length === 1 && values[0] && !values[0].startsWith("--") && values[0] !== "system") {
-      return { ok: true, arguments: { workspace: values[0], experience: "product" } }
-    }
-    return { ok: false, help: false, message: "Expected a workspace path, `open`, or `inspect-git`." }
-  }
+  if (values[0] !== "open") return parseProductTarget(values)
 
   const workspace = values[1]
   if (!workspace || workspace.startsWith("--")) {
@@ -280,6 +298,16 @@ function parseArguments(
       ...(approval ? { approval } : {}),
     },
   }
+}
+
+function parseProductTarget(
+  values: ReadonlyArray<string>,
+): Readonly<{ ok: true; arguments: Arguments }> | Readonly<{ ok: false; help: false; message: string }> {
+  const parsed = parseAstraArguments(values)
+  if (!parsed.ok) return { ok: false, help: false, message: parsed.reason }
+  if (parsed.target.kind === "no-workspace") return { ok: true, arguments: { experience: "no-workspace" } }
+  if (parsed.target.kind === "system") return { ok: true, arguments: { experience: "system" } }
+  return { ok: true, arguments: { workspace: parsed.target.path, experience: "product" } }
 }
 
 function isOperationLedgerModule(value: unknown): value is DeniedLedgerModule {
@@ -322,6 +350,15 @@ function isGitInspectionModule(value: unknown): value is GitInspectionModule {
   )
 }
 
+function isSystemModeModule(value: unknown): value is Readonly<{ runAstraSystemMode: () => Promise<void> }> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "runAstraSystemMode" in value &&
+    typeof value.runAstraSystemMode === "function"
+  )
+}
+
 function isWorkspaceDecision(value: string): value is WorkspaceDecision {
   return value === "read-only" || value === "inspect-git" || value === "activate-once" || value === "exit"
 }
@@ -331,8 +368,10 @@ function isEffectApproval(value: string): value is EffectApproval {
 }
 
 function printUsage() {
-  console.log("Usage: astra .")
+  console.log("Usage: astra")
+  console.log("       astra .")
   console.log("       astra /path/to/workspace")
+  console.log("       astra system")
   console.log("       astra open <workspace>")
   console.log("       astra inspect-git <workspace>  # developer diagnostics")
 }

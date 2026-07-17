@@ -25,12 +25,13 @@ Current implementation status:
 | `astra /path`       | Working; intermediate path aliases are canonicalized before opening |
 | `astra open <path>` | Working compatibility alias                                         |
 | `astra`             | Planned No Workspace mode; currently prints help                    |
-| `astra system`      | Planned; not implemented                                            |
+| `astra system`      | Working inert System Mode; no workspace or effect authority         |
 
 ## Current local demo
 
 The current macOS checkpoint includes:
 
+- a dedicated `astra system` surface with `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED`, no workspace admission, and local keyboard exit;
 - a real terminal Workspace Gate with the Lynx identity;
 - bounded static preflight without workspace code, provider, plugin, MCP, LSP, formatter, shell, or normal OpenCode bootstrap;
 - explicit `read-only`, `inspect Git`, `activate once`, and `exit` decisions with no persistent trust;

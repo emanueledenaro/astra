@@ -43,7 +43,12 @@ type ChatState =
       preview: ProviderTurnPreview
       phase: ProviderTurnProgress["status"]
     }>
-  | Readonly<{ status: "completed"; modelID: string; userText: string; result: Extract<ProviderTurnDecisionResult, { status: "response_observed_not_verified" }> }>
+  | Readonly<{
+      status: "completed"
+      modelID: string
+      userText: string
+      result: Extract<ProviderTurnDecisionResult, { status: "response_observed_not_verified" }>
+    }>
   | Readonly<{ status: "denied"; modelID: string; userText: string }>
   | Readonly<{ status: "blocked"; reason: string }>
   | Readonly<{ status: "reconciliation"; operationID: string }>
@@ -133,7 +138,7 @@ export function AstraChatView(props: {
     ))
   }
 
-  const decide = (decision: "approve" | "reject") => {
+  const decide = (decision: "approve" | "reject", afterDenied?: () => void) => {
     const current = state()
     if (current.status !== "prepared") return
     const currentGeneration = ++generation
@@ -152,6 +157,7 @@ export function AstraChatView(props: {
           return
         }
         if (result.status === "denied_without_effect") {
+          if (afterDenied) return afterDenied()
           setState({ status: "denied", modelID: current.modelID, userText: current.userText })
           return
         }
@@ -168,15 +174,25 @@ export function AstraChatView(props: {
       })
   }
 
-  const reset = () => loadCatalog()
+  const reset = () => {
+    const current = state()
+    if (current.status === "prepared") return decide("reject", loadCatalog)
+    if (decisionInFlight(current)) return
+    loadCatalog()
+  }
   const close = () => {
-    if (decisionInFlight(state())) return
-    generation += 1
-    abort?.abort()
-    props.api.route.navigate(
-      props.returnRoute?.name ?? "home",
-      props.returnRoute && "params" in props.returnRoute ? props.returnRoute.params : undefined,
-    )
+    const navigate = () => {
+      generation += 1
+      abort?.abort()
+      props.api.route.navigate(
+        props.returnRoute?.name ?? "home",
+        props.returnRoute && "params" in props.returnRoute ? props.returnRoute.params : undefined,
+      )
+    }
+    const current = state()
+    if (current.status === "prepared") return decide("reject", navigate)
+    if (decisionInFlight(current)) return
+    navigate()
   }
 
   onMount(loadCatalog)
@@ -226,8 +242,16 @@ export function AstraChatView(props: {
       <text fg={props.api.theme.current.warning}>NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX</text>
       <text fg={props.api.theme.current.warning}>ONE TURN · NO TOOLS · NO FILES · NO HISTORY · NOT VERIFIED</text>
       <box height={1} />
-      <Row label="WORKSPACE" value={Locale.truncateLeft(props.authority.workspace.root, valueWidth())} api={props.api} />
-      <Row label="MODE" value={props.authority.mode === "activate-once" ? "ACTIVE ONCE" : "READ ONLY"} api={props.api} />
+      <Row
+        label="WORKSPACE"
+        value={Locale.truncateLeft(props.authority.workspace.root, valueWidth())}
+        api={props.api}
+      />
+      <Row
+        label="MODE"
+        value={props.authority.mode === "activate-once" ? "ACTIVE ONCE" : "READ ONLY"}
+        api={props.api}
+      />
       <Row label="STATE" value={stateLabel(state())} api={props.api} />
       <Show when={modelOf(state())}>{(model) => <Row label="MODEL" value={model()} api={props.api} />}</Show>
       <Show when={previewOf(state())}>
@@ -235,9 +259,55 @@ export function AstraChatView(props: {
           <>
             <Row label="OPERATION" value={preview().operationID} api={props.api} />
             <Row label="PROVIDER" value={`${preview().providerID} / ${preview().modelID}`} api={props.api} />
-            <Row label="DESTINATION" value={`${preview().destination.origin}${preview().destination.path}`} api={props.api} />
+            <Row
+              label="DESTINATION"
+              value={`${preview().destination.origin}${preview().destination.path}`}
+              api={props.api}
+            />
             <Row label="BODY" value={`${preview().logicalPayload.bytes} bytes`} api={props.api} />
-            <Row label="DIGEST" value={Locale.truncate(preview().logicalPayload.digest, valueWidth())} api={props.api} />
+            <Row
+              label="DIGEST"
+              value={Locale.truncate(preview().logicalPayload.digest, valueWidth())}
+              api={props.api}
+            />
+            <Row
+              label="CAPABILITY"
+              value={Locale.truncate(preview().providerCapabilityDigest, valueWidth())}
+              api={props.api}
+            />
+            <Row
+              label="CONTEXT"
+              value={
+                preview().logicalPayload.contextBindingDigest
+                  ? Locale.truncate(preview().logicalPayload.contextBindingDigest!, valueWidth())
+                  : "NONE"
+              }
+              api={props.api}
+            />
+            <Show when={preview().skillContext}>
+              {(skill) => (
+                <>
+                  <Row label="SKILL" value={skill().name} api={props.api} />
+                  <Row label="SKILL TRUST" value={skill().trust} api={props.api} />
+                  <Row
+                    label="SKILL DIGEST"
+                    value={Locale.truncate(skill().instructionsDigest, valueWidth())}
+                    api={props.api}
+                  />
+                  <Row
+                    label="SKILL CAP"
+                    value={Locale.truncate(skill().activationCapabilityDigest, valueWidth())}
+                    api={props.api}
+                  />
+                  <Row
+                    label="DISCLOSURE"
+                    value={skill().disclosure.replaceAll("_", " ").toUpperCase()}
+                    api={props.api}
+                  />
+                  <Row label="SKILL PROOF" value={skill().assurance} api={props.api} />
+                </>
+              )}
+            </Show>
             <Row label="HEADERS" value={preview().headerNames.join(", ")} api={props.api} />
             <Row label="ACCOUNT" value={preview().credential.accountFingerprint} api={props.api} />
             <Row label="ASSURANCE" value="NOT VERIFIED" api={props.api} />
@@ -261,7 +331,9 @@ export function AstraChatView(props: {
           </box>
         )}
       </Show>
-      <Show when={blockedOf(state())}>{(reason) => <Row label="REASON" value={reason().replaceAll("_", " ")} api={props.api} />}</Show>
+      <Show when={blockedOf(state())}>
+        {(reason) => <Row label="REASON" value={reason().replaceAll("_", " ")} api={props.api} />}
+      </Show>
       <Show when={reconciliationOf(state())}>{(id) => <Row label="OPERATION" value={id()} api={props.api} />}</Show>
     </box>
   )
@@ -305,14 +377,16 @@ export function registerAstraChat(
 function Row(props: { label: string; value: string; api: TuiPluginApi }) {
   return (
     <box flexDirection="row" flexShrink={0}>
-      <text width={16} fg={props.api.theme.current.textMuted}>{props.label}</text>
+      <text width={16} fg={props.api.theme.current.textMuted}>
+        {props.label}
+      </text>
       <text fg={props.api.theme.current.text}>{props.value}</text>
     </box>
   )
 }
 
 function decisionInFlight(state: ChatState) {
-  return state.status === "deciding" || state.status === "progress"
+  return state.status === "preparing" || state.status === "deciding" || state.status === "progress"
 }
 
 function modelOf(state: ChatState) {

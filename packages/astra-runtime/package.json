@@ -16,6 +16,8 @@
     "./controlled-write-verifier": "./src/controlled-write-verifier.ts",
     "./host-command": "./src/host-command.ts",
     "./git-unstage-coordinator": "./src/git-unstage-coordinator.ts",
+    "./extension-inventory-operation": "./src/extension-inventory-operation.ts",
+    "./governed-workspace-search": "./src/governed-workspace-search.ts",
     "./anthropic-one-turn": "./src/anthropic-one-turn.ts",
     "./provider-turn-coordinator": "./src/provider-turn-coordinator.ts",
     "./provider-turn-network-policy": "./src/provider-turn-network-policy.ts",

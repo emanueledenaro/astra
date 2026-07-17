@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto"
-import type { ExtensionInventoryHelperIdentity, ExtensionInventoryProposal } from "../../astra-domain/src/extension-inventory-operation"
+import type { ExtensionInventoryHelperIdentity, ExtensionInventoryProposal } from "@astra/domain/extension-inventory-operation"
 import {
   executeExtensionInventory,
   proposeExtensionInventory,
   ExtensionInventoryCoordinationError,
   type DurableExtensionInventoryResult,
   type ExecuteExtensionInventoryInput,
-} from "../../astra-runtime/src/extension-inventory-operation"
+} from "@astra/runtime/extension-inventory-operation"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
 
 type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }>

@@ -421,7 +421,7 @@ test("authenticates skill requests and enforces replay plus single-flight before
       return { schemaVersion: 1, requestId, proposalID, status: "blocked", reason: "not_used" }
     },
     async takePromptBundle() {
-      return null
+      return { status: "none" as const }
     },
   } satisfies AstraSkillActivationControl
   const control = await startAstraTuiControlServer({ ...fixture.input, skillActivationControl: skillControl })
@@ -430,8 +430,12 @@ test("authenticates skill requests and enforces replay plus single-flight before
   const didAccept = new Promise<void>((resolve) => (accepted = resolve))
 
   try {
-    expect(await sendRequest(control, { ...skillRequest(control, "skill.inventory"), token: "x".repeat(43) })).toEqual([])
-    expect(await sendRequest(control, { ...skillRequest(control, "skill.inventory"), workspaceRoot: fixture.root })).toEqual([])
+    expect(await sendRequest(control, { ...skillRequest(control, "skill.inventory"), token: "x".repeat(43) })).toEqual(
+      [],
+    )
+    expect(
+      await sendRequest(control, { ...skillRequest(control, "skill.inventory"), workspaceRoot: fixture.root }),
+    ).toEqual([])
     expect(calls).toBe(0)
 
     const first = sendRequest(control, firstRequest, (message) => {
@@ -453,7 +457,10 @@ test("authenticates skill requests and enforces replay plus single-flight before
     expect((await first).map((message) => message.type)).toEqual(["accepted", "skill.terminal"])
 
     const replay = await sendRequest(control, firstRequest)
-    expect(replay[1]).toMatchObject({ type: "skill.terminal", result: { status: "blocked", reason: "request_replayed" } })
+    expect(replay[1]).toMatchObject({
+      type: "skill.terminal",
+      result: { status: "blocked", reason: "request_replayed" },
+    })
     expect(calls).toBe(1)
   } finally {
     finishInventory({
@@ -486,7 +493,7 @@ test("keeps skill decision ownership after timeout until the durable task settle
       return pendingDecision
     },
     async takePromptBundle() {
-      return null
+      return { status: "none" as const }
     },
   } satisfies AstraSkillActivationControl
   const control = await startAstraTuiControlServer(

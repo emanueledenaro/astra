@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto"
 import {
+  computeProviderSkillContextBindingDigest,
   providerHostExecutionBoundaryLabel,
   providerNetworkExecutionBoundaryLabel,
   providerObservedCompletionLabel,
+  providerSkillInstructionAssuranceLabel,
+  providerSkillInstructionTrustLabel,
   type ProviderControlCatalog,
+  type ProviderTurnSkillContext,
   type ProviderTurnDecisionResult,
   type ProviderTurnPrepareResult,
   type ProviderTurnPreview,
@@ -24,6 +28,7 @@ import {
   providerTurnTransportImplementationDigest,
 } from "@astra/runtime/provider-turn-network-policy"
 import type { DurableProviderTurnResult, ExecuteProviderTurnInput } from "@astra/runtime/provider-turn-coordinator"
+import { makeProviderTurnOperationFacts } from "@astra/runtime/provider-turn-operation-facts"
 import {
   executeProviderTurnWithTrustedObservedTransport,
   type TrustedObservedProviderCompletion,
@@ -31,11 +36,13 @@ import {
   type TrustedProviderWireValues,
 } from "@astra/runtime/provider-turn-transport"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
-import type {
-  ParentProviderCredentialBroker,
-  ProviderCredentialGrant,
-} from "./provider-credential-broker"
+import type { ParentProviderCredentialBroker, ProviderCredentialGrant } from "./provider-credential-broker"
 import type { ProviderCatalogResult } from "./provider-catalog"
+import type {
+  AstraSkillActivationControl,
+  PromptSkillBundleTakeResult,
+  TrustedPromptSkillBundle,
+} from "./skill-activation-control"
 
 const maximumPreparedOperations = 4
 const requestTimeoutMilliseconds = 30_000
@@ -55,13 +62,16 @@ type PendingTurn = Readonly<{
   request: AnthropicOneTurnRequest
   grant: ProviderCredentialGrant
   preview: ProviderTurnPreview
+  skillBundle: TrustedPromptSkillBundle | null
 }>
 
 export type AstraProviderControl = Readonly<{
-  catalog: () => Readonly<{ status: "available"; catalog: ProviderControlCatalog }> | Readonly<{
-    status: "unavailable"
-    reason: "catalog_unavailable"
-  }>
+  catalog: () =>
+    | Readonly<{ status: "available"; catalog: ProviderControlCatalog }>
+    | Readonly<{
+        status: "unavailable"
+        reason: "catalog_unavailable"
+      }>
   prepare: (modelID: string, userText: string) => Promise<PublicPrepareResult>
   decide: (
     proposalID: string,
@@ -73,6 +83,7 @@ export type AstraProviderControl = Readonly<{
 export type AstraProviderControlDependencies = Readonly<{
   readCatalog: () => ProviderCatalogResult
   credentialBroker: ParentProviderCredentialBroker
+  skillBundleSource?: Pick<AstraSkillActivationControl, "takePromptBundle">
   execute?: typeof executeProviderTurnWithTrustedObservedTransport
   createCatalogAuthority?: () => AnthropicCatalogAuthority
   now?: () => number
@@ -92,6 +103,7 @@ export function createAstraProviderControl(
   const catalogAuthority = (dependencies.createCatalogAuthority ?? createAnthropicCatalogAuthority)()
   const consumed = new Set<string>()
   let pending: PendingTurn | undefined
+  let availableSkill: TrustedPromptSkillBundle | undefined
   let prepared = 0
   let deciding = false
 
@@ -110,7 +122,15 @@ export function createAstraProviderControl(
     if (!result.catalog.models.some((model) => model.id === modelID)) return blockedPrepare("model_rejected")
 
     const validatedCatalog = validatedModelCatalog(catalogAuthority, result)
-    const request = buildRequest(catalogAuthority, validatedCatalog, modelID, userText)
+    const skill = await takeAvailableSkill(dependencies.skillBundleSource, availableSkill)
+    if (skill.status === "blocked") return blockedPrepare("skill_context_unavailable")
+    if (skill.status === "taken") availableSkill = skill.bundle
+    const skillBundle = skill.status === "taken" ? skill.bundle : (availableSkill ?? null)
+    if (skillBundle && !skillBundleMatchesSession(skillBundle, sessionID, session.report.root)) {
+      availableSkill = undefined
+      return blockedPrepare("skill_context_unavailable")
+    }
+    const request = buildRequest(catalogAuthority, validatedCatalog, modelID, userText, skillBundle)
     if (!request) return blockedPrepare("input_rejected")
     const credential = await dependencies.credentialBroker.issueForSession(sessionID)
     if (!credential.ok) return blockedPrepare("credential_unavailable")
@@ -119,13 +139,23 @@ export function createAstraProviderControl(
     const operationID = uuid()
     const createdAt = new Date(now()).toISOString()
     const facts = operationFacts(session, state, request, credential.grant, operationID, uuid(), modelID, createdAt)
+    const skillContext = skillBundle ? publicSkillContext(skillBundle) : null
+    const contextBindingDigest = skillContext ? computeProviderSkillContextBindingDigest(skillContext) : null
+    if (request.evidence.skillContextBindingDigest !== contextBindingDigest) return blockedPrepare("input_rejected")
+    const providerCapabilityDigest = makeProviderTurnOperationFacts(facts).capabilityDigest
     const preview: ProviderTurnPreview = Object.freeze({
       proposalID,
       operationID,
       providerID: "anthropic",
       modelID,
       destination: request.destination,
-      logicalPayload: { digest: request.evidence.requestDigest, bytes: request.evidence.requestBytes },
+      logicalPayload: {
+        digest: request.evidence.requestDigest,
+        bytes: request.evidence.requestBytes,
+        contextBindingDigest,
+      },
+      providerCapabilityDigest,
+      skillContext,
       headerNames: [...facts.plan.wireRequest.headerNames],
       credential: {
         accountFingerprint: credential.grant.accountFingerprint,
@@ -136,7 +166,8 @@ export function createAstraProviderControl(
       networkBoundaryLabel: providerNetworkExecutionBoundaryLabel,
       assurance: "NOT VERIFIED",
     })
-    pending = { proposalID, operationID, facts, request, grant: credential.grant, preview }
+    pending = { proposalID, operationID, facts, request, grant: credential.grant, preview, skillBundle }
+    if (skillBundle) availableSkill = undefined
     prepared += 1
     return { status: "prepared", preview }
   }
@@ -152,7 +183,10 @@ export function createAstraProviderControl(
     const proposal = pending
     pending = undefined
     consumed.add(proposalID)
-    if (now() >= proposal.grant.expiresAt) return blockedDecision(proposalID, "proposal_expired")
+    if (now() >= proposal.grant.expiresAt) {
+      availableSkill = releaseSkillBundle(availableSkill, proposal.skillBundle)
+      return blockedDecision(proposalID, "proposal_expired")
+    }
 
     deciding = true
     const progress = (status: PublicProgress["status"]) =>
@@ -198,6 +232,12 @@ export function createAstraProviderControl(
         if (!responseObserved) return reconciliation(proposal, result.receiptID)
         progress("receipt_acknowledged")
       }
+      if (decision === "reject" && result.status === "denied_without_effect") {
+        availableSkill = releaseSkillBundle(availableSkill, proposal.skillBundle)
+      }
+      if (decision === "approve" && result.status === "denied_without_effect") {
+        return reconciliation(proposal, result.receiptID)
+      }
       return mapDecisionResult(proposal, result)
     } catch {
       if (decision === "approve") return reconciliation(proposal, null)
@@ -226,6 +266,7 @@ function buildRequest(
   catalog: ValidatedAnthropicModelCatalog,
   modelID: string,
   userText: string,
+  skillBundle: TrustedPromptSkillBundle | null,
 ) {
   try {
     return buildAnthropicOneTurnRequest({
@@ -234,6 +275,21 @@ function buildRequest(
       modelID,
       userText,
       maxTokens,
+      ...(skillBundle
+        ? {
+            skillContext: {
+              activationOperationID: skillBundle.operationID,
+              activationCapabilityDigest: skillBundle.capabilityDigest,
+              name: skillBundle.skill.name,
+              provenance: skillBundle.source.provenance,
+              instructions: skillBundle.skill.instructions,
+              instructionsDigest: skillBundle.source.instructionsDigest,
+              trust: skillBundle.skill.trust,
+              resourceDiscovery: skillBundle.skill.resourceDiscovery,
+              assurance: skillBundle.assurance,
+            },
+          }
+        : {}),
     })
   } catch {
     return undefined
@@ -283,7 +339,11 @@ function operationFacts(
         timeoutMilliseconds: requestTimeoutMilliseconds,
         maximumResponseBytes,
       },
-      logicalPayload: { digest: request.evidence.requestDigest, bytes: request.evidence.requestBytes },
+      logicalPayload: {
+        digest: request.evidence.requestDigest,
+        bytes: request.evidence.requestBytes,
+        contextBindingDigest: request.evidence.skillContextBindingDigest,
+      },
       executionBoundary: "network_egress_host_no_sandbox",
       createdAt,
     },
@@ -334,6 +394,10 @@ function previewMatches(
   proposal: PendingTurn,
   runtime: Parameters<Parameters<typeof executeProviderTurnWithTrustedObservedTransport>[3]["requestApproval"]>[0],
 ) {
+  const facts = makeProviderTurnOperationFacts(proposal.facts)
+  const expectedContextBinding = proposal.preview.skillContext
+    ? computeProviderSkillContextBindingDigest(proposal.preview.skillContext)
+    : null
   return (
     runtime.workspace.canonicalPath === proposal.facts.report.root &&
     runtime.session.sessionID === proposal.grant.sessionID &&
@@ -343,8 +407,47 @@ function previewMatches(
     runtime.wireRequest.path === proposal.preview.destination.path &&
     runtime.logicalPayload.digest === proposal.preview.logicalPayload.digest &&
     runtime.logicalPayload.bytes === proposal.preview.logicalPayload.bytes &&
+    runtime.logicalPayload.contextBindingDigest === proposal.preview.logicalPayload.contextBindingDigest &&
+    proposal.preview.logicalPayload.contextBindingDigest === expectedContextBinding &&
+    proposal.request.evidence.skillContextBindingDigest === expectedContextBinding &&
+    facts.capabilityDigest === proposal.preview.providerCapabilityDigest &&
     runtime.credential.accountFingerprint === proposal.preview.credential.accountFingerprint
   )
+}
+
+async function takeAvailableSkill(
+  source: Pick<AstraSkillActivationControl, "takePromptBundle"> | undefined,
+  available: TrustedPromptSkillBundle | undefined,
+): Promise<PromptSkillBundleTakeResult> {
+  if (available) return { status: "taken", bundle: available }
+  if (!source) return { status: "none" }
+  return source.takePromptBundle().catch(() => ({ status: "blocked", reason: "bundle_unavailable" }))
+}
+
+function releaseSkillBundle(
+  available: TrustedPromptSkillBundle | undefined,
+  reserved: TrustedPromptSkillBundle | null,
+) {
+  return available ?? reserved ?? undefined
+}
+
+function skillBundleMatchesSession(bundle: TrustedPromptSkillBundle, sessionID: string, workspaceRoot: string) {
+  return bundle.session.sessionID === sessionID && bundle.session.workspaceRoot === workspaceRoot
+}
+
+function publicSkillContext(bundle: TrustedPromptSkillBundle): ProviderTurnSkillContext {
+  return Object.freeze({
+    kind: "activated_skill",
+    activationOperationID: bundle.operationID,
+    activationCapabilityDigest: bundle.capabilityDigest,
+    name: bundle.skill.name,
+    provenance: bundle.source.provenance,
+    instructionsDigest: bundle.source.instructionsDigest,
+    trust: providerSkillInstructionTrustLabel,
+    resourceDiscovery: "none",
+    assurance: providerSkillInstructionAssuranceLabel,
+    disclosure: "included_in_provider_request",
+  })
 }
 
 function publicCatalog(input: Extract<ProviderCatalogResult, { ok: true }>["catalog"]): ProviderControlCatalog {

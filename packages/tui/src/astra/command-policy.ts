@@ -10,6 +10,9 @@ const approvedCommands = new Set([
   "astra.chat.reject",
   "astra.chat.reset",
   "astra.extensions.close",
+  "astra.extensions.inventory",
+  "astra.extensions.approve",
+  "astra.extensions.deny",
   "astra.extensions.open",
   "astra.git.close",
   "astra.git.inspect",
@@ -21,6 +24,9 @@ const approvedCommands = new Set([
   "astra.skill.inventory",
   "astra.skill.open",
   "astra.skill.prepare",
+  "astra.search.close",
+  "astra.search.open",
+  "astra.search.query",
   "astra.write.approve",
   "astra.write.close",
   "astra.write.open",
@@ -43,13 +49,15 @@ export function allowRemoteTuiCommandDispatch(astraSafeStart: boolean) {
   return !astraSafeStart
 }
 
-export function dispatchRemoteTuiCommand(input: Readonly<{
-  astraSafeStart: boolean
-  eventWorkspace: string | undefined
-  currentWorkspace: string | undefined
-  command: string
-  dispatch: (command: string) => void
-}>) {
+export function dispatchRemoteTuiCommand(
+  input: Readonly<{
+    astraSafeStart: boolean
+    eventWorkspace: string | undefined
+    currentWorkspace: string | undefined
+    command: string
+    dispatch: (command: string) => void
+  }>,
+) {
   if (input.eventWorkspace !== input.currentWorkspace) return false
   if (!allowRemoteTuiCommandDispatch(input.astraSafeStart)) return false
   input.dispatch(input.command)

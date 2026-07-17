@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { createServer, type Server, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { computeProviderSkillContextBindingDigest, type ProviderTurnSkillContext } from "@astra/domain/provider-control"
 import { AstraControlClientError } from "../src/astra/control-client"
 import { createAstraProviderClient } from "../src/astra/provider-client"
 
@@ -81,6 +82,27 @@ test("provider client fails closed without a private provider socket", async () 
   const error = await client.catalog().catch((cause) => cause)
   expect(error).toBeInstanceOf(AstraControlClientError)
   expect(error).toMatchObject({ code: "unavailable" })
+})
+
+test("provider client accepts skill metadata while keeping instructions outside the public protocol", async () => {
+  const privateInstructions = "private instructions must not cross the provider control socket"
+  const fixture = await startFixture((socket, request) => {
+    accepted(socket, request.requestId)
+    terminal(socket, skillPrepareResult(request.requestId))
+  })
+  const client = createAstraProviderClient(fixture.environment, sessionID)
+  const result = await client.prepare(modelID, "Use the selected skill")
+
+  if (result.status !== "prepared") throw new Error("Expected skilled preview")
+  expect(result.preview.skillContext).toMatchObject({
+    name: "safe-skill",
+    trust: "UNTRUSTED INSTRUCTION DATA",
+    disclosure: "included_in_provider_request",
+  })
+  expect(result.preview.logicalPayload.contextBindingDigest).toBe(
+    computeProviderSkillContextBindingDigest(skillContext),
+  )
+  expect(JSON.stringify(result)).not.toContain(privateInstructions)
 })
 
 test("provider client preserves domain-valid escape-heavy request and response frames", async () => {
@@ -179,7 +201,9 @@ function prepareResult(requestId: string) {
       providerID: "anthropic",
       modelID,
       destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
-      logicalPayload: { digest: digest("private body"), bytes: 128 },
+      logicalPayload: { digest: digest("private body"), bytes: 128, contextBindingDigest: null },
+      providerCapabilityDigest: digest("provider capability"),
+      skillContext: null,
       headerNames: ["anthropic-version", "content-type", "x-api-key"],
       credential: { accountFingerprint: `sha256:${"2".repeat(64)}`, headerName: "x-api-key" },
       expiresAt: "2026-07-17T16:00:00.000Z",
@@ -189,6 +213,34 @@ function prepareResult(requestId: string) {
     },
   }
 }
+
+function skillPrepareResult(requestId: string) {
+  const base = prepareResult(requestId)
+  return {
+    ...base,
+    preview: {
+      ...base.preview,
+      logicalPayload: {
+        ...base.preview.logicalPayload,
+        contextBindingDigest: computeProviderSkillContextBindingDigest(skillContext),
+      },
+      skillContext,
+    },
+  }
+}
+
+const skillContext = {
+  kind: "activated_skill",
+  activationOperationID: "50000000-0000-4000-8000-000000000005",
+  activationCapabilityDigest: digest("skill capability"),
+  name: "safe-skill",
+  provenance: "workspace_opencode",
+  instructionsDigest: digest("private instructions must not cross the provider control socket"),
+  trust: "UNTRUSTED INSTRUCTION DATA",
+  resourceDiscovery: "none",
+  assurance: "OBSERVED NOT VERIFIED",
+  disclosure: "included_in_provider_request",
+} as const satisfies ProviderTurnSkillContext
 
 function completionResult(requestId: string, assistantText = "Hello Astra") {
   return {

@@ -73,16 +73,13 @@ test("runs explicit inventory, zero-effect rejection, and one-shot private activ
       relativePath: ".opencode/skills/safe-skill/SKILL.md",
       metadataTrust: "UNTRUSTED WORKSPACE METADATA",
     })
-    const rejectedProposal = await client.prepare(
-      firstInventory.inventoryID,
-      firstInventory.candidates[0].candidateID,
-    )
+    const rejectedProposal = await client.prepare(firstInventory.inventoryID, firstInventory.candidates[0].candidateID)
     if (rejectedProposal.status !== "prepared") throw new Error(rejectedProposal.reason)
     const rejected = await client.decide(rejectedProposal.preview.proposalID, "reject")
     expect(rejected).toMatchObject({ status: "denied_without_effect", verification: "not_verified" })
     expect(await workspaceTree(workspace)).toEqual(before)
     expect(await readdir(privateRuntime)).toEqual(["control.sock"])
-    expect(await skillControl.takePromptBundle()).toBeNull()
+    expect(await skillControl.takePromptBundle()).toEqual({ status: "none" })
 
     client.dispose()
     await server.close()
@@ -128,14 +125,18 @@ test("runs explicit inventory, zero-effect rejection, and one-shot private activ
     expect(JSON.stringify(approved)).not.toContain("Never run commands")
     expect(await workspaceTree(workspace)).toEqual(before)
 
-    const bundle = await activeSkillControl.takePromptBundle()
-    expect(bundle).toMatchObject({
-      operationID: approvedProposal.preview.operationID,
-      assurance: "observed_not_verified",
-      skill: { name: "safe-skill", trust: "untrusted_instruction_data", resourceDiscovery: "none" },
+    const taken = await activeSkillControl.takePromptBundle()
+    expect(taken).toMatchObject({
+      status: "taken",
+      bundle: {
+        operationID: approvedProposal.preview.operationID,
+        assurance: "observed_not_verified",
+        skill: { name: "safe-skill", trust: "untrusted_instruction_data", resourceDiscovery: "none" },
+      },
     })
-    expect(bundle?.skill.instructions).toContain("Never run commands automatically")
-    expect(await activeSkillControl.takePromptBundle()).toBeNull()
+    if (taken.status !== "taken") throw new Error("Expected prompt bundle")
+    expect(taken.bundle.skill.instructions).toContain("Never run commands automatically")
+    expect(await activeSkillControl.takePromptBundle()).toEqual({ status: "none" })
     expect(await readdir(privateRuntime)).toEqual(["control.sock"])
   } finally {
     client.dispose()

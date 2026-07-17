@@ -7,10 +7,15 @@ import {
   type GitControlInspectionBlockReason,
   type GitControlInspectionSummary,
 } from "@astra/domain/git-control-inspection"
+import { parseGitUnstageControlRequest, type GitUnstageControlRequest } from "@astra/domain/git-unstage-control"
 import {
-  parseGitUnstageControlRequest,
-  type GitUnstageControlRequest,
-} from "@astra/domain/git-unstage-control"
+  parseWorkspaceSearchControlRequest,
+  type WorkspaceSearchControlRequest,
+} from "@astra/domain/governed-workspace-search-control"
+import {
+  parseExtensionInventoryControlRequest,
+  type ExtensionInventoryControlRequest,
+} from "@astra/domain/extension-inventory-control"
 import {
   controlledWriteBoundaryLabel,
   controlledWriteNetworkWarning,
@@ -44,13 +49,16 @@ import {
   type SkillControlRequest,
   type SkillInventoryResult,
 } from "../../astra-domain/src/skill-activation-control"
-import {
-  createAstraSkillActivationRegistration,
-  type AstraSkillActivationControl,
-} from "./skill-activation-control"
+import { createAstraSkillActivationRegistration, type AstraSkillActivationControl } from "./skill-activation-control"
 import type { AstraGitUnstageControl } from "./git-unstage-control"
 import { createAstraGitUnstageControlHandler } from "./git-unstage-control-handler"
 import { serveAstraGitUnstageControlRequest } from "./git-unstage-control-server-hook"
+import type { AstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
+import { createAstraGovernedWorkspaceSearchControlHandler } from "./governed-workspace-search-control-handler"
+import { serveAstraGovernedWorkspaceSearchControlRequest } from "./governed-workspace-search-control-server-hook"
+import type { AstraExtensionInventoryControl } from "./extension-inventory-control"
+import { createAstraExtensionInventoryControlHandler } from "./extension-inventory-control-handler"
+import { serveAstraExtensionInventoryControlRequest } from "./extension-inventory-control-server-hook"
 
 const requestLimitBytes = 2_048
 const maximumRequestsPerSession = 1_024
@@ -58,6 +66,7 @@ const maximumObservedEntries = 10_000
 const defaultInspectionTimeoutMs = 30_000
 const defaultControlledWriteTimeoutMs = 60_000
 const defaultSkillActivationTimeoutMs = 60_000
+const defaultExtensionInventoryTimeoutMs = 10_000
 const socketFilename = "control.sock"
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -74,9 +83,11 @@ type GitInspectRequest = Readonly<{
 type ControlRequest =
   | GitInspectRequest
   | GitUnstageControlRequest
+  | WorkspaceSearchControlRequest
   | ControlledWritePrepareRequest
   | ControlledWriteDecisionRequest
   | SkillControlRequest
+  | ExtensionInventoryControlRequest
 
 export type AstraTuiControlServer = Readonly<{
   socketPath: string
@@ -92,6 +103,8 @@ export type AstraTuiControlServerInput = Readonly<{
   controlledWriteControl?: AstraControlledWriteControl
   gitUnstageControl?: AstraGitUnstageControl
   skillActivationControl?: AstraSkillActivationControl
+  governedWorkspaceSearchControl?: AstraGovernedWorkspaceSearchControl
+  extensionInventoryControl?: AstraExtensionInventoryControl
 }>
 
 export type AstraTuiControlServerDependencies = Readonly<{
@@ -99,6 +112,7 @@ export type AstraTuiControlServerDependencies = Readonly<{
   inspectionTimeoutMs?: number
   controlledWriteTimeoutMs?: number
   skillActivationTimeoutMs?: number
+  extensionInventoryTimeoutMs?: number
 }>
 
 /**
@@ -132,6 +146,21 @@ export async function startAstraTuiControlServer(
   const gitUnstageHandler = input.gitUnstageControl
     ? createAstraGitUnstageControlHandler({ sessionID: input.sessionID, token, control: input.gitUnstageControl })
     : undefined
+  const workspaceSearchHandler = input.governedWorkspaceSearchControl
+    ? createAstraGovernedWorkspaceSearchControlHandler({
+        sessionID: input.sessionID,
+        token,
+        control: input.governedWorkspaceSearchControl,
+      })
+    : undefined
+  const extensionInventoryHandler = input.extensionInventoryControl
+    ? createAstraExtensionInventoryControlHandler({
+        sessionID: input.sessionID,
+        token,
+        control: input.extensionInventoryControl,
+        timeoutMs: dependencies.extensionInventoryTimeoutMs ?? defaultExtensionInventoryTimeoutMs,
+      })
+    : undefined
   let activeRequestID: string | undefined
   let cancelActiveInspection: (() => void) | undefined
   let accepting = true
@@ -148,6 +177,15 @@ export async function startAstraTuiControlServer(
           socket.end()
           return
         }
+        if (isWorkspaceSearchRequest(request)) {
+          if (!workspaceSearchHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraGovernedWorkspaceSearchControlRequest(socket, request, workspaceSearchHandler)
+          return
+        }
         if (isGitUnstageRequest(request)) {
           if (!gitUnstageHandler) {
             socket.end()
@@ -155,6 +193,15 @@ export async function startAstraTuiControlServer(
           }
           socket.setTimeout(0)
           await serveAstraGitUnstageControlRequest(socket, request, gitUnstageHandler)
+          return
+        }
+        if (isExtensionInventoryRequest(request)) {
+          if (!extensionInventoryHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraExtensionInventoryControlRequest(socket, request, extensionInventoryHandler)
           return
         }
         if (!authorized(request, input.sessionID, token)) {
@@ -292,6 +339,10 @@ function parseRequest(input: string): ControlRequest | null {
   if (!input.endsWith("\n") || input.slice(0, -1).includes("\n")) return null
   try {
     const value: unknown = JSON.parse(input.slice(0, -1))
+    const workspaceSearch = parseWorkspaceSearchControlRequest(value)
+    if (workspaceSearch.ok) return workspaceSearch.value
+    const extensionInventory = parseExtensionInventoryControlRequest(value)
+    if (extensionInventory.ok) return extensionInventory.value
     const gitUnstage = parseGitUnstageControlRequest(value)
     if (gitUnstage.ok) return gitUnstage.value
     const prepare = parseControlledWritePrepareRequest(value)
@@ -332,6 +383,14 @@ function authorized(request: ControlRequest, sessionID: string, token: string) {
 
 function isGitUnstageRequest(request: ControlRequest): request is GitUnstageControlRequest {
   return request.method === "git-unstage.prepare" || request.method === "git-unstage.decide"
+}
+
+function isWorkspaceSearchRequest(request: ControlRequest): request is WorkspaceSearchControlRequest {
+  return request.method === "search.prepare" || request.method === "search.decide"
+}
+
+function isExtensionInventoryRequest(request: ControlRequest): request is ExtensionInventoryControlRequest {
+  return request.method === "extension-inventory.prepare" || request.method === "extension-inventory.decide"
 }
 
 function isSkillRequest(request: ControlRequest): request is SkillControlRequest {
@@ -414,7 +473,8 @@ async function handleSkillActivationRequest(
           progress.requestId !== request.requestId ||
           progress.proposalID !== request.proposalID ||
           progress.operationID !== operationID
-        ) return
+        )
+          return
         const parsed = parseSkillActivationProgress(progress)
         if (parsed.ok) void write(socket, encodeSkillProgress(request.requestId, parsed.value))
       }),
@@ -481,7 +541,8 @@ function requirePublicSkillResult(
     parsed.value.requestId === request.requestId &&
     parsed.value.proposalID === request.proposalID &&
     (!("operationID" in parsed.value) || parsed.value.operationID === operationID)
-  ) return parsed.value
+  )
+    return parsed.value
   return operationID
     ? skillReconciliation(request, operationID, "durable_state_unavailable")
     : blockedSkillResult(request, "protocol_invalid")
@@ -875,7 +936,12 @@ function encodeSkillTerminal(
 }
 
 function encodeBlockedTerminal(request: ControlRequest, reason: string) {
+  if (isWorkspaceSearchRequest(request))
+    throw new Error("Workspace search requests are owned by their dedicated handler")
   if (isGitUnstageRequest(request)) throw new Error("Git Unstage requests are owned by their dedicated handler")
+  if (isExtensionInventoryRequest(request)) {
+    throw new Error("Extension inventory requests are owned by their dedicated handler")
+  }
   if (request.method === "git.inspect") return encodeTerminal(request.requestId, blocked(mapControlBlockReason(reason)))
   if (isSkillRequest(request)) return encodeSkillTerminal(request.requestId, blockedSkillResult(request, reason))
   if (request.method === "controlled-write.prepare") {

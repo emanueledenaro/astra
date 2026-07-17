@@ -32,7 +32,7 @@ const maximumRequestPathBytes = 8_192
 export const providerTurnMaximumRequestBytes = 4_194_304
 
 export const providerTurnPolicyDigest = digest("astra-policy:provider-turn-explicit-consent:v1")
-export const providerTurnAdapterDigest = digest("astra-runtime:provider-turn:bounded-adapter-seam:v5")
+export const providerTurnAdapterDigest = digest("astra-runtime:provider-turn:bounded-adapter-seam:v6")
 export const providerTurnObserverDigest = digest("astra-observer:provider-turn-finish:v1")
 export const providerTurnExecutor = "astra-executor:provider-turn"
 
@@ -61,7 +61,11 @@ export type ProviderTurnPlan = Readonly<{
     timeoutMilliseconds: number
     maximumResponseBytes: number
   }>
-  logicalPayload: Readonly<{ digest: string; bytes: number }>
+  logicalPayload: Readonly<{
+    digest: string
+    bytes: number
+    contextBindingDigest?: string | null
+  }>
   executionBoundary: "network_egress_host_no_sandbox"
   createdAt: string
 }>
@@ -87,7 +91,11 @@ export type ProviderTurnPreview = Readonly<{
   }>
   networkPolicy: ProviderTurnNetworkPolicy
   wireRequest: ProviderTurnPlan["wireRequest"]
-  logicalPayload: Readonly<{ digest: ContentDigest; bytes: number }>
+  logicalPayload: Readonly<{
+    digest: ContentDigest
+    bytes: number
+    contextBindingDigest: ContentDigest | null
+  }>
   executionBoundary: "network_egress_host_no_sandbox"
   boundaryLabel: typeof providerTurnExecutionBoundaryLabel
 }>
@@ -151,6 +159,11 @@ export function snapshotProviderTurnOperationFactsInput(
     logicalPayload: {
       digest: requireString(source.plan.logicalPayload.digest),
       bytes: source.plan.logicalPayload.bytes,
+      contextBindingDigest:
+        source.plan.logicalPayload.contextBindingDigest === undefined ||
+        source.plan.logicalPayload.contextBindingDigest === null
+          ? null
+          : requireString(source.plan.logicalPayload.contextBindingDigest),
     },
     executionBoundary: source.plan.executionBoundary,
     createdAt: requireString(source.plan.createdAt),
@@ -246,6 +259,9 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
     logicalPayload: {
       digest: logicalPayloadDigest,
       bytes: input.plan.logicalPayload.bytes,
+      contextBindingDigest: input.plan.logicalPayload.contextBindingDigest
+        ? requireContentDigest(input.plan.logicalPayload.contextBindingDigest)
+        : null,
     },
     executionBoundary: input.plan.executionBoundary,
     boundaryLabel: providerTurnExecutionBoundaryLabel,
@@ -550,6 +566,12 @@ function requireInput(input: ProviderTurnOperationFactsInput) {
   requireCredentialBinding(input.plan.credential, input.plan.wireRequest.headerNames)
   requireWireRequest(input.plan.wireRequest)
   requireContentDigest(input.plan.logicalPayload.digest)
+  if (
+    input.plan.logicalPayload.contextBindingDigest !== undefined &&
+    input.plan.logicalPayload.contextBindingDigest !== null
+  ) {
+    requireContentDigest(input.plan.logicalPayload.contextBindingDigest)
+  }
   if (
     !Number.isSafeInteger(input.plan.logicalPayload.bytes) ||
     input.plan.logicalPayload.bytes < 0 ||

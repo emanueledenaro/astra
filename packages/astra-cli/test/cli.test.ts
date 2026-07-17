@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 const roots: Array<string> = []
@@ -10,6 +10,45 @@ afterAll(async () => {
 })
 
 describe("Astra CLI durable state", () => {
+  test("System Mode rejects a non-interactive terminal before creating any local state", async () => {
+    const root = await hostileSystemDirectory()
+    const dataDirectory = join(await temporaryDirectory("astra-system-data-parent-"), "not-created")
+    const before = await directorySnapshot(root)
+    const run = await runCliCommandFrom(root, dataDirectory, "system")
+
+    expect(run.exitCode).toBe(1)
+    expect(run.stdout).toBe("")
+    expect(run.stderr).toBe("Astra System Mode requires an interactive terminal.\n")
+    expect(await directorySnapshot(root)).toEqual(before)
+    expect(await exists(dataDirectory)).toBeFalse()
+  })
+
+  test("System Mode rejects extra arguments instead of treating them as a workspace", async () => {
+    const dataDirectory = join(await temporaryDirectory("astra-system-invalid-data-parent-"), "not-created")
+    const runs = await Promise.all([
+      runCliCommand(dataDirectory, "system", "."),
+      runCliCommand(dataDirectory, "system", "--"),
+    ])
+
+    for (const run of runs) {
+      expect(run.exitCode).toBe(1)
+      expect(run.stderr).toContain("The `system` command does not accept arguments or flags.")
+      expect(run.stdout).toContain("astra system")
+    }
+    expect(await exists(dataDirectory)).toBeFalse()
+  })
+
+  test("the no-argument compatibility surface still exits successfully with help", async () => {
+    const dataDirectory = join(await temporaryDirectory("astra-help-data-parent-"), "not-created")
+    const run = await runCliCommand(dataDirectory)
+
+    expect(run.exitCode).toBe(0)
+    expect(run.stderr).toBe("")
+    expect(run.stdout).toContain("Usage: astra")
+    expect(run.stdout).toContain("astra system")
+    expect(await exists(dataDirectory)).toBeFalse()
+  })
+
   test("read-only creates neither workspace effects nor an app-state directory", async () => {
     const root = await workspace()
     const dataDirectory = join(await temporaryDirectory("astra-cli-data-parent-"), "not-created")
@@ -133,6 +172,20 @@ async function workspace() {
   return root
 }
 
+async function hostileSystemDirectory() {
+  const root = await temporaryDirectory("astra-system-hostile-cwd-")
+  await writeFile(join(root, ".env"), "ASTRA_SYSTEM_CANARY=must-not-load\n")
+  await writeFile(join(root, "bunfig.toml"), 'preload = ["./must-not-run.ts"]\n')
+  await writeFile(join(root, "must-not-run.ts"), 'await Bun.write("system-effect", "executed")\n')
+  await writeFile(join(root, "package.json"), JSON.stringify({ scripts: { start: "touch system-effect" } }))
+  return root
+}
+
+async function directorySnapshot(root: string) {
+  const names = (await readdir(root, { recursive: true })).toSorted()
+  return Promise.all(names.map(async (name) => [name, await readFile(join(root, name), "utf8")] as const))
+}
+
 async function gitWorkspace() {
   const root = await realpath(await temporaryDirectory("astra-cli-git-workspace-"))
   await runGit(root, "init", "-q", "--initial-branch=main")
@@ -155,9 +208,13 @@ async function runCli(root: string, dataDirectory: string, decision: string, app
 }
 
 async function runCliCommand(dataDirectory: string, ...arguments_: ReadonlyArray<string>) {
-  const command = [process.execPath, "src/index.ts", ...arguments_]
+  return runCliCommandFrom(packageRoot, dataDirectory, ...arguments_)
+}
+
+async function runCliCommandFrom(cwd: string, dataDirectory: string, ...arguments_: ReadonlyArray<string>) {
+  const command = [join(packageRoot, "src/index.ts"), ...arguments_]
   const child = Bun.spawn(command, {
-    cwd: packageRoot,
+    cwd,
     env: {
       ASTRA_DATA_DIR: dataDirectory,
       HOME: join(dataDirectory, "..", "isolated-home"),

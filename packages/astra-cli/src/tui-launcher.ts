@@ -14,9 +14,12 @@ import { loadParentAnthropicAuthReader, type ParentAnthropicAuthReaderHandle } f
 import { readAstraProviderCatalog } from "./provider-catalog"
 import { createAstraProviderControl } from "./provider-control"
 import { startAstraProviderControlServer, type AstraProviderControlServer } from "./provider-control-server"
-import { createParentProviderCredentialBroker } from "./provider-credential-broker"
-import { createAstraSkillActivationControl } from "./skill-activation-control"
+import { createParentProviderCredentialBroker, type ParentProviderCredentialBroker } from "./provider-credential-broker"
+import { createAstraSkillActivationControl, type AstraSkillActivationControl } from "./skill-activation-control"
 import { createAstraGitUnstageControl } from "./git-unstage-control"
+import { createAstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
+import { createAstraExtensionInventoryControl } from "./extension-inventory-control"
+import { inspectTrustedExtensionInventoryHelper } from "@astra/runtime/extension-inventory-operation"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -37,6 +40,14 @@ export type AstraTuiControlReference = Pick<AstraTuiControlServer, "socketPath" 
 export type AstraProviderControlReference = Pick<AstraProviderControlServer, "socketPath" | "token">
 
 type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }>
+
+/** Wires the parent provider to the exact skill authority owned by this TUI session. */
+export function makeAstraProviderSessionDependencies(
+  credentialBroker: ParentProviderCredentialBroker,
+  skillBundleSource: Pick<AstraSkillActivationControl, "takePromptBundle">,
+) {
+  return Object.freeze({ readCatalog: readAstraProviderCatalog, credentialBroker, skillBundleSource })
+}
 
 export function makeAstraTuiLaunchSpec(
   workspace: string,
@@ -67,9 +78,7 @@ export function makeAstraTuiLaunchSpec(
       ASTRA_SESSION_AUTHORITY_DIGEST: authority.digest,
       ASTRA_CONTROL_SOCKET: control.socketPath,
       ASTRA_CONTROL_TOKEN: control.token,
-      ...(provider
-        ? { ASTRA_PROVIDER_SOCKET: provider.socketPath, ASTRA_PROVIDER_TOKEN: provider.token }
-        : {}),
+      ...(provider ? { ASTRA_PROVIDER_SOCKET: provider.socketPath, ASTRA_PROVIDER_TOKEN: provider.token } : {}),
       OPENCODE_CLIENT: "astra",
       OPENCODE_CONFIG_CONTENT: config,
       OPENCODE_PERMISSION: JSON.stringify(permission),
@@ -137,6 +146,15 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         privateRuntimeDirectory: authority.directory,
       },
     )
+    const extensionInventoryControl = createAstraExtensionInventoryControl(session, {
+      helper: await inspectTrustedExtensionInventoryHelper(
+        fileURLToPath(
+          new URL("../../../tools/astra-extension-inventory-native/build/astra-extension-inventory", import.meta.url),
+        ),
+      ),
+      ledgerFilename: operationLedgerPath(),
+      spoolFilename: receiptSpoolPath(),
+    })
     control = await startAstraTuiControlServer({
       directory: authority.directory,
       workspaceRoot: authority.authority.workspace.root,
@@ -149,7 +167,12 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),
       }),
+      governedWorkspaceSearchControl: createAstraGovernedWorkspaceSearchControl(session, {
+        ledgerFilename: operationLedgerPath(),
+        spoolFilename: receiptSpoolPath(),
+      }),
       skillActivationControl,
+      extensionInventoryControl,
     })
     authReader = await loadParentAnthropicAuthReader()
     const credentialBroker = createParentProviderCredentialBroker({ auth: authReader })
@@ -160,7 +183,7 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         session,
         authority.authority.sessionID,
         { ledgerFilename: operationLedgerPath(), spoolFilename: receiptSpoolPath() },
-        { readCatalog: readAstraProviderCatalog, credentialBroker },
+        makeAstraProviderSessionDependencies(credentialBroker, skillActivationControl),
       ),
     })
     const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control, provider)

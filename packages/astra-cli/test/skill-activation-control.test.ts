@@ -55,18 +55,14 @@ describe("Astra skill activation parent control", () => {
   test("records rejection and never creates or returns a prompt bundle", async () => {
     const fixture = await makeFixture("activate-once")
     const prepared = await prepareOne(fixture)
-    const result = await fixture.control.decide(
-      crypto.randomUUID(),
-      prepared.preview.proposalID,
-      "reject",
-    )
+    const result = await fixture.control.decide(crypto.randomUUID(), prepared.preview.proposalID, "reject")
 
     expect(result).toMatchObject({
       status: "denied_without_effect",
       receiptID: null,
       verification: "not_verified",
     })
-    expect(await fixture.control.takePromptBundle()).toBeNull()
+    expect(await fixture.control.takePromptBundle()).toEqual({ status: "none" })
     expect(await readdir(fixture.runtime)).toEqual([])
     expect(await fixture.control.inventory(crypto.randomUUID())).toMatchObject({
       status: "blocked",
@@ -84,39 +80,43 @@ describe("Astra skill activation parent control", () => {
         provenance: "workspace_opencode",
         trust: "UNTRUSTED INSTRUCTION DATA",
       },
-      effects: { workspaceWrite: "none", process: "none", network: "none", plugins: "none", mcp: "none", tools: "none" },
+      effects: {
+        workspaceWrite: "none",
+        process: "none",
+        network: "none",
+        plugins: "none",
+        mcp: "none",
+        tools: "none",
+      },
     })
 
     const progress: string[] = []
-    const result = await fixture.control.decide(
-      crypto.randomUUID(),
-      prepared.preview.proposalID,
-      "approve",
-      (event) => progress.push(event.status),
+    const result = await fixture.control.decide(crypto.randomUUID(), prepared.preview.proposalID, "approve", (event) =>
+      progress.push(event.status),
     )
     expect(result).toMatchObject({
       status: "completed_observed_not_verified",
       verification: "not_verified",
     })
-    expect(progress).toEqual([
-      "recording_authority",
-      "submitting_approval",
-      "effect_observed_not_verified",
-    ])
+    expect(progress).toEqual(["recording_authority", "submitting_approval", "effect_observed_not_verified"])
 
-    const bundle = await fixture.control.takePromptBundle()
-    expect(bundle).toMatchObject({
-      operationID: prepared.preview.operationID,
-      assurance: "observed_not_verified",
-      source: { provenance: "workspace_opencode", relativePath: ".opencode/skills/safe-skill/SKILL.md" },
-      skill: {
-        name: "safe-skill",
-        trust: "untrusted_instruction_data",
-        resourceDiscovery: "none",
+    const taken = await fixture.control.takePromptBundle()
+    expect(taken).toMatchObject({
+      status: "taken",
+      bundle: {
+        operationID: prepared.preview.operationID,
+        assurance: "observed_not_verified",
+        source: { provenance: "workspace_opencode", relativePath: ".opencode/skills/safe-skill/SKILL.md" },
+        skill: {
+          name: "safe-skill",
+          trust: "untrusted_instruction_data",
+          resourceDiscovery: "none",
+        },
       },
     })
-    expect(bundle?.skill.instructions).toContain("Never run commands automatically")
-    expect(await fixture.control.takePromptBundle()).toBeNull()
+    if (taken.status !== "taken") throw new Error("Expected prompt bundle")
+    expect(taken.bundle.skill.instructions).toContain("Never run commands automatically")
+    expect(await fixture.control.takePromptBundle()).toEqual({ status: "none" })
     expect(await readdir(fixture.runtime)).toEqual([])
 
     const replay = await fixture.control.decide(crypto.randomUUID(), prepared.preview.proposalID, "approve")
@@ -130,7 +130,7 @@ describe("Astra skill activation parent control", () => {
 
     const result = await fixture.control.decide(crypto.randomUUID(), prepared.preview.proposalID, "approve")
     expect(result).toMatchObject({ status: "failed_without_effect", verification: "not_verified" })
-    expect(await fixture.control.takePromptBundle()).toBeNull()
+    expect(await fixture.control.takePromptBundle()).toEqual({ status: "none" })
     expect(await readdir(fixture.runtime)).toEqual([])
   })
 
@@ -174,10 +174,10 @@ describe("Astra skill activation parent control", () => {
       status: "completed_observed_not_verified",
     })
 
-    expect(await fixture.control.takePromptBundle()).toBeNull()
+    expect(await fixture.control.takePromptBundle()).toEqual({ status: "blocked", reason: "bundle_unavailable" })
     expect(await fixture.control.takePromptBundle()).toMatchObject({
-      operationID: prepared.preview.operationID,
-      assurance: "observed_not_verified",
+      status: "taken",
+      bundle: { operationID: prepared.preview.operationID, assurance: "observed_not_verified" },
     })
     expect(cleanups).toBe(2)
     expect(await readdir(fixture.runtime)).toEqual([])

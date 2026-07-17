@@ -39,6 +39,9 @@ describe("Astra Safe Start command policy", () => {
         "astra.skill.inventory",
         "astra.skill.prepare",
         "astra.skill.close",
+        "astra.search.open",
+        "astra.search.query",
+        "astra.search.close",
         "app.exit",
         "command.palette.show",
       ].every(isAstraSafeStartCommand),
@@ -64,5 +67,7 @@ describe("Astra Safe Start command policy", () => {
     expect(isAstraSafeStartCommand("astra.plugin.unreviewed")).toBe(false)
     expect(isAstraSafeStartCommand("astra.skill.approve")).toBe(false)
     expect(isAstraSafeStartCommand("astra.skill.reject")).toBe(false)
+    expect(isAstraSafeStartCommand("astra.search.approve")).toBe(false)
+    expect(isAstraSafeStartCommand("astra.search.reject")).toBe(false)
   })
 })

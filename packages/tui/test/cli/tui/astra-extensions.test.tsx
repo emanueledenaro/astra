@@ -12,6 +12,8 @@ import { OpencodeKeymapProvider } from "../../../src/keymap"
 import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+import type { AstraExtensionInventoryClient } from "../../../src/astra/extension-inventory-client"
+import { parseContentDigest } from "@astra/domain/operation-contract"
 
 test("keeps the Astra Extensions surface out of non-Astra OpenCode", () => {
   expect(
@@ -19,7 +21,7 @@ test("keeps the Astra Extensions surface out of non-Astra OpenCode", () => {
   ).toBe(false)
 })
 
-test("opens the static Astra /extensions surface without effects", async () => {
+test("opens Astra /extensions inertly, previews exact authority, and shows inactive candidates only after approval", async () => {
   const effects: string[] = []
   const commands = new Map<
     string,
@@ -27,10 +29,14 @@ test("opens the static Astra /extensions surface without effects", async () => {
   >()
   let current: TuiRouteCurrent = { name: "session", params: { sessionID: "session-1" } }
   let route: TuiRouteDefinition | undefined
+  let dispatchCommand = (_name: string) => undefined
 
   function Harness() {
     const renderer = useRenderer()
     const keymap = createDefaultOpenTuiKeymap(renderer)
+    dispatchCommand = (name) => {
+      void keymap.dispatchCommand(name)
+    }
     const registerLayer = keymap.registerLayer.bind(keymap)
     keymap.registerLayer = (layer) => {
       layer.commands?.forEach((command) => commands.set(command.name, command))
@@ -69,7 +75,7 @@ test("opens the static Astra /extensions surface without effects", async () => {
       },
     } satisfies TuiPluginApi
 
-    registerAstraAppFeatures(api, authority)
+    registerAstraAppFeatures(api, authority, undefined, undefined, undefined, undefined, undefined, undefined, inventoryClient)
     const open = commands.get("astra.extensions.open")
     expect(open?.slashName).toBe("extensions")
     void keymap.dispatchCommand("astra.extensions.open")
@@ -87,24 +93,105 @@ test("opens the static Astra /extensions surface without effects", async () => {
 
   const app = await testRender(() => <Harness />, { width: 88, height: 22 })
   try {
-    const frame = await app.waitForFrame((value) => value.includes("every call must pass the Operation Kernel"))
+    const frame = await app.waitForFrame((value) => value.includes("I inspect"))
     expect(frame).toContain("Extensions")
     expect(frame).toContain("HOST EXECUTION — NO SANDBOX")
     expect(frame).toContain("SAFE START  ALWAYS ACTIVE")
     expect(frame).toContain("NOT INSPECTED • NOT VERIFIED")
-    expect(frame).toContain("STATIC POLICY ONLY")
-    expect(frame).toContain("no initialization, scanning, or execution")
-    expect(frame).toContain("SKILLS      PLANNED • ACTIVATE ONCE")
-    expect(frame).toContain("REMOTE MCP  BLOCKED — every call must pass the Operation Kernel")
-    expect(frame).toContain("LOCAL MCP   BLOCKED — isolation deferred to hardening")
-    expect(frame).toContain("PLUGINS     BLOCKED — external plugins require isolation and hardening")
-    expect(frame).toContain("no filesystem, process, network, or client request")
+    expect(frame).toContain("STATIC JSON/JSONC • NO ACTIVATION")
+    expect(frame).toContain("NO AUTOMATIC discovery, initialization, or activation")
+    expect(frame).toContain("no plugin or MCP is activated")
     expect(effects).toEqual([])
+    expect(current.name).toBe("astra-extensions")
+    dispatchCommand("astra.extensions.inventory")
+    const preview = await app.waitForFrame((value) => value.includes("PRIVATE VERIFIED SNAPSHOT"))
+    expect(preview).toContain("HOST EXECUTION — NO SANDBOX")
+    expect(preview).toContain("workspace_extension_config_read")
+    expect(preview).toContain("opencode.json")
+    expect(preview).not.toContain("Plugin candidate")
+    dispatchCommand("astra.extensions.approve")
+    const completed = await app.waitForFrame((value) => value.includes("Plugin candidate abcdef12"))
+    expect(completed).toContain("INACTIVE • NOT VERIFIED")
+    expect(calls).toEqual(["prepare", "approve"])
+    dispatchCommand("astra.extensions.inventory")
+    const nextPreview = await app.waitForFrame((value) => value.includes("AWAITING A/D"))
+    expect(nextPreview).not.toContain("Plugin candidate abcdef12")
+    dispatchCommand("astra.extensions.approve")
+    const uncertain = await app.waitForFrame((value) => value.includes("A check status"))
+    expect(uncertain).toContain("effect_in_progress_or_unknown")
+    dispatchCommand("astra.extensions.close")
     expect(current.name).toBe("astra-extensions")
   } finally {
     app.renderer.destroy()
   }
 })
+
+const calls: string[] = []
+let decisions = 0
+const proposalID = "10000000-0000-4000-8000-000000000001"
+const inventoryClient = {
+  async prepare() {
+    calls.push("prepare")
+    return {
+      schemaVersion: 1,
+      requestId: "20000000-0000-4000-8000-000000000001",
+      status: "prepared",
+      preview: {
+        schemaVersion: 1,
+        proposalID,
+        expiresAt: "2026-07-18T12:05:00.000Z",
+        capabilityDigest: `sha256:${"a".repeat(64)}` as const,
+        boundaryLabel: "HOST EXECUTION — NO SANDBOX",
+        helper: { kind: "astra_native_static_inventory", execution: "private_verified_snapshot_after_claim" },
+        resourceClasses: ["workspace_extension_config_read"],
+        allowlist: ["opencode.json"],
+        verification: "not_verified",
+      },
+    } as const
+  },
+  async decide(id, decision) {
+    expect(id).toBe(proposalID)
+    calls.push(decision)
+    decisions++
+    if (decisions > 1) {
+      return {
+        schemaVersion: 1,
+        requestId: "30000000-0000-4000-8000-000000000002",
+        proposalID,
+        status: "reconciliation_required",
+        reason: "effect_in_progress_or_unknown",
+      } as const
+    }
+    return {
+      schemaVersion: 1,
+      requestId: "30000000-0000-4000-8000-000000000001",
+      proposalID,
+      status: "completed_observed_not_verified",
+      receiptID: "40000000-0000-4000-8000-000000000001",
+      candidates: [
+        {
+          candidateID: contentDigest("b"),
+          kind: "plugin",
+          displayName: "Plugin candidate abcdef12",
+          source: "config",
+          sourcePath: "opencode.json",
+          referenceClass: "package",
+          referenceDigest: contentDigest("c"),
+          state: "inactive",
+          verification: "not_verified",
+        },
+      ],
+      verification: "not_verified",
+    } as const
+  },
+  dispose() {},
+} satisfies AstraExtensionInventoryClient
+
+function contentDigest(character: string) {
+  const parsed = parseContentDigest(`sha256:${character.repeat(64)}`)
+  if (!parsed.ok) throw new Error("Invalid digest fixture")
+  return parsed.value
+}
 
 const authority = {
   schemaVersion: 1,

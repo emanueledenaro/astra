@@ -1,6 +1,6 @@
 # Astra Delivery Status
 
-Updated: 2026-07-17
+Updated: 2026-07-18
 
 ## Objective
 
@@ -8,7 +8,7 @@ Produce a local Astra release candidate that is functional, independently verifi
 
 ## Bottom line
 
-Astra launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. Read-only and Activate once are bound to a private session authority, but every inherited AI, shell, general write, provider, plugin, skill, MCP, LSP, formatter, and VCS mutation remains blocked in the product TUI.
+Astra launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. `astra system` now opens a separate inert System Mode without admitting or scanning a workspace and keeps `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED` visible. Read-only and Activate once are bound to a private session authority, but every inherited AI, shell, general write, provider, plugin, skill, MCP, LSP, formatter, and VCS mutation remains blocked in the product TUI.
 
 This is a verified safe-opening and host-execution checkpoint, not a release candidate. One developer verification effect crosses the Operation Kernel through a bounded host process with explicit consent, durable authority, receipts, recovery, and independent verification. It is always labelled `HOST EXECUTION — NO SANDBOX`; the UI does not claim host network isolation or OS-enforced filesystem scope.
 
@@ -25,17 +25,17 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Working product surface
 
-| Surface             | Current behavior                                                         |
-| ------------------- | ------------------------------------------------------------------------ |
-| `astra .`           | Opens the current directory through the real Workspace Gate              |
-| `astra /path`       | Opens an explicit path; safe intermediate aliases become canonical       |
-| `astra open <path>` | Compatibility alias                                                      |
-| `astra`             | No Workspace mode planned; currently prints help                         |
-| `astra system`      | Planned; not implemented                                                 |
-| `R`                 | Opens TUI with `READ ONLY • EFFECTS DENIED`                              |
-| `G`                 | Runs bounded sandboxed Git inspection with visible progress              |
-| `A`                 | Available only after a current Git baseline; effects remain blocked      |
-| `Q`                 | Exits without storing trust or launching the inherited workspace runtime |
+| Surface             | Current behavior                                                            |
+| ------------------- | --------------------------------------------------------------------------- |
+| `astra .`           | Opens the current directory through the real Workspace Gate                 |
+| `astra /path`       | Opens an explicit path; safe intermediate aliases become canonical          |
+| `astra open <path>` | Compatibility alias                                                         |
+| `astra`             | No Workspace mode planned; currently prints help                            |
+| `astra system`      | Opens inert System Mode; no workspace authority, control socket, or effects |
+| `R`                 | Opens TUI with `READ ONLY • EFFECTS DENIED`                                 |
+| `G`                 | Runs bounded sandboxed Git inspection with visible progress                 |
+| `A`                 | Available only after a current Git baseline; effects remain blocked         |
+| `Q`                 | Exits without storing trust or launching the inherited workspace runtime    |
 
 ## Implemented and verified
 
@@ -80,6 +80,8 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ### TUI and Lynx
 
+- `astra system` dynamically loads a dedicated TUI only after a TTY check; it does not open a workspace or create Astra state and exits with `Q`, `Esc`, or `Ctrl-C`.
+- The public launcher disables cwd-controlled Bun config, preload, `.env`, and auto-install before Astra starts. System Mode stays in that inert process and does not bootstrap workspace services.
 - The real Workspace Gate and safe OpenCode-derived TUI render on macOS.
 - Full and compact terminal layouts have tests.
 - Lynx has deterministic terminal frames and an illustrated two-frame raster concept pack under `assets/lynx`.
@@ -87,6 +89,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Latest integration evidence
 
+- `astra system` was run from a hostile cwd containing `.env`, `bunfig.toml`, a preload canary, and a package script. The real PTY showed the exact deny-all status, `Q` exited with code 0, all four file SHA-256 values were unchanged, no Astra data directory appeared, and no child remained.
 - Toolchain: Bun `1.3.14`; frozen install succeeds.
 - Domain: 50 tests, 1,979 expectations; typecheck passes.
 - Ledger: 47 tests, 181 expectations; typecheck passes.
