@@ -41,12 +41,12 @@ export const defaultGitRepositoryBaselineLimits = {
   maxStderrBytes: 16 * 1024,
   maxEntries: 25_000,
   maxBoundaryEntries: 250_000,
-  maxBoundaryDurationMs: 5_000,
+  maxBoundaryDurationMs: 15_000,
   maxGitBinaryBytes: 64 * 1024 * 1024,
   maxContentEntries: 25_000,
   maxFileBytes: 32 * 1024 * 1024,
   maxTotalBytes: 256 * 1024 * 1024,
-  maxDurationMs: 30_000,
+  maxDurationMs: 60_000,
 } as const satisfies GitRepositoryBaselineLimits
 
 type BaselineHooks = Readonly<{

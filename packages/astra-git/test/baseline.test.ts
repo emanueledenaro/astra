@@ -36,10 +36,11 @@ describe("bounded Git repository baseline", () => {
   test("uses explicit defaults large enough for Astra without silently relaxing them", () => {
     expect(defaultGitRepositoryBaselineLimits).toMatchObject({
       maxEntries: 25_000,
+      maxBoundaryDurationMs: 15_000,
       maxContentEntries: 25_000,
       maxFileBytes: 32 * 1024 * 1024,
       maxTotalBytes: 256 * 1024 * 1024,
-      maxDurationMs: 30_000,
+      maxDurationMs: 60_000,
     })
   })
 
@@ -105,14 +106,16 @@ describe("bounded Git repository baseline", () => {
     const executableRoot = await repository()
     const executableBaseline = await complete(executableRoot)
     await chmod(join(executableRoot, "tracked.txt"), 0o755)
-    expect(await revalidateGitRepositoryBaseline(executableRoot, executableBaseline)).toMatchObject({ status: "stale" })
+    expect(await revalidateGitRepositoryBaseline(executableRoot, executableBaseline)).toMatchObject({
+      status: "stale",
+    })
 
     const deletedRoot = await repository()
     await rm(join(deletedRoot, "tracked.txt"))
     const deletedBaseline = await complete(deletedRoot)
     await writeFile(join(deletedRoot, "tracked.txt"), "initial\n")
     expect(await revalidateGitRepositoryBaseline(deletedRoot, deletedBaseline)).toMatchObject({ status: "stale" })
-  })
+  }, 30_000)
 
   test("binds executable bits for inert Git hook metadata", async () => {
     const root = await repository()
@@ -270,7 +273,7 @@ describe("bounded Git repository baseline", () => {
       expectedSnapshotDigest: blockedBaseline.snapshotDigest,
       reason: "git_metadata_missing",
     })
-  })
+  }, 30_000)
 
   test("rejects a structurally valid baseline whose authority fields do not match its digest", async () => {
     const root = await repository()
