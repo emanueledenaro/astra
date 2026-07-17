@@ -1,16 +1,24 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { createHash } from "node:crypto"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { createHash, X509Certificate } from "node:crypto"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { rootCertificates } from "node:tls"
 import { parseOperationID } from "@astra/domain/operation-contract"
 import { Effect } from "effect"
 import { digest } from "../src/controlled-write-authority"
-import type { ExecuteProviderTurnInput } from "../src/provider-turn-coordinator"
-import { makeProviderTurnOperationFacts } from "../src/provider-turn-operation-facts"
+import { recoverProviderTurn, type ExecuteProviderTurnInput } from "../src/provider-turn-coordinator"
+import {
+  providerTurnLoopbackPolicyDigest,
+  providerTurnPublicDnsPolicyDigest,
+  providerTurnResolverImplementationDigest,
+  providerTurnTransportImplementationDigest,
+  type ProviderTurnNetworkPolicy,
+} from "../src/provider-turn-network-policy"
 import { runWithLedger } from "../src/operation-storage"
 import {
   executeProviderTurnWithTrustedTransport,
+  providerTurnTransportTestOnly,
   trustedProviderTurnTransportDescriptor,
 } from "../src/provider-turn-transport"
 import { scanWorkspace } from "../src/workspace-preflight"
@@ -31,17 +39,13 @@ describe("trusted provider turn transport boundary", () => {
     let calls = 0
     let requestBody = new Uint8Array()
     let authorization = ""
-    let claimObserved = false
-    let input: ExecuteProviderTurnInput | undefined
     const server = startServer(async (request) => {
       calls += 1
       requestBody = new Uint8Array(await request.arrayBuffer())
       authorization = request.headers.get("authorization") ?? ""
-      if (!input) throw new Error("Provider fixture input was not prepared")
-      claimObserved = await hasDurableClaim(input)
       return Response.json({ output: [{ type: "message", content: "hello" }] })
     })
-    input = await operationInput(server.url.origin, body)
+    const input = await operationInput(server.url.origin, body)
 
     const result = await executeProviderTurnWithTrustedTransport(
       input,
@@ -51,8 +55,8 @@ describe("trusted provider turn transport boundary", () => {
         headers: [["content-type", "application/json"]],
       },
       {
-        mode: "dormant_test_only",
-        now: () => Date.parse(input!.policyAskedAt) + 100,
+        mode: "test_only_loopback",
+        now: () => Date.parse(input.policyAskedAt) + 100,
         async requestApproval(preview) {
           expect(preview.credential).toEqual({ ...credentialBinding(), headerName: "authorization" })
           expect(preview.wireRequest).toEqual({
@@ -62,7 +66,7 @@ describe("trusted provider turn transport boundary", () => {
             timeoutMilliseconds: 1_000,
             maximumResponseBytes: 1_024,
           })
-          expect(await eventNames(input!)).toEqual(["operation.admitted", "policy.ask"])
+          expect(await eventNames(input)).toEqual(["operation.admitted", "policy.ask"])
           return "approve"
         },
       },
@@ -73,12 +77,23 @@ describe("trusted provider turn transport boundary", () => {
     expect(calls).toBe(1)
     expect(requestBody).toEqual(body)
     expect(authorization).toBe(secret)
-    expect(claimObserved).toBeTrue()
+    expect(await eventNames(input)).toEqual([
+      "operation.admitted",
+      "policy.ask",
+      "approval.granted",
+      "dispatch.requested",
+      "executor.accepted",
+      "effect.unknown",
+    ])
     const durable = JSON.stringify(await durableEvents(input))
     expect(durable).not.toContain(secret)
     expect(durable).not.toContain(prompt)
     expect(durable).not.toContain("VERIFIED")
     expect(durable).not.toContain("succeeded")
+    expect(durable).toContain("provider_network_dispatch")
+    expect(durable).toContain("127.0.0.1")
+    expect(durable).toContain('\\"statusCode\\":200')
+    expect(durable).toContain('\\"contentType\\":\\"application/json\\"')
   })
 
   test("rejects consent and mismatched bytes without any network effect", async () => {
@@ -90,7 +105,7 @@ describe("trusted provider turn transport boundary", () => {
     const body = new TextEncoder().encode('{"input":"approved bytes"}')
     const rejected = await operationInput(server.url.origin, body)
     const result = await executeProviderTurnWithTrustedTransport(rejected, wireValues(body), {
-      mode: "dormant_test_only",
+      mode: "test_only_loopback",
       now: () => Date.parse(rejected.policyAskedAt) + 100,
       async requestApproval() {
         return "reject"
@@ -102,7 +117,7 @@ describe("trusted provider turn transport boundary", () => {
     const mismatch = await operationInput(server.url.origin, body)
     expect(() =>
       executeProviderTurnWithTrustedTransport(mismatch, wireValues(new TextEncoder().encode('{"input":"different"}')), {
-        mode: "dormant_test_only",
+        mode: "test_only_loopback",
         async requestApproval() {
           throw new Error("Consent must not be reached for mismatched bytes")
         },
@@ -119,7 +134,7 @@ describe("trusted provider turn transport boundary", () => {
           credentialMismatch,
           { ...wireValues(body), credential },
           {
-            mode: "dormant_test_only",
+            mode: "test_only_loopback",
             async requestApproval() {
               throw new Error("Consent must not be reached for mismatched credentials")
             },
@@ -127,6 +142,55 @@ describe("trusted provider turn transport boundary", () => {
         ),
       ).toThrow("does not match the admitted credential binding")
     }
+    expect(calls).toBe(0)
+  })
+
+  test("preserves bounded status and normalized SSE content type as uncertain evidence", async () => {
+    const body = new TextEncoder().encode('{"input":"stream"}')
+    const server = startServer(
+      () =>
+        new Response("data: {}\n\n", {
+          status: 202,
+          headers: { "content-type": "Text/Event-Stream; Charset=UTF-8" },
+        }),
+    )
+    const input = await operationInput(server.url.origin, body)
+    const result = await executeProviderTurnWithTrustedTransport(input, wireValues(body), {
+      mode: "test_only_loopback",
+      now: () => Date.parse(input.policyAskedAt) + 100,
+      async requestApproval() {
+        return "approve"
+      },
+    })
+
+    expect(result).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    const durable = JSON.stringify(await durableEvents(input))
+    expect(durable).toContain('\\"statusCode\\":202')
+    expect(durable).toContain('\\"contentType\\":\\"text/event-stream\\"')
+    expect(durable).not.toContain("VERIFIED")
+  })
+
+  test("revalidates authority immediately before writing credentials or body", async () => {
+    let calls = 0
+    const server = startServer(() => {
+      calls += 1
+      return new Response("unexpected")
+    })
+    const body = new TextEncoder().encode('{"input":"must not send"}')
+    const input = await operationInput(server.url.origin, body)
+    const result = await executeProviderTurnWithTrustedTransport(input, wireValues(body), {
+      mode: "test_only_loopback",
+      now: () => Date.parse(input.policyAskedAt) + 100,
+      async beforeCredentialWrite() {
+        await rm(input.report.root, { recursive: true, force: true })
+        await mkdir(input.report.root)
+      },
+      async requestApproval() {
+        return "approve"
+      },
+    })
+
+    expect(result).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
     expect(calls).toBe(0)
   })
 
@@ -145,7 +209,7 @@ describe("trusted provider turn transport boundary", () => {
     const input = await operationInput(server.url.origin, body)
 
     const result = await executeProviderTurnWithTrustedTransport(input, wireValues(body), {
-      mode: "dormant_test_only",
+      mode: "test_only_loopback",
       now: () => Date.parse(input.policyAskedAt) + 100,
       async requestApproval() {
         return "approve"
@@ -169,7 +233,7 @@ describe("trusted provider turn transport boundary", () => {
     const limited = await operationInput(limitServer.url.origin, body, { maximumResponseBytes: 32 })
     expect(
       await executeProviderTurnWithTrustedTransport(limited, wireValues(body), {
-        mode: "dormant_test_only",
+        mode: "test_only_loopback",
         now: () => Date.parse(limited.policyAskedAt) + 100,
         async requestApproval() {
           return "approve"
@@ -187,7 +251,7 @@ describe("trusted provider turn transport boundary", () => {
     const timed = await operationInput(timeoutServer.url.origin, body, { timeoutMilliseconds: 100 })
     expect(
       await executeProviderTurnWithTrustedTransport(timed, wireValues(body), {
-        mode: "dormant_test_only",
+        mode: "test_only_loopback",
         now: () => Date.parse(timed.policyAskedAt) + 100,
         async requestApproval() {
           return "approve"
@@ -197,44 +261,209 @@ describe("trusted provider turn transport boundary", () => {
     expect(timeoutCalls).toBe(1)
   })
 
-  test("rejects production enablement until connected-peer enforcement exists", async () => {
-    expect(trustedProviderTurnTransportDescriptor).toMatchObject({
-      productionCapable: false,
-      peerEnforcement: "not_implemented",
-      terminalState: "effect_unknown_only",
-    })
+  test("rejects response events processed after the logical deadline", async () => {
+    const body = new TextEncoder().encode('{"input":"logical deadline"}')
+    let clock = Date.now()
     let calls = 0
     const server = startServer(() => {
       calls += 1
-      return new Response("unexpected")
+      clock += 101
+      return Response.json({ output: "too late" })
     })
-    const body = new TextEncoder().encode('{"input":"production blocked"}')
-    const input = await operationInput(server.url.origin, body)
+    const input = await operationInput(server.url.origin, body, { timeoutMilliseconds: 100 })
+    clock = Date.parse(input.policyAskedAt) + 100
+    const result = await executeProviderTurnWithTrustedTransport(input, wireValues(body), {
+      mode: "test_only_loopback",
+      now: () => clock,
+      async requestApproval() {
+        return "approve"
+      },
+    })
+
+    expect(result).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    expect(calls).toBe(1)
+    expect(JSON.stringify(await durableEvents(input))).not.toContain("provider_network_dispatch")
+  })
+
+  test("does not resolve DNS before durable approval and claim", async () => {
+    expect(trustedProviderTurnTransportDescriptor).toMatchObject({
+      networkTransportProductionCapable: true,
+      productIntegrationCapable: false,
+      peerEnforcement: "dns_resolved_ip_pinned_and_verified",
+      tlsEnforcement: "original_hostname_sni_and_certificate",
+      terminalState: "effect_unknown_only",
+    })
+    const body = new TextEncoder().encode('{"input":"reject before DNS"}')
+    const input = await operationInput("http://127.0.0.1:8787", body)
+    const origin = "https://api.example.test"
     const productionInput = {
       ...input,
       plan: {
         ...input.plan,
-        origin: "https://api.example.test",
+        origin,
         transportPolicy: "https_only" as const,
+        networkPolicy: httpsNetworkPolicy(origin),
       },
     }
+    let resolverCalls = 0
+    const result = await executeProviderTurnWithTrustedTransport(productionInput, wireValues(body), {
+      mode: "test_only_https_seam",
+      now: () => Date.parse(productionInput.policyAskedAt) + 100,
+      async resolver() {
+        resolverCalls += 1
+        return [{ address: "1.1.1.1", family: 4 }]
+      },
+      async requestApproval() {
+        expect(resolverCalls).toBe(0)
+        return "reject"
+      },
+    })
+    expect(result).toMatchObject({ state: "denied", status: "denied_without_effect" })
+    expect(resolverCalls).toBe(0)
+  })
+
+  test("bounds DNS with the same deadline and aborts without any connect attempt", async () => {
+    const body = new TextEncoder().encode('{"input":"bounded DNS"}')
+    const input = await operationInput("http://127.0.0.1:8787", body, { timeoutMilliseconds: 100 })
+    const productionInput = withHttpsOrigin(input, "https://api.example.test")
+    let resolverAborted = false
+    let connectAttempts = 0
+    const result = await executeProviderTurnWithTrustedTransport(productionInput, wireValues(body), {
+      mode: "test_only_https_seam",
+      resolver(_hostname, signal) {
+        signal.addEventListener("abort", () => {
+          resolverAborted = true
+        })
+        return new Promise(() => {})
+      },
+      onConnectAttempt() {
+        connectAttempts += 1
+      },
+      async requestApproval() {
+        return "approve"
+      },
+    })
+
+    expect(result).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    expect(resolverAborted).toBeTrue()
+    expect(connectAttempts).toBe(0)
+  })
+
+  test("ignores delayed DNS after concurrent claim recovery and sends nothing", async () => {
+    const body = new TextEncoder().encode('{"input":"expired after DNS"}')
+    const input = await operationInput("http://127.0.0.1:8787", body, { timeoutMilliseconds: 30_000 })
+    const productionInput = withHttpsOrigin(input, "https://api.example.test")
+    let clock = Date.parse(productionInput.policyAskedAt) + 100
+    let resolverStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      resolverStarted = resolve
+    })
+    let releaseResolver!: () => void
+    const resolverGate = new Promise<void>((resolve) => {
+      releaseResolver = resolve
+    })
+    let connectAttempts = 0
+    const execution = executeProviderTurnWithTrustedTransport(productionInput, wireValues(body), {
+      mode: "test_only_https_seam",
+      now: () => clock,
+      async resolver() {
+        resolverStarted()
+        await resolverGate
+        return [{ address: "1.1.1.1", family: 4 }]
+      },
+      onConnectAttempt() {
+        connectAttempts += 1
+      },
+      async requestApproval() {
+        return "approve"
+      },
+    })
+
+    await started
+    clock += 61_000
+    const recovered = await recoverProviderTurn(productionInput, { now: () => clock })
+    expect(recovered).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    releaseResolver()
+    const result = await execution
+    expect(result).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    expect(connectAttempts).toBe(0)
+  })
+
+  test("rejects private DNS answers and pins one public address against rebinding", async () => {
+    const policy = httpsNetworkPolicy("https://api.example.test")
+    for (const addresses of [
+      [{ address: "10.0.0.8", family: 4 }],
+      [
+        { address: "1.1.1.1", family: 4 },
+        { address: "169.254.169.254", family: 4 },
+      ],
+      [{ address: "fe80::1", family: 6 }],
+      [{ address: "ff02::1", family: 6 }],
+      [{ address: "64:ff9b::a00:1", family: 6 }],
+      [{ address: "100:0:0:1::1", family: 6 }],
+      [{ address: "2001::1", family: 6 }],
+      [{ address: "2002:c000:201::", family: 6 }],
+      [{ address: "0.0.0.0", family: 4 }],
+    ]) {
+      const rejection = await providerTurnTransportTestOnly
+        .resolveProviderNetwork(policy, Date.now, async () => addresses)
+        .then(
+          () => null,
+          (error: unknown) => error,
+        )
+      if (!(rejection instanceof Error)) throw new Error("Expected an ineligible DNS address rejection")
+      expect(rejection.message).toContain("ineligible address")
+    }
+
+    let dnsAnswer = "1.1.1.1"
+    const evidence = await providerTurnTransportTestOnly.resolveProviderNetwork(policy, Date.now, async () => [
+      { address: dnsAnswer, family: 4 },
+    ])
+    dnsAnswer = "10.0.0.8"
+    expect(providerTurnTransportTestOnly.pinnedAddress(evidence, policy.hostname)).toEqual({
+      address: "1.1.1.1",
+      family: 4,
+    })
+    expect(() => providerTurnTransportTestOnly.pinnedAddress(evidence, "rebound.example.test")).toThrow()
+  })
+
+  test("requires the pinned connected peer and original TLS hostname", async () => {
+    const policy = httpsNetworkPolicy("https://api.example.test")
+    const evidence = await providerTurnTransportTestOnly.resolveProviderNetwork(policy, Date.now, async () => [
+      { address: "1.1.1.1", family: 4 },
+    ])
+    expect(() => providerTurnTransportTestOnly.assertConnectedPeer(evidence.selectedAddress, "1.0.0.1")).toThrow(
+      "connected peer mismatch",
+    )
+    expect(() => providerTurnTransportTestOnly.assertConnectedPeer(evidence.selectedAddress, undefined)).toThrow()
+    expect(providerTurnTransportTestOnly.assertConnectedPeer(evidence.selectedAddress, "1.1.1.1")).toBeUndefined()
+
+    const tls = providerTurnTransportTestOnly.tlsConnectionOptions(evidence)
+    expect(tls.host).toBe(evidence.selectedAddress.address)
+    expect(tls.servername).toBe(policy.hostname)
+    expect(tls.rejectUnauthorized).toBeTrue()
+    expect(tls.ALPNProtocols).toEqual(["http/1.1"])
+    const unrelatedCertificate = new X509Certificate(rootCertificates[0]!).toLegacyObject()
+    expect(tls.checkServerIdentity("ignored.example.test", unrelatedCertificate)).toBeInstanceOf(Error)
+  })
+
+  test("rejects malformed, oversized, informational, and ambiguous HTTP response headers", () => {
+    const parse = providerTurnTransportTestOnly.parseRawResponse
+    expect(() => parse(Buffer.from("HTTP/1.1 199 Continue\r\ncontent-length: 0\r\n\r\n"), 32)).toThrow(
+      "status unsupported",
+    )
+    expect(() => parse(Buffer.from("HTTP/1.1 200 OK\r\nbad header\r\n\r\n"), 32)).toThrow("header invalid")
+    expect(() => parse(Buffer.from(`HTTP/1.1 200 OK\r\nx-long: ${"x".repeat(65_536)}\r\n\r\n`), 32)).toThrow(
+      "headers invalid",
+    )
     expect(() =>
-      executeProviderTurnWithTrustedTransport(productionInput, wireValues(body), {
-        mode: "production",
-        async requestApproval() {
-          throw new Error("Consent must not be reached in unsupported production mode")
-        },
-      }),
-    ).toThrow("requires DNS and connected-peer enforcement")
-    expect(() =>
-      executeProviderTurnWithTrustedTransport(productionInput, wireValues(body), {
-        mode: "dormant_test_only",
-        async requestApproval() {
-          throw new Error("Consent must not be reached for HTTPS in dormant mode")
-        },
-      }),
-    ).toThrow("limited to literal loopback fixtures")
-    expect(calls).toBe(0)
+      parse(
+        Buffer.from(
+          "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-type: application/json\r\ncontent-length: 0\r\n\r\n",
+        ),
+        32,
+      ),
+    ).toThrow("header repeated")
   })
 })
 
@@ -267,6 +496,7 @@ async function operationInput(
       variant: null,
       origin,
       transportPolicy: "test_only_loopback_http",
+      networkPolicy: loopbackNetworkPolicy(origin),
       credential: {
         handle: credentialBinding().handle,
         accountFingerprint: credentialBinding().accountFingerprint,
@@ -304,14 +534,40 @@ function credentialBinding() {
   }
 }
 
-async function hasDurableClaim(input: ExecuteProviderTurnInput) {
-  const facts = makeProviderTurnOperationFacts(input)
-  return runWithLedger(input.ledgerFilename, (ledger) =>
-    Effect.gen(function* () {
-      yield* ledger.initialize()
-      return (yield* ledger.getDispatchSnapshot(facts.dispatchRequestID))?.claim !== null
-    }),
-  )
+function loopbackNetworkPolicy(origin: string) {
+  const url = new URL(origin)
+  return {
+    mode: "test_literal_loopback" as const,
+    hostname: url.hostname,
+    port: Number(url.port || 80),
+    dnsPolicyDigest: providerTurnLoopbackPolicyDigest,
+    resolverImplementationDigest: providerTurnResolverImplementationDigest,
+    transportImplementationDigest: providerTurnTransportImplementationDigest,
+  }
+}
+
+function httpsNetworkPolicy(origin: string): ProviderTurnNetworkPolicy {
+  const url = new URL(origin)
+  return {
+    mode: "https_public_pinned",
+    hostname: url.hostname,
+    port: Number(url.port || 443),
+    dnsPolicyDigest: providerTurnPublicDnsPolicyDigest,
+    resolverImplementationDigest: providerTurnResolverImplementationDigest,
+    transportImplementationDigest: providerTurnTransportImplementationDigest,
+  }
+}
+
+function withHttpsOrigin(input: ExecuteProviderTurnInput, origin: string): ExecuteProviderTurnInput {
+  return {
+    ...input,
+    plan: {
+      ...input.plan,
+      origin,
+      transportPolicy: "https_only",
+      networkPolicy: httpsNetworkPolicy(origin),
+    },
+  }
 }
 
 async function durableEvents(input: ExecuteProviderTurnInput) {

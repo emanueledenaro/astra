@@ -20,12 +20,19 @@ import {
   digest,
   makeControlledWriteBaselineAuthority,
 } from "./controlled-write-authority"
+import {
+  isLiteralProviderTurnLoopbackHostname,
+  snapshotProviderTurnNetworkPolicy,
+  validateProviderTurnNetworkPolicy,
+  type ProviderTurnNetworkPolicy,
+} from "./provider-turn-network-policy"
 
 const authorizationLifetimeMilliseconds = 300_000
+const maximumRequestPathBytes = 8_192
 export const providerTurnMaximumRequestBytes = 4_194_304
 
 export const providerTurnPolicyDigest = digest("astra-policy:provider-turn-explicit-consent:v1")
-export const providerTurnAdapterDigest = digest("astra-runtime:provider-turn:bounded-adapter-seam:v3")
+export const providerTurnAdapterDigest = digest("astra-runtime:provider-turn:bounded-adapter-seam:v5")
 export const providerTurnObserverDigest = digest("astra-observer:provider-turn-finish:v1")
 export const providerTurnExecutor = "astra-executor:provider-turn"
 
@@ -41,6 +48,7 @@ export type ProviderTurnPlan = Readonly<{
   variant: string | null
   origin: string
   transportPolicy: "https_only" | "test_only_loopback_http"
+  networkPolicy: ProviderTurnNetworkPolicy
   credential: Readonly<{
     handle: string
     accountFingerprint: string
@@ -77,6 +85,7 @@ export type ProviderTurnPreview = Readonly<{
     accountFingerprint: ContentDigest
     headerName: string
   }>
+  networkPolicy: ProviderTurnNetworkPolicy
   wireRequest: ProviderTurnPlan["wireRequest"]
   logicalPayload: Readonly<{ digest: ContentDigest; bytes: number }>
   executionBoundary: "network_egress_host_no_sandbox"
@@ -91,6 +100,7 @@ export type UntrustedProviderTurnAdapterRequest = Readonly<{
   session: ProviderTurnPreview["session"]
   provider: ProviderTurnPreview["provider"]
   credential: ProviderTurnPreview["credential"]
+  networkPolicy: ProviderTurnPreview["networkPolicy"]
   expectedOrigin: string
   wireRequest: ProviderTurnPreview["wireRequest"]
   logicalPayload: ProviderTurnPreview["logicalPayload"]
@@ -125,6 +135,7 @@ export function snapshotProviderTurnOperationFactsInput(
     variant: source.plan.variant === null ? null : requireString(source.plan.variant),
     origin: requireString(source.plan.origin),
     transportPolicy: source.plan.transportPolicy,
+    networkPolicy: snapshotProviderTurnNetworkPolicy(source.plan.networkPolicy),
     credential: {
       handle: requireString(source.plan.credential.handle),
       accountFingerprint: requireString(source.plan.credential.accountFingerprint),
@@ -224,6 +235,7 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       accountFingerprint: requireContentDigest(input.plan.credential.accountFingerprint),
       headerName: input.plan.credential.headerName,
     },
+    networkPolicy: snapshotProviderTurnNetworkPolicy(input.plan.networkPolicy),
     wireRequest: {
       method: input.plan.wireRequest.method,
       path: input.plan.wireRequest.path,
@@ -258,6 +270,9 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
     `provider-account:${input.plan.credential.accountFingerprint}`,
     `network-origin:${input.plan.origin}`,
     `network-endpoint:${input.plan.origin}${input.plan.wireRequest.path}`,
+    `dns-policy:${input.plan.networkPolicy.dnsPolicyDigest}`,
+    `resolver-implementation:${input.plan.networkPolicy.resolverImplementationDigest}`,
+    `transport-implementation:${input.plan.networkPolicy.transportImplementationDigest}`,
   ] as const
   const intent = {
     kind: "provider_turn",
@@ -271,6 +286,7 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       origin: input.plan.origin,
       transportPolicy: input.plan.transportPolicy,
       credential: preview.credential,
+      networkPolicy: preview.networkPolicy,
       wireRequest: preview.wireRequest,
       logicalPayload: preview.logicalPayload,
       executionBoundary: input.plan.executionBoundary,
@@ -305,6 +321,9 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
         { resource: resources[3], mode: "account_fingerprint_guard" },
         { resource: resources[4], mode: "origin_guard" },
         { resource: resources[5], mode: "send_logical_payload" },
+        { resource: resources[6], mode: "dns_policy_guard" },
+        { resource: resources[7], mode: "resolver_implementation_guard" },
+        { resource: resources[8], mode: "transport_implementation_guard" },
       ],
       partialEffect: "reconciliation_required",
       completionCriteria: [completionCriterion],
@@ -334,6 +353,7 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
     session: { ...preview.session },
     provider: { ...preview.provider },
     credential: { ...preview.credential },
+    networkPolicy: { ...preview.networkPolicy },
     expectedOrigin: preview.provider.origin,
     wireRequest: {
       ...preview.wireRequest,
@@ -523,6 +543,10 @@ function requireInput(input: ProviderTurnOperationFactsInput) {
   requireBoundedIdentifier(input.plan.modelID, "model ID")
   if (input.plan.variant !== null) requireBoundedIdentifier(input.plan.variant, "model variant")
   requireCanonicalOrigin(input.plan.origin, input.plan.transportPolicy)
+  validateProviderTurnNetworkPolicy(input.plan.networkPolicy, {
+    origin: input.plan.origin,
+    transportPolicy: input.plan.transportPolicy,
+  })
   requireCredentialBinding(input.plan.credential, input.plan.wireRequest.headerNames)
   requireWireRequest(input.plan.wireRequest)
   requireContentDigest(input.plan.logicalPayload.digest)
@@ -553,6 +577,12 @@ function requireCredentialBinding(
 
 function requireWireRequest(input: ProviderTurnPlan["wireRequest"]) {
   if (input.method !== "POST") throw new TypeError("Provider turns require an explicit POST request")
+  if (
+    new TextEncoder().encode(input.path).byteLength > maximumRequestPathBytes ||
+    !/^\/[\u0021-\u007e]*$/u.test(input.path)
+  ) {
+    throw new TypeError("The provider request path exceeds its byte limit or contains unsafe characters")
+  }
   let endpoint: URL
   try {
     endpoint = new URL(input.path, "https://astra.invalid")
@@ -624,15 +654,11 @@ function requireCanonicalOrigin(input: string, transportPolicy: ProviderTurnPlan
   if (
     transportPolicy === "test_only_loopback_http" &&
     url.protocol === "http:" &&
-    isProviderTurnLiteralLoopbackHostname(url.hostname)
+    isLiteralProviderTurnLoopbackHostname(url.hostname)
   ) {
     return
   }
   throw new TypeError("Provider origins require HTTPS; HTTP is reserved for explicit test-only loopback use")
-}
-
-export function isProviderTurnLiteralLoopbackHostname(hostname: string) {
-  return hostname === "127.0.0.1" || hostname === "[::1]"
 }
 
 function requireBoundedIdentifier(input: string, name: string) {

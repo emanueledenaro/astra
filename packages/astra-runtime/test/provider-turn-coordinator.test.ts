@@ -7,6 +7,12 @@ import { parseOperationID } from "@astra/domain/operation-contract"
 import { Effect } from "effect"
 import { digest } from "../src/controlled-write-authority"
 import {
+  providerTurnLoopbackPolicyDigest,
+  providerTurnPublicDnsPolicyDigest,
+  providerTurnResolverImplementationDigest,
+  providerTurnTransportImplementationDigest,
+} from "../src/provider-turn-network-policy"
+import {
   executeProviderTurn,
   recoverProviderTurn,
   untrustedProviderTurnAdapterDescriptor,
@@ -328,7 +334,14 @@ describe("provider turn Operation coordinator", () => {
       { ...fixture.input, plan: { ...fixture.input.plan, providerID: "provider-other" } },
       { ...fixture.input, plan: { ...fixture.input.plan, modelID: "model-other" } },
       { ...fixture.input, plan: { ...fixture.input.plan, variant: "variant-other" } },
-      { ...fixture.input, plan: { ...fixture.input.plan, origin: "https://other.example.test" } },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          origin: "https://other.example.test",
+          networkPolicy: httpsNetworkPolicy("https://other.example.test"),
+        },
+      },
       {
         ...fixture.input,
         plan: {
@@ -435,7 +448,14 @@ describe("provider turn Operation coordinator", () => {
       { ...fixture.input, plan: { ...fixture.input.plan, providerID: "provider-divergent" } },
       { ...fixture.input, plan: { ...fixture.input.plan, modelID: "model-divergent" } },
       { ...fixture.input, plan: { ...fixture.input.plan, variant: "variant-divergent" } },
-      { ...fixture.input, plan: { ...fixture.input.plan, origin: "https://redirect.example.test" } },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          origin: "https://redirect.example.test",
+          networkPolicy: httpsNetworkPolicy("https://redirect.example.test"),
+        },
+      },
       {
         ...fixture.input,
         plan: {
@@ -585,6 +605,10 @@ describe("provider turn Operation coordinator", () => {
         responseDigest: digest("forged digest"),
         responseBytes: 999,
       }),
+      (request) => ({
+        ...finishEvent(request, new TextEncoder().encode("invalid HTTP evidence")),
+        httpEvidence: { statusCode: 101, contentType: "text/event-stream", headerBytes: 64 },
+      }),
       (request) => finishEvent(request, oversizedResponse),
     ]
     for (const makeEvent of cases) {
@@ -655,6 +679,17 @@ describe("provider turn Operation coordinator", () => {
         }),
       ).toThrow()
     }
+    for (const path of ["/unsafe path", "/line\nbreak", "/é", `/${"x".repeat(8_193)}`]) {
+      expect(() =>
+        makeProviderTurnOperationFacts({
+          ...fixture.input,
+          plan: {
+            ...fixture.input.plan,
+            wireRequest: { ...fixture.input.plan.wireRequest, path },
+          },
+        }),
+      ).toThrow()
+    }
     expect(
       makeProviderTurnOperationFacts({
         ...fixture.input,
@@ -662,6 +697,7 @@ describe("provider turn Operation coordinator", () => {
           ...fixture.input.plan,
           origin: "http://127.0.0.1:8787",
           transportPolicy: "test_only_loopback_http",
+          networkPolicy: loopbackNetworkPolicy("http://127.0.0.1:8787"),
         },
       }).preview.provider,
     ).toMatchObject({ origin: "http://127.0.0.1:8787", transportPolicy: "test_only_loopback_http" })
@@ -672,6 +708,7 @@ describe("provider turn Operation coordinator", () => {
           ...fixture.input.plan,
           origin: "http://[::1]:8787",
           transportPolicy: "test_only_loopback_http",
+          networkPolicy: loopbackNetworkPolicy("http://[::1]:8787"),
         },
       }).preview.provider,
     ).toMatchObject({ origin: "http://[::1]:8787", transportPolicy: "test_only_loopback_http" })
@@ -742,6 +779,7 @@ async function operationInput() {
       variant: "high",
       origin: "https://api.example.test",
       transportPolicy: "https_only",
+      networkPolicy: httpsNetworkPolicy("https://api.example.test"),
       credential: {
         handle: "auth:openai:primary",
         accountFingerprint: digest("provider-account:fixture@example.test"),
@@ -812,6 +850,30 @@ async function temporaryDirectory(prefix: string) {
   return root
 }
 
+function httpsNetworkPolicy(origin: string) {
+  const url = new URL(origin)
+  return {
+    mode: "https_public_pinned" as const,
+    hostname: url.hostname,
+    port: Number(url.port || 443),
+    dnsPolicyDigest: providerTurnPublicDnsPolicyDigest,
+    resolverImplementationDigest: providerTurnResolverImplementationDigest,
+    transportImplementationDigest: providerTurnTransportImplementationDigest,
+  }
+}
+
+function loopbackNetworkPolicy(origin: string) {
+  const url = new URL(origin)
+  return {
+    mode: "test_literal_loopback" as const,
+    hostname: url.hostname,
+    port: Number(url.port || 80),
+    dnsPolicyDigest: providerTurnLoopbackPolicyDigest,
+    resolverImplementationDigest: providerTurnResolverImplementationDigest,
+    transportImplementationDigest: providerTurnTransportImplementationDigest,
+  }
+}
+
 async function fileExists(path: string) {
   try {
     await access(path)
@@ -838,8 +900,30 @@ function finishEvent(
       logicalPayloadBytes: request.logicalPayload.bytes,
     },
     finalOrigin,
+    networkEvidence: networkEvidence(request),
+    httpEvidence: { statusCode: 200, contentType: "application/json", headerBytes: 64 },
     finishReason: "stop",
     response,
+  }
+}
+
+function networkEvidence(request: UntrustedProviderTurnAdapterRequest) {
+  const loopback = request.provider.transportPolicy === "test_only_loopback_http"
+  const address = loopback
+    ? request.networkPolicy.hostname === "[::1]"
+      ? { address: "::1", family: 6 as const }
+      : { address: "127.0.0.1", family: 4 as const }
+    : { address: "93.184.216.34", family: 4 as const }
+  return {
+    hostname: request.networkPolicy.hostname,
+    port: request.networkPolicy.port,
+    addresses: [address],
+    selectedAddress: address,
+    connectedPeer: address,
+    resolvedAt: new Date().toISOString(),
+    dnsPolicyDigest: request.networkPolicy.dnsPolicyDigest,
+    resolverImplementationDigest: request.networkPolicy.resolverImplementationDigest,
+    transportImplementationDigest: request.networkPolicy.transportImplementationDigest,
   }
 }
 

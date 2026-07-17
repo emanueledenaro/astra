@@ -15,6 +15,10 @@ import { revalidateGitRepositoryBaseline } from "@astra/git"
 import { Effect } from "effect"
 import { canonicalJson, deterministicUUID, digest } from "./controlled-write-authority"
 import {
+  validateProviderTurnResolutionEvidence,
+  type ProviderTurnNetworkResolutionEvidence,
+} from "./provider-turn-network-policy"
+import {
   makeProviderTurnOperationFacts,
   providerTurnAdapterDigest,
   providerTurnExecutionBoundaryLabel,
@@ -35,6 +39,7 @@ import {
 const claimLeaseMilliseconds = 60_000
 const minimumEffectLeaseMilliseconds = 5_000
 const maximumProviderResponseBytes = 1_048_576
+const maximumProviderResponseHeaderBytes = 65_536
 
 export const untrustedProviderTurnAdapterDescriptor = Object.freeze({
   trust: "untrusted_test_seam",
@@ -55,8 +60,23 @@ export type UntrustedProviderTurnAdapterFinishEvent = Readonly<{
     logicalPayloadBytes: number
   }>
   finalOrigin: string
+  networkEvidence: ProviderTurnNetworkResolutionEvidence
+  httpEvidence: ProviderTurnHttpResponseEvidence
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | "other"
   response: Uint8Array
+}>
+
+export type ProviderTurnHttpResponseEvidence = Readonly<{
+  statusCode: number
+  contentType: string | null
+  headerBytes: number
+}>
+
+export type ProviderTurnAdapterExecutionAuthority = Readonly<{
+  transportStartedAt: string
+  claimExpiresAt: string
+  transportDeadlineAt: string
+  revalidateBeforeWrite: () => Promise<boolean>
 }>
 
 /**
@@ -65,7 +85,10 @@ export type UntrustedProviderTurnAdapterFinishEvent = Readonly<{
  */
 export interface UntrustedProviderTurnAdapter {
   readonly descriptor: typeof untrustedProviderTurnAdapterDescriptor
-  execute(request: UntrustedProviderTurnAdapterRequest): Promise<UntrustedProviderTurnAdapterFinishEvent>
+  execute(
+    request: UntrustedProviderTurnAdapterRequest,
+    authority: ProviderTurnAdapterExecutionAuthority,
+  ): Promise<UntrustedProviderTurnAdapterFinishEvent>
 }
 
 export type ExecuteProviderTurnInput = ProviderTurnOperationFactsInput &
@@ -198,7 +221,7 @@ export async function executeProviderTurn(
     try {
       const baseline = await revalidateBaseline(input, facts.repositorySnapshotDigest)
       if (!baseline.matched) throw new Error("provider turn boundary rejected")
-      const authority = await runWithCoordinatorLedger(
+      const initialAuthority = await runWithCoordinatorLedger(
         input.ledgerFilename,
         (ledger) =>
           Effect.gen(function* () {
@@ -219,11 +242,32 @@ export async function executeProviderTurn(
           }),
         () => new Date(now()).toISOString(),
       )
-      if (!authority.allowed) throw new Error("provider turn authority rejected")
+      if (!initialAuthority.allowed) throw new Error("provider turn authority rejected")
       if (dependencies.untrustedAdapter.descriptor !== untrustedProviderTurnAdapterDescriptor) {
         throw new Error("untrusted adapter descriptor mismatch")
       }
-      const event: unknown = await dependencies.untrustedAdapter.execute(facts.adapterRequest)
+      const transportStarted = now()
+      const transportDeadline = Math.min(
+        Date.parse(facts.authorizationExpiresAt),
+        Date.parse(claimed.claim.claimExpiresAt),
+        transportStarted + facts.preview.wireRequest.timeoutMilliseconds,
+      )
+      if (transportStarted >= transportDeadline) throw new Error("provider turn transport authority expired")
+      const executionAuthority: ProviderTurnAdapterExecutionAuthority = Object.freeze({
+        transportStartedAt: new Date(transportStarted).toISOString(),
+        claimExpiresAt: claimed.claim.claimExpiresAt,
+        transportDeadlineAt: new Date(transportDeadline).toISOString(),
+        revalidateBeforeWrite: () =>
+          revalidateProviderTurnBeforeWrite(
+            input,
+            facts,
+            claimed.claim.fencingToken,
+            claimed.claim.claimExpiresAt,
+            transportDeadline,
+            now,
+          ),
+      })
+      const event: unknown = await dependencies.untrustedAdapter.execute(facts.adapterRequest, executionAuthority)
       observation = normalizeAdapterEvent(event, facts.adapterRequest)
     } catch {
       observation = unknownAdapterObservation("adapter_failed_or_malformed")
@@ -250,6 +294,58 @@ export async function executeProviderTurn(
       cause instanceof TypeError ? "invalid_input" : "state_unavailable",
       "The provider turn could not complete its durable path",
     )
+  }
+}
+
+async function revalidateProviderTurnBeforeWrite(
+  input: ExecuteProviderTurnInput,
+  facts: ReturnType<typeof makeProviderTurnOperationFacts>,
+  fencingToken: number,
+  claimExpiresAt: string,
+  transportDeadline: number,
+  now: () => number,
+) {
+  try {
+    const checkedAt = now()
+    if (
+      checkedAt >= transportDeadline ||
+      checkedAt >= Date.parse(claimExpiresAt) ||
+      checkedAt >= Date.parse(facts.authorizationExpiresAt)
+    ) {
+      return false
+    }
+    const baseline = await revalidateBaseline(input, facts.repositorySnapshotDigest)
+    if (!baseline.matched) return false
+    const authority = await runWithCoordinatorLedger(
+      input.ledgerFilename,
+      (ledger) =>
+        Effect.gen(function* () {
+          yield* ledger.initialize()
+          return yield* ledger.validateEffectAuthority({
+            operationID: facts.operationID,
+            dispatchRequestID: facts.dispatchRequestID,
+            attemptID: facts.attemptID,
+            capabilityGrantID: facts.capabilityGrantID,
+            capabilityDigest: facts.capabilityDigest,
+            executorClaimID: facts.executorClaimID,
+            fencingToken,
+            executor: providerTurnExecutor,
+            adapterDigest: providerTurnAdapterDigest,
+            baselineDigest: facts.baselineTrustDigest,
+            minimumRemainingLeaseMilliseconds: 1,
+          })
+        }),
+      () => new Date(checkedAt).toISOString(),
+    )
+    const completedAt = now()
+    return (
+      authority.allowed &&
+      completedAt < transportDeadline &&
+      completedAt < Date.parse(claimExpiresAt) &&
+      completedAt < Date.parse(facts.authorizationExpiresAt)
+    )
+  } catch {
+    return false
   }
 }
 
@@ -348,7 +444,12 @@ function makeReceipt(
       bytes: observation.kind === "finish_observed_unenforced" ? observation.responseBytes : 0,
       preview:
         observation.kind === "finish_observed_unenforced"
-          ? "EFFECT UNKNOWN — FINISH OBSERVED AT UNENFORCED ADAPTER SEAM"
+          ? `EFFECT UNKNOWN — ${canonicalJson({
+              evidence: "provider_network_dispatch",
+              network: observation.networkEvidence,
+              http: observation.httpEvidence,
+              providerFinish: observation.finishReason,
+            })}`
           : "EFFECT UNKNOWN — PROVIDER TURN REQUIRES RECONCILIATION",
     },
   })
@@ -532,19 +633,29 @@ type AdapterObservation =
       kind: "finish_observed_unenforced"
       finishReason: UntrustedProviderTurnAdapterFinishEvent["finishReason"]
       finalOrigin: string
+      networkEvidence: ProviderTurnNetworkResolutionEvidence
+      httpEvidence: ProviderTurnHttpResponseEvidence
       responseDigest: ContentDigest
       responseBytes: number
     }>
   | Readonly<{ kind: "unknown"; reasonDigest: ContentDigest }>
 
 /**
- * This adapter seam has no trusted network implementation yet. Even a valid
- * terminal event remains effect_unknown until Astra owns transport, redirect,
- * and origin enforcement inside the provider integration.
+ * The generic adapter seam remains untrusted. Even a valid terminal event is
+ * effect_unknown; trusted transport enforcement is supplied by the separate,
+ * package-private Astra transport boundary.
  */
 function normalizeAdapterEvent(input: unknown, request: UntrustedProviderTurnAdapterRequest): AdapterObservation {
   try {
-    const event = exactRecord(input, ["type", "requestBinding", "finalOrigin", "finishReason", "response"])
+    const event = exactRecord(input, [
+      "type",
+      "requestBinding",
+      "finalOrigin",
+      "networkEvidence",
+      "httpEvidence",
+      "finishReason",
+      "response",
+    ])
     if (event.type !== "provider.finish") return unknownAdapterObservation("unsupported_adapter_event")
     const binding = exactRecord(event.requestBinding, [
       "operationID",
@@ -577,6 +688,8 @@ function normalizeAdapterEvent(input: unknown, request: UntrustedProviderTurnAda
       return unknownAdapterObservation("invalid_finish_reason")
     }
     if (!(event.response instanceof Uint8Array)) return unknownAdapterObservation("invalid_response_bytes")
+    const networkEvidence = validateProviderTurnResolutionEvidence(event.networkEvidence, request.networkPolicy)
+    const httpEvidence = validateProviderTurnHttpResponseEvidence(event.httpEvidence)
     const responseBytes = event.response.byteLength
     if (!Number.isSafeInteger(responseBytes) || responseBytes > maximumProviderResponseBytes) {
       return unknownAdapterObservation("response_limit_exceeded")
@@ -587,12 +700,39 @@ function normalizeAdapterEvent(input: unknown, request: UntrustedProviderTurnAda
       kind: "finish_observed_unenforced",
       finishReason: event.finishReason,
       finalOrigin: event.finalOrigin,
+      networkEvidence,
+      httpEvidence,
       responseDigest: requireContentDigest(`sha256:${createHash("sha256").update(response).digest("hex")}`),
       responseBytes: response.byteLength,
     }
   } catch {
     return unknownAdapterObservation("adapter_failed_or_malformed")
   }
+}
+
+function validateProviderTurnHttpResponseEvidence(input: unknown): ProviderTurnHttpResponseEvidence {
+  const evidence = exactRecord(input, ["statusCode", "contentType", "headerBytes"])
+  if (
+    typeof evidence.statusCode !== "number" ||
+    !Number.isSafeInteger(evidence.statusCode) ||
+    evidence.statusCode < 200 ||
+    evidence.statusCode > 599 ||
+    (evidence.statusCode >= 300 && evidence.statusCode < 400) ||
+    typeof evidence.headerBytes !== "number" ||
+    !Number.isSafeInteger(evidence.headerBytes) ||
+    evidence.headerBytes < 1 ||
+    evidence.headerBytes > maximumProviderResponseHeaderBytes ||
+    (evidence.contentType !== null &&
+      (typeof evidence.contentType !== "string" ||
+        !/^[!#$%&'*+.^_`|~0-9a-z-]+\/[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(evidence.contentType)))
+  ) {
+    throw new TypeError("Provider HTTP response evidence is invalid")
+  }
+  return Object.freeze({
+    statusCode: evidence.statusCode,
+    contentType: evidence.contentType,
+    headerBytes: evidence.headerBytes,
+  }) as ProviderTurnHttpResponseEvidence
 }
 
 function unknownAdapterObservation(reason: string): AdapterObservation {
