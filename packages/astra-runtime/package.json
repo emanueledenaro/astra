@@ -27,6 +27,7 @@
     "@astra/ledger": "workspace:*",
     "@astra/sandbox": "workspace:*",
     "@effect/sql-sqlite-bun": "catalog:",
+    "@opencode-ai/llm": "workspace:*",
     "effect": "catalog:"
   },
   "devDependencies": {

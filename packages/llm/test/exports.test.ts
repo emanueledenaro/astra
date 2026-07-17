@@ -13,6 +13,7 @@ import {
 import * as GitHubCopilot from "@opencode-ai/llm/providers/github-copilot"
 import { OpenAIChat, OpenAICompatibleChat, OpenAIResponses } from "@opencode-ai/llm/protocols"
 import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-messages"
+import { AnthropicWire } from "@opencode-ai/llm/protocols/anthropic-wire"
 
 describe("public exports", () => {
   test("root exposes app-facing runtime APIs", () => {
@@ -72,5 +73,7 @@ describe("public exports", () => {
     expect(OpenAIResponses.route.id).toBe("openai-responses")
     expect(OpenAIResponses.webSocketRoute.id).toBe("openai-responses-websocket")
     expect(AnthropicMessages.route.id).toBe("anthropic-messages")
+    expect(AnthropicWire.OneTurnRequest).toBeDefined()
+    expect(AnthropicWire.StreamEvent).toBeDefined()
   })
 })
