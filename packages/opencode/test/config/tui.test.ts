@@ -83,6 +83,47 @@ const getTuiPluginOrigins = (directory: string) =>
     ),
   )
 
+const getAstraSafeStartTuiStateWithoutHostCapabilities = (directory: string) => {
+  const node = TuiConfig.makeNode()
+  const layer = AppNodeBuilder.build(node).pipe(Layer.provide(Layer.succeed(CurrentWorkingDirectory, directory)))
+  return Effect.all({
+    dependencies: Effect.succeed(node.dependencies.map((dependency) => dependency.name)),
+    config: TuiConfig.Service.use((svc) => svc.get()),
+    origins: TuiConfig.Service.use((svc) => svc.pluginOrigins()),
+    ready: TuiConfig.Service.use((svc) => svc.waitForDependencies()),
+  }).pipe(Effect.provide(layer))
+}
+
+it.instance("keeps Astra safe start TUI config inert without host capabilities", () =>
+  withCleanState(
+    withEnv(
+      "ASTRA_SAFE_START",
+      "1",
+      Effect.gen(function* () {
+        const fs = yield* FSUtil.Service
+        const test = yield* TestInstance
+        const legacy = path.join(test.directory, "opencode.json")
+        const legacyText = JSON.stringify({ theme: "must-not-load", tui: { scroll_speed: 9 } }, null, 2)
+        yield* fs.writeFileString(legacy, legacyText)
+        yield* fs.writeJson(path.join(Global.Path.config, "tui.json"), {
+          theme: "must-not-load",
+          plugin: ["must-not-install@1.0.0"],
+        })
+
+        const state = yield* getAstraSafeStartTuiStateWithoutHostCapabilities(test.directory)
+
+        expect(state.dependencies).toEqual([])
+        expect(state.config.theme).toBeUndefined()
+        expect(state.config.plugin).toBeUndefined()
+        expect(state.origins).toEqual([])
+        expect(yield* fs.readFileString(legacy)).toBe(legacyText)
+        expect(yield* fs.existsSafe(path.join(test.directory, "tui.json"))).toBe(false)
+        expect(yield* fs.existsSafe(`${legacy}.tui-migration.bak`)).toBe(false)
+      }),
+    ),
+  ),
+)
+
 it.instance("keeps server and tui plugin merge semantics aligned", () =>
   withCleanState(
     Effect.gen(function* () {
