@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./operation": "./src/operation.ts",
     "./operation-contract": "./src/operation-contract.ts",
+    "./git-repository-baseline": "./src/git-repository-baseline.ts",
     "./workspace-trust": "./src/workspace-trust.ts"
   },
   "scripts": {

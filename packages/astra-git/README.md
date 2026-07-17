@@ -15,9 +15,11 @@ by inode and SHA-256, revalidated before every use, run directly under
 `sandbox-exec`, and removed in `finally`. It never uses Astra app state.
 
 The sandbox denies network, filesystem writes, process forks, and every process
-execution except that exact ephemeral Git. Results are bounded observations,
-not a trust decision, activation grant, durable baseline, or verification
-claim. `assume-unchanged` and `skip-worktree` always block. A readable
+execution except that exact ephemeral Git. File-data reads are restricted to
+the canonical workspace, the sealed Git executable, and a small root-owned
+macOS runtime allowlist. Results are bounded observations, not a trust decision,
+activation grant, durable baseline, or verification claim. `assume-unchanged`
+and `skip-worktree` always block. A readable
 fsmonitor-valid tag blocks explicitly; if strict sandboxing prevents Git from
 reading fsmonitor state without IPC, inspection reports fsmonitor as
 uninspectable and remains blocked.
@@ -38,3 +40,22 @@ against index stages 1, 2, and 3. Mixed SHA-1/SHA-256 observations,
 intent-to-add, duplicate or control-character paths, unsupported modes, and
 inconsistent index records block the report. Untracked and conflict contents
 are not inspected in this increment.
+
+The package also exposes an explicit, read-only repository baseline capture.
+Unlike inspection, baseline capture hashes the complete logical index, raw
+tracked and untracked worktree content, file type, executable state, symlink
+link text, the full ref set, and relevant direct `.git` metadata. Ignored files
+are explicitly excluded. Hook executable bits are authority-bearing metadata.
+Local config is read with no-follow semantics and external includes are rejected
+in both `config` and `config.worktree` before either Git observation. A config
+swap cannot escape the sandbox read allowlist, and the post-observation capture
+must match the preflight digest. The capture is observed twice and fails closed
+on drift, unsupported index extensions, special files, path ambiguity, or
+declared traversal, byte, entry, process, and end-to-end time limits.
+
+The public snapshot is deliberately compact: identities, exact HEAD, canonical
+digests, counts, byte totals, policy, limits, adapter identity, and sealed Git
+binary digest. Per-path and per-ref details exist only while hashing and are
+not retained. A baseline is ephemeral and `not_verified`; it grants neither
+workspace trust nor authority. Revalidation recaptures with the exact original
+limits and policy and reports only `current`, `stale`, or `blocked`.

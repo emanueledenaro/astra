@@ -12,6 +12,15 @@ export {
 
 export * as Operation from "./operation"
 export * as OperationContract from "./operation-contract"
+export * as GitRepositoryBaseline from "./git-repository-baseline"
+
+export {
+  computeGitRepositoryBaselineSnapshotDigest,
+  parseGitRepositoryBaselineCaptureResult,
+  parseGitRepositoryBaselineLimits,
+  parseGitRepositoryBaselineRevalidationResult,
+  parseGitRepositoryBaselineSnapshot,
+} from "./git-repository-baseline"
 
 export {
   projectWorkspaceTrustEvent,
@@ -21,6 +30,15 @@ export {
 } from "./workspace-trust"
 
 export * as WorkspaceTrust from "./workspace-trust"
+
+export type {
+  GitRepositoryBaselineBlockReason,
+  GitRepositoryBaselineCaptureResult,
+  GitRepositoryBaselineLimits,
+  GitRepositoryBaselineRevalidationResult,
+  GitRepositoryBaselineSnapshot,
+  GitRepositoryBaselineSnapshotAuthority,
+} from "./git-repository-baseline"
 
 export type {
   AcceptedOperationTransition,

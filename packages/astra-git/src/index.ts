@@ -1,4 +1,9 @@
 export { inspectGitWorkspace, defaultGitInspectionLimits } from "./inspect"
+export {
+  captureGitRepositoryBaseline,
+  defaultGitRepositoryBaselineLimits,
+  revalidateGitRepositoryBaseline,
+} from "./baseline"
 export type {
   GitBranch,
   GitConflict,

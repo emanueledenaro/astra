@@ -11,6 +11,9 @@
     "test": "bun test",
     "typecheck": "tsgo --noEmit"
   },
+  "dependencies": {
+    "@astra/domain": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "catalog:",
     "@typescript/native-preview": "catalog:"

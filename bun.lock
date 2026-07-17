@@ -131,6 +131,9 @@
     },
     "packages/astra-git": {
       "name": "@astra/git",
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+      },
       "devDependencies": {
         "@types/bun": "catalog:",
         "@typescript/native-preview": "catalog:",

@@ -4,7 +4,13 @@ describe("Git inspection capability boundary", () => {
   test("exports inspection only and no mutation surface", async () => {
     const api = await import("../src")
 
-    expect(Object.keys(api).sort()).toEqual(["defaultGitInspectionLimits", "inspectGitWorkspace"])
+    expect(Object.keys(api).sort()).toEqual([
+      "captureGitRepositoryBaseline",
+      "defaultGitInspectionLimits",
+      "defaultGitRepositoryBaselineLimits",
+      "inspectGitWorkspace",
+      "revalidateGitRepositoryBaseline",
+    ])
   })
 
   test("bundles without OpenCode or write-capable Astra runtimes", async () => {

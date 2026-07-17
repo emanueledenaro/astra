@@ -24,26 +24,30 @@ type ExecutableIdentity = Readonly<{
   directoryDevice: string
   directoryInode: string
 }>
-type TrustedBinaries = Readonly<{
+export type TrustedBinaries = Readonly<{
   gitPath: string
   sandboxPath: string
   gitIdentity: ExecutableIdentity
   cleanup: () => Promise<boolean>
 }>
-type RepositoryIdentity = Readonly<{
+export type RepositoryIdentity = Readonly<{
   rootDevice: string
   rootInode: string
   gitDevice: string
   gitInode: string
   metadataDigest: `sha256:${string}`
 }>
-type ProcessResult =
+export type ProcessResult =
   | Readonly<{ ok: true; stdout: Uint8Array }>
   | Readonly<{ ok: false; reason: GitInspectionBlockReason; stdout?: Uint8Array; stderr?: Uint8Array }>
 
 export type GitInspectorDependencies = Readonly<{
   platform: string
-  prepareTrustedBinaries: (workspaceRoot: string, limits: GitInspectionLimits) => Promise<TrustedBinaries | null>
+  prepareTrustedBinaries: (
+    workspaceRoot: string,
+    limits: GitInspectionLimits,
+    deadline?: number,
+  ) => Promise<TrustedBinaries | null>
   validatePreparedGit: (binaries: TrustedBinaries, limits: GitInspectionLimits) => Promise<boolean>
   runSandboxedGit: (input: SandboxedGitInput) => Promise<ProcessResult>
 }>
@@ -52,12 +56,12 @@ export type SandboxedGitInput = Readonly<{
   gitPath: string
   sandboxPath: string
   workspaceRoot: string
-  command: "status" | "index-assume-unchanged" | "index-fsmonitor-valid"
+  command: "status" | "index-assume-unchanged" | "index-fsmonitor-valid" | "refs"
   limits: GitInspectionLimits
 }>
 
 const sandboxProfile =
-  '(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (literal "/dev/null")) (deny process-fork) (deny process-exec) (allow process-exec (literal (param "GIT_PATH")))'
+  '(version 1) (allow default) (deny network*) (deny file-write*) (allow file-write* (literal "/dev/null")) (deny file-read*) (allow file-read-metadata) (allow file-read-data (literal "/")) (allow file-read* (literal "/dev/null") (literal (param "GIT_PATH")) (subpath (param "WORKSPACE_ROOT")) (subpath "/System") (subpath "/usr/lib") (subpath "/usr/share") (subpath "/private/var/db/timezone")) (deny process-fork) (deny process-exec) (allow process-exec (literal (param "GIT_PATH")))'
 
 export async function inspectGitWorkspace(
   workspaceRoot: string,
@@ -79,7 +83,7 @@ export async function inspectGitWorkspaceWithDependencies(
   const root = resolve(workspaceRoot)
   const limits = { ...defaultGitInspectionLimits, ...overrides }
   if (dependencies.platform !== "darwin") return blocked(root, "unsupported_platform")
-  if (!validLimits(limits)) return blocked(root, "invalid_limits")
+  if (!validInspectionLimits(limits)) return blocked(root, "invalid_limits")
 
   const initialDeadline = performance.now() + limits.maxBoundaryDurationMs
   const initial = await inspectRepositoryBoundary(workspaceRoot, limits, initialDeadline)
@@ -107,21 +111,21 @@ async function inspectWithPreparedGit(
   initialIdentity: RepositoryIdentity,
   binaries: TrustedBinaries,
 ): Promise<GitInspectionResult> {
-  const first = await observe(dependencies, binaries, root, limits).catch(
+  const first = await observeGit(dependencies, binaries, root, limits).catch(
     () => ({ ok: false, reason: "git_process_failed" }) as const,
   )
   if (!first.ok) return blocked(root, first.reason)
   const middle = await inspectRepositoryBoundary(root, limits)
   if (!middle.ok) return blocked(root, middle.reason)
-  if (!sameIdentity(initialIdentity, middle.identity)) return blocked(root, "workspace_identity_changed")
+  if (!sameRepositoryIdentity(initialIdentity, middle.identity)) return blocked(root, "workspace_identity_changed")
 
-  const second = await observe(dependencies, binaries, root, limits).catch(
+  const second = await observeGit(dependencies, binaries, root, limits).catch(
     () => ({ ok: false, reason: "git_process_failed" }) as const,
   )
   if (!second.ok) return blocked(root, second.reason)
   const final = await inspectRepositoryBoundary(root, limits)
   if (!final.ok) return blocked(root, final.reason)
-  if (!sameIdentity(initialIdentity, final.identity)) return blocked(root, "workspace_identity_changed")
+  if (!sameRepositoryIdentity(initialIdentity, final.identity)) return blocked(root, "workspace_identity_changed")
   if (
     !equalBytes(first.status, second.status) ||
     !equalBytes(first.indexAssumeUnchanged, second.indexAssumeUnchanged) ||
@@ -188,36 +192,51 @@ async function inspectWithPreparedGit(
   }
 }
 
-async function observe(
+export async function observeGit(
   dependencies: GitInspectorDependencies,
   binaries: TrustedBinaries,
   workspaceRoot: string,
   limits: GitInspectionLimits,
+  deadline?: number,
 ) {
   if (!(await dependencies.validatePreparedGit(binaries, limits))) {
     return { ok: false, reason: "git_ephemeral_identity_changed" } as const
   }
-  const status = await dependencies.runSandboxedGit({ ...binaries, workspaceRoot, command: "status", limits })
+  const statusLimits = limitsBeforeDeadline(limits, deadline)
+  if (!statusLimits) return { ok: false, reason: "git_process_timeout" } as const
+  const status = await dependencies.runSandboxedGit({
+    ...binaries,
+    workspaceRoot,
+    command: "status",
+    limits: statusLimits,
+  })
+  if (deadlinePassed(deadline)) return { ok: false, reason: "git_process_timeout" } as const
   if (!status.ok) return status
   if (!(await dependencies.validatePreparedGit(binaries, limits))) {
     return { ok: false, reason: "git_ephemeral_identity_changed" } as const
   }
+  const assumeUnchangedLimits = limitsBeforeDeadline(limits, deadline)
+  if (!assumeUnchangedLimits) return { ok: false, reason: "git_process_timeout" } as const
   const indexAssumeUnchanged = await dependencies.runSandboxedGit({
     ...binaries,
     workspaceRoot,
     command: "index-assume-unchanged",
-    limits,
+    limits: assumeUnchangedLimits,
   })
+  if (deadlinePassed(deadline)) return { ok: false, reason: "git_process_timeout" } as const
   if (!indexAssumeUnchanged.ok) return indexAssumeUnchanged
   if (!(await dependencies.validatePreparedGit(binaries, limits))) {
     return { ok: false, reason: "git_ephemeral_identity_changed" } as const
   }
+  const fsmonitorLimits = limitsBeforeDeadline(limits, deadline)
+  if (!fsmonitorLimits) return { ok: false, reason: "git_process_timeout" } as const
   const indexFsmonitorValid = await dependencies.runSandboxedGit({
     ...binaries,
     workspaceRoot,
     command: "index-fsmonitor-valid",
-    limits,
+    limits: fsmonitorLimits,
   })
+  if (deadlinePassed(deadline)) return { ok: false, reason: "git_process_timeout" } as const
   if (!indexFsmonitorValid.ok) {
     if (
       indexFsmonitorValid.stdout &&
@@ -241,10 +260,33 @@ async function observe(
   } as const
 }
 
+export async function observeGitRefs(
+  dependencies: GitInspectorDependencies,
+  binaries: TrustedBinaries,
+  workspaceRoot: string,
+  limits: GitInspectionLimits,
+  deadline?: number,
+) {
+  if (!(await dependencies.validatePreparedGit(binaries, limits))) {
+    return { ok: false, reason: "git_ephemeral_identity_changed" } as const
+  }
+  const boundedLimits = limitsBeforeDeadline(limits, deadline)
+  if (!boundedLimits) return { ok: false, reason: "git_process_timeout" } as const
+  const result = await dependencies.runSandboxedGit({
+    ...binaries,
+    workspaceRoot,
+    command: "refs",
+    limits: boundedLimits,
+  })
+  return deadlinePassed(deadline) ? ({ ok: false, reason: "git_process_timeout" } as const) : result
+}
+
 export async function prepareTrustedBinaries(
   workspaceRoot: string,
   limits: GitInspectionLimits,
+  deadline?: number,
 ): Promise<TrustedBinaries | null> {
+  if (deadlinePassed(deadline)) return null
   const developerLink = "/var/db/xcode_select_link"
   const linkFacts = await safeLstat(developerLink)
   if (!linkFacts?.isSymbolicLink() || !trustedOwnerAndMode(linkFacts.uid, linkFacts.mode)) return null
@@ -262,7 +304,8 @@ export async function prepareTrustedBinaries(
   const source = await openTrustedGitSource(sourcePath, limits.maxGitBinaryBytes)
   if (!source) return null
   try {
-    return await sealOpenedGitSource(source.handle, source.size, workspaceRoot, sandboxPath)
+    if (deadlinePassed(deadline)) return null
+    return await sealOpenedGitSource(source.handle, source.size, workspaceRoot, sandboxPath, deadline)
   } finally {
     await source.handle.close()
   }
@@ -291,6 +334,7 @@ async function sealOpenedGitSource(
   size: number,
   workspaceRoot: string,
   sandboxPath: string,
+  deadline?: number,
 ): Promise<TrustedBinaries | null> {
   const owner = process.getuid?.()
   if (owner === undefined) return null
@@ -301,9 +345,11 @@ async function sealOpenedGitSource(
   const cleanup = () => cleanupEphemeralDirectory(directory)
 
   try {
+    if (deadlinePassed(deadline)) throw new Error("The Git preparation deadline expired")
     await chmod(directory, 0o700)
-    const sealed = await createSealedExecutable(source, gitPath, size)
+    const sealed = await createSealedExecutable(source, gitPath, size, deadline)
     const directoryFacts = await lstat(directory)
+    if (deadlinePassed(deadline)) throw new Error("The Git preparation deadline expired")
     if (
       !sealed.facts.isFile() ||
       sealed.facts.size !== size ||
@@ -336,36 +382,45 @@ async function sealOpenedGitSource(
   }
 }
 
-async function createSealedExecutable(source: FileHandle, gitPath: string, size: number) {
+async function createSealedExecutable(source: FileHandle, gitPath: string, size: number, deadline?: number) {
   const destination = await open(
     gitPath,
     constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW,
     0o700,
   )
   try {
-    const digest = await copyOpenedExecutable(source, destination, size)
+    const digest = await copyOpenedExecutable(source, destination, size, deadline)
     await destination.sync()
+    if (deadlinePassed(deadline)) throw new Error("The Git preparation deadline expired")
     await destination.chmod(0o500)
     const facts = await destination.stat()
-    const copiedDigest = await digestOpenedFile(destination, size)
+    const copiedDigest = await digestOpenedFile(destination, size, deadline)
     return { digest, facts, copiedDigest }
   } finally {
     await destination.close()
   }
 }
 
-export async function copyOpenedExecutable(source: FileHandle, destination: FileHandle, size: number) {
+export async function copyOpenedExecutable(
+  source: FileHandle,
+  destination: FileHandle,
+  size: number,
+  deadline?: number,
+) {
   const hash = createHash("sha256")
   const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, size))
   let position = 0
   while (position < size) {
+    if (deadlinePassed(deadline)) throw new Error("The Git preparation deadline expired")
     const requested = Math.min(buffer.byteLength, size - position)
     const read = await source.read(buffer, 0, requested, position)
+    if (deadlinePassed(deadline)) throw new Error("The Git preparation deadline expired")
     if (read.bytesRead < 1) throw new Error("The Git source changed while it was copied")
     hash.update(buffer.subarray(0, read.bytesRead))
     let written = 0
     while (written < read.bytesRead) {
       const result = await destination.write(buffer, written, read.bytesRead - written, position + written)
+      if (deadlinePassed(deadline)) throw new Error("The Git preparation deadline expired")
       if (result.bytesWritten < 1) throw new Error("The sealed Git copy could not be completed")
       written += result.bytesWritten
     }
@@ -374,12 +429,14 @@ export async function copyOpenedExecutable(source: FileHandle, destination: File
   return `sha256:${hash.digest("hex")}` as const
 }
 
-async function digestOpenedFile(handle: FileHandle, size: number) {
+async function digestOpenedFile(handle: FileHandle, size: number, deadline?: number) {
   const hash = createHash("sha256")
   const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, size))
   let position = 0
   while (position < size) {
+    if (deadlinePassed(deadline)) return null
     const read = await handle.read(buffer, 0, Math.min(buffer.byteLength, size - position), position)
+    if (deadlinePassed(deadline)) return null
     if (read.bytesRead < 1) return null
     hash.update(buffer.subarray(0, read.bytesRead))
     position += read.bytesRead
@@ -465,6 +522,7 @@ function isWithin(root: string, candidate: string) {
 export async function runSandboxedGit(input: SandboxedGitInput): Promise<ProcessResult> {
   const invocation = buildSandboxInvocation(input)
   const child = Bun.spawn([...invocation.arguments], {
+    cwd: input.workspaceRoot,
     env: invocation.environment,
     stdin: "ignore",
     stdout: "pipe",
@@ -504,6 +562,8 @@ export function buildSandboxInvocation(input: SandboxedGitInput) {
       input.sandboxPath,
       "-D",
       `GIT_PATH=${input.gitPath}`,
+      "-D",
+      `WORKSPACE_ROOT=${input.workspaceRoot}`,
       "-p",
       sandboxProfile,
       input.gitPath,
@@ -565,6 +625,9 @@ function gitArguments(workspaceRoot: string, command: SandboxedGitInput["command
   if (command === "index-fsmonitor-valid") {
     return [...common, "ls-files", "--full-name", "--stage", "-f", "-z", "--", ":(top)"]
   }
+  if (command === "refs") {
+    return [...common, "for-each-ref", "--format=%(refname)%00%(objectname)"]
+  }
   return [
     ...common,
     "status",
@@ -598,6 +661,17 @@ function sanitizedGitEnvironment() {
   }
 }
 
+function limitsBeforeDeadline(limits: GitInspectionLimits, deadline?: number): GitInspectionLimits | null {
+  if (deadline === undefined) return limits
+  const remaining = Math.floor(deadline - performance.now())
+  if (remaining < 1) return null
+  return { ...limits, timeoutMs: Math.min(limits.timeoutMs, remaining) }
+}
+
+function deadlinePassed(deadline?: number) {
+  return deadline !== undefined && performance.now() > deadline
+}
+
 async function readBounded(stream: ReadableStream<Uint8Array>, limit: number, onLimit: () => void) {
   const reader = stream.getReader()
   const chunks: Array<Uint8Array> = []
@@ -616,7 +690,7 @@ async function readBounded(stream: ReadableStream<Uint8Array>, limit: number, on
 
 type BoundaryBudget = { deadline: number; entries: number; maxEntries: number }
 
-async function inspectRepositoryBoundary(
+export async function inspectRepositoryBoundary(
   workspaceRoot: string,
   limits: GitInspectionLimits,
   deadline = performance.now() + limits.maxBoundaryDurationMs,
@@ -822,7 +896,7 @@ function deadlineExceeded(budget: BoundaryBudget) {
   return performance.now() > budget.deadline
 }
 
-function validLimits(limits: GitInspectionLimits) {
+export function validInspectionLimits(limits: GitInspectionLimits) {
   return Object.values(limits).every((value) => Number.isSafeInteger(value) && value > 0)
 }
 
@@ -839,7 +913,7 @@ function blocked(workspaceRoot: string, reason: GitInspectionBlockReason): GitIn
   }
 }
 
-function sameIdentity(left: RepositoryIdentity, right: RepositoryIdentity) {
+export function sameRepositoryIdentity(left: RepositoryIdentity, right: RepositoryIdentity) {
   return (
     left.rootDevice === right.rootDevice &&
     left.rootInode === right.rootInode &&

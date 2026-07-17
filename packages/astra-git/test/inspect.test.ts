@@ -23,6 +23,7 @@ import {
   buildSandboxInvocation,
   copyOpenedExecutable,
   inspectGitWorkspaceWithDependencies,
+  observeGit,
   prepareTrustedBinaries,
   type GitInspectorDependencies,
   validatePreparedGit,
@@ -62,9 +63,12 @@ describe("bounded read-only Git inspection", () => {
     })
 
     expect(invocation.arguments[2]).toBe(`GIT_PATH=${hostilePath}`)
-    expect(invocation.arguments[4]).toContain('(param "GIT_PATH")')
-    expect(invocation.arguments[4]).not.toContain(hostilePath)
-    expect(invocation.arguments[5]).toBe(hostilePath)
+    expect(invocation.arguments[4]).toBe("WORKSPACE_ROOT=/workspace")
+    expect(invocation.arguments[6]).toContain('(param "GIT_PATH")')
+    expect(invocation.arguments[6]).toContain('(param "WORKSPACE_ROOT")')
+    expect(invocation.arguments[6]).toContain("(deny file-read*)")
+    expect(invocation.arguments[6]).not.toContain(hostilePath)
+    expect(invocation.arguments[7]).toBe(hostilePath)
     expect(invocation.environment.GIT_ATTR_NOSYSTEM).toBe("1")
 
     const indexInvocation = buildSandboxInvocation({
@@ -84,6 +88,45 @@ describe("bounded read-only Git inspection", () => {
     })
     expect(indexInvocation.arguments).toContain("--full-name")
     expect(indexInvocation.arguments.slice(-2)).toEqual(["--", ":(top)"])
+  })
+
+  test("clamps each Git process to the remaining overall deadline", async () => {
+    const observedTimeouts: Array<number> = []
+    const binaries = {
+      gitPath: "/trusted/git",
+      sandboxPath: "/usr/bin/sandbox-exec",
+      gitIdentity: {
+        device: "1",
+        inode: "2",
+        size: 1,
+        digest: `sha256:${"a".repeat(64)}` as const,
+        directoryDevice: "1",
+        directoryInode: "3",
+      },
+      async cleanup() {
+        return true
+      },
+    }
+    const fake: GitInspectorDependencies = {
+      platform: "darwin",
+      async prepareTrustedBinaries() {
+        return binaries
+      },
+      async validatePreparedGit() {
+        return true
+      },
+      async runSandboxedGit(input) {
+        observedTimeouts.push(input.limits.timeoutMs)
+        await Bun.sleep(20)
+        return { ok: true, stdout: new Uint8Array() }
+      },
+    }
+
+    const result = await observeGit(fake, binaries, "/workspace", defaultGitInspectionLimits, performance.now() + 10)
+
+    expect(result).toMatchObject({ ok: false, reason: "git_process_timeout" })
+    expect(observedTimeouts).toHaveLength(1)
+    expect(observedTimeouts[0]).toBeLessThanOrEqual(10)
   })
 
   test("seals the real Git executable outside the workspace and removes it", async () => {
