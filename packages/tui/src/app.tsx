@@ -1,3 +1,4 @@
+import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import { render, TimeToFirstDraw, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { registerOpencodeSpinner } from "./component/register-spinner"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
@@ -87,6 +88,7 @@ import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-wi
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 import { inspectAstraSessionAuthority } from "./astra/session-authority"
+import { registerAstraAppFeatures } from "./astra/features"
 
 registerOpencodeSpinner()
 
@@ -185,6 +187,7 @@ function isVersionGreater(left: string, right: string) {
 }
 
 export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+  let astraAuthority: AstraSessionAuthority | undefined
   if (Flag.ASTRA_SAFE_START) {
     const authority = inspectAstraSessionAuthority(process.env, process.cwd())
     if (authority.status !== "valid") {
@@ -192,6 +195,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
         new Error(`Astra session authority rejected: ${authority.status === "invalid" ? authority.reason : "missing"}`),
       )
     }
+    astraAuthority = authority.authority
   }
   const global = yield* Global.Service
   const exit = { epilogue: undefined as string | undefined, reason: undefined as unknown }
@@ -327,6 +331,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                                     <App
                                                                       onSnapshot={input.onSnapshot}
                                                                       pluginHost={input.pluginHost}
+                                                                      astraAuthority={astraAuthority}
                                                                     />
                                                                   </LocationProvider>
                                                                 </EditorContextProvider>
@@ -371,7 +376,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   })
 })
 
-function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost }) {
+function App(props: {
+  onSnapshot?: () => Promise<string[]>
+  pluginHost: TuiPluginHost
+  astraAuthority?: AstraSessionAuthority
+}) {
   const startup = useTuiStartup()
   const tuiConfig = useTuiConfig()
   const route = useRoute()
@@ -393,8 +402,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const pluginRuntime = usePluginRuntime()
   const attention = createTuiAttention({ renderer, config: tuiConfig, kv })
   const clipboard = useClipboard()
-  const astraAuthority = inspectAstraSessionAuthority()
-  const astraSession = astraAuthority.status === "valid"
+  const astraSession = props.astraAuthority !== undefined
 
   const api = createTuiApi(
     createTuiApiAdapters({
@@ -417,7 +425,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   )
   const [ready, setReady] = createSignal(false)
   let astraSlots: ReturnType<typeof pluginRuntime.setupSlots> | undefined
-  if (astraSession) {
+  if (props.astraAuthority) {
+    registerAstraAppFeatures(api, props.astraAuthority)
     astraSlots = pluginRuntime.setupSlots(api)
     setReady(true)
   } else {
