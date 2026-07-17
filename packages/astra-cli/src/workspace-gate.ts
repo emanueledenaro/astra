@@ -143,6 +143,11 @@ export async function runWorkspaceGate(
       io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
       return { exitCode: 2, workspaceState, operationState: null, report }
     }
+    if (inspection.status === "complete" && inspection.diff.observationDigest !== inspection.outputDigest) {
+      io.write("GIT INSPECTION BLOCKED  diff binding does not match the bounded observation")
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
     for (const line of renderGitInspection(inspection)) io.write(line)
     io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
     return { exitCode: inspection.status === "complete" ? 0 : 2, workspaceState, operationState: null, report }
@@ -302,6 +307,8 @@ function renderGitInspection(inspection: GitInspection) {
     : "none"
   const lines = [
     "GIT MODE   bounded read-only • baseline not captured • submodules not inspected",
+    "GIT DIFF   metadata only • ephemeral • not verified",
+    `DIFF BIND  ${sanitizeTerminalText(inspection.diff.observationDigest)}`,
     `GIT BRANCH ${sanitizeTerminalText(branch)}`,
     `UPSTREAM   ${sanitizeTerminalText(upstream)}`,
     `STASH      ${inspection.branch.stashCount}`,

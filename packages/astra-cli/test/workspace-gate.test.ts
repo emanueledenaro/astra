@@ -7,6 +7,7 @@ import { createMaliciousWorkspace, directoryDigest, sentinelNames } from "../../
 import {
   runWorkspaceGate,
   type EffectApproval,
+  type GitInspection,
   type WorkspaceDecision,
   type WorkspaceGateIO,
 } from "../src/workspace-gate"
@@ -76,6 +77,76 @@ function approvedDependencies() {
   }
 }
 
+function completeGitInspection(workspaceRoot: string): GitInspection {
+  const outputDigest = `sha256:${"1".repeat(64)}` as const
+  return {
+    status: "complete",
+    mode: "bounded_read_only",
+    baseline: "not_captured",
+    activationAllowed: false,
+    verification: "not_verified",
+    submodules: "not_inspected",
+    workspaceRoot,
+    branch: {
+      oid: "0123456789abcdef0123456789abcdef01234567",
+      head: "main",
+      upstream: "origin/main",
+      ahead: 1,
+      behind: 2,
+      stashCount: 0,
+      aheadBehindScope: "local_ref_only",
+    },
+    staged: [{ path: "same.txt", index: "M", worktree: "M" }],
+    unstaged: [{ path: "same.txt", index: "M", worktree: "M" }],
+    untracked: ["new.txt"],
+    conflicts: [],
+    entryCount: 2,
+    outputDigest,
+    diff: {
+      source: "status_porcelain_v2",
+      format: "metadata_only",
+      renames: "disabled",
+      durability: "ephemeral",
+      verification: "not_verified",
+      untrackedContent: "not_inspected",
+      conflictContent: "not_inspected",
+      observationDigest: outputDigest,
+      staged: [
+        {
+          path: "same.txt",
+          change: "modified",
+          before: {
+            location: "head",
+            state: "object",
+            mode: "100644",
+            oid: "0123456789abcdef0123456789abcdef01234567",
+          },
+          after: {
+            location: "index",
+            state: "object",
+            mode: "100644",
+            oid: "0123456789abcdef0123456789abcdef01234567",
+          },
+        },
+      ],
+      unstaged: [
+        {
+          path: "same.txt",
+          change: "modified",
+          before: {
+            location: "index",
+            state: "object",
+            mode: "100644",
+            oid: "0123456789abcdef0123456789abcdef01234567",
+          },
+          after: { location: "worktree", state: "unhashed", mode: "100644" },
+        },
+      ],
+    },
+    reportDigest: `sha256:${"2".repeat(64)}`,
+  }
+}
+
 async function exists(path: string) {
   try {
     await lstat(path)
@@ -111,31 +182,7 @@ describe("workspace gate", () => {
       async inspectGitWorkspace(workspaceRoot) {
         inspections += 1
         expect(workspaceRoot).toBe(root)
-        return {
-          status: "complete",
-          mode: "bounded_read_only",
-          baseline: "not_captured",
-          activationAllowed: false,
-          verification: "not_verified",
-          submodules: "not_inspected",
-          workspaceRoot,
-          branch: {
-            oid: "0123456789abcdef0123456789abcdef01234567",
-            head: "main",
-            upstream: "origin/main",
-            ahead: 1,
-            behind: 2,
-            stashCount: 0,
-            aheadBehindScope: "local_ref_only",
-          },
-          staged: [{ path: "same.txt", index: "M", worktree: "M" }],
-          unstaged: [{ path: "same.txt", index: "M", worktree: "M" }],
-          untracked: ["new.txt"],
-          conflicts: [],
-          entryCount: 2,
-          outputDigest: `sha256:${"1".repeat(64)}`,
-          reportDigest: `sha256:${"2".repeat(64)}`,
-        }
+        return completeGitInspection(workspaceRoot)
       },
     })
     const output = terminal.lines.join("\n")
@@ -147,10 +194,32 @@ describe("workspace gate", () => {
     expect(output).toContain("+1 -2 (LOCAL REF ONLY)")
     expect(output).toContain("STAGED     same.txt")
     expect(output).toContain("UNSTAGED   same.txt")
+    expect(output).toContain("GIT DIFF   metadata only • ephemeral • not verified")
+    expect(output).toContain(`DIFF BIND  sha256:${"1".repeat(64)}`)
     expect(output).toContain("WORKSPACE STATE  UNTRUSTED")
     expect(output).not.toContain("HOST EXECUTION")
     expect(output).not.toContain("VERIFIED")
     expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("blocks a Git diff whose binding does not match the bounded observation", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO("inspect-git")
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async inspectGitWorkspace(workspaceRoot) {
+        const inspection = completeGitInspection(workspaceRoot)
+        if (inspection.status !== "complete") return inspection
+        return {
+          ...inspection,
+          diff: { ...inspection.diff, observationDigest: `sha256:${"3".repeat(64)}` },
+        }
+      },
+    })
+
+    expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: null })
+    expect(terminal.lines.join("\n")).toContain("diff binding does not match the bounded observation")
   })
 
   test("does not call the Git adapter during ordinary read-only open", async () => {

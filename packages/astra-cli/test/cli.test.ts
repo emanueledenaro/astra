@@ -91,6 +91,8 @@ describe("Astra CLI durable state", () => {
     expect(run.exitCode).toBe(0)
     expect(run.stderr).toBe("")
     expect(run.stdout).toContain("GIT MODE   bounded read-only")
+    expect(run.stdout).toContain("GIT DIFF   metadata only • ephemeral • not verified")
+    expect(run.stdout).toContain("DIFF BIND  sha256:")
     expect(run.stdout).toContain("UNSTAGED   tracked.txt")
     expect(run.stdout).toContain("WORKSPACE STATE  UNTRUSTED")
     expect(run.stdout).toContain("activation remains unavailable")

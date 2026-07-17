@@ -65,6 +65,25 @@ describe("bounded read-only Git inspection", () => {
     expect(invocation.arguments[4]).toContain('(param "GIT_PATH")')
     expect(invocation.arguments[4]).not.toContain(hostilePath)
     expect(invocation.arguments[5]).toBe(hostilePath)
+    expect(invocation.environment.GIT_ATTR_NOSYSTEM).toBe("1")
+
+    const indexInvocation = buildSandboxInvocation({
+      gitPath: hostilePath,
+      sandboxPath: "/usr/bin/sandbox-exec",
+      workspaceRoot: "/workspace",
+      command: "index-assume-unchanged",
+      limits: {
+        timeoutMs: 1,
+        maxStdoutBytes: 1,
+        maxStderrBytes: 1,
+        maxEntries: 1,
+        maxBoundaryEntries: 1,
+        maxBoundaryDurationMs: 1,
+        maxGitBinaryBytes: 1,
+      },
+    })
+    expect(indexInvocation.arguments).toContain("--full-name")
+    expect(indexInvocation.arguments.slice(-2)).toEqual(["--", ":(top)"])
   })
 
   test("seals the real Git executable outside the workspace and removes it", async () => {
@@ -152,6 +171,32 @@ describe("bounded read-only Git inspection", () => {
     expect(result.untracked).toEqual(["untracked.txt"])
     expect(result.outputDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(result.reportDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(result.diff).toMatchObject({
+      source: "status_porcelain_v2",
+      format: "metadata_only",
+      renames: "disabled",
+      durability: "ephemeral",
+      verification: "not_verified",
+      untrackedContent: "not_inspected",
+      conflictContent: "not_inspected",
+      observationDigest: result.outputDigest,
+      staged: [
+        {
+          path: "tracked.txt",
+          change: "modified",
+          before: { location: "head", state: "object" },
+          after: { location: "index", state: "object" },
+        },
+      ],
+      unstaged: [
+        {
+          path: "tracked.txt",
+          change: "modified",
+          before: { location: "index", state: "object" },
+          after: { location: "worktree", state: "unhashed" },
+        },
+      ],
+    })
     expect(await directoryDigest(root)).toBe(before)
   })
 
@@ -181,6 +226,37 @@ describe("bounded read-only Git inspection", () => {
     expect(await inspectGitWorkspace(fsmonitor)).toMatchObject({
       status: "blocked",
       reason: "git_index_fsmonitor_uninspectable",
+    })
+  })
+
+  test("blocks metadata that disagrees with the exact index observation", async () => {
+    const root = await repository()
+    const other = "fedcba9876543210fedcba9876543210fedcba98"
+    const status = new TextEncoder().encode(
+      [
+        `# branch.oid ${other}\0# branch.head main\0`,
+        `1 M. N... 100644 100644 100644 ${other} ${other} tracked.txt\0`,
+      ].join(""),
+    )
+    const index = new TextEncoder().encode(`H 100644 0123456789abcdef0123456789abcdef01234567 0\ttracked.txt\0`)
+
+    const result = await inspectGitWorkspaceWithDependencies(
+      root,
+      {},
+      dependencies(async (input) => ({ ok: true, stdout: input.command === "status" ? status : index })),
+    )
+
+    expect(result).toMatchObject({ status: "blocked", reason: "git_index_observation_mismatch" })
+  })
+
+  test("blocks intent-to-add instead of inventing a worktree object identity", async () => {
+    const root = await repository()
+    await writeFile(join(root, "intent.txt"), "intent\n")
+    await git(root, "add", "--intent-to-add", "intent.txt")
+
+    expect(await inspectGitWorkspace(root)).toMatchObject({
+      status: "blocked",
+      reason: "git_index_observation_mismatch",
     })
   })
 

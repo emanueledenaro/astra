@@ -24,3 +24,17 @@ uninspectable and remains blocked.
 
 Repository filters that require a helper process make inspection fail closed.
 The backend never retries with unsandboxed Git.
+
+The complete report also contains a typed, ephemeral metadata diff derived from
+the same twice-observed porcelain output. Staged entries describe `HEAD ->
+index` with exact mode and object IDs. Unstaged entries describe `index ->
+worktree`; worktree content remains explicitly unhashed. The diff is bound to
+the raw observation digest and never represents a durable baseline, patch, or
+verification verdict.
+
+Both index reads are root-scoped and cross-checked against ordinary status
+entries. Conflict stage metadata is preserved internally and checked exactly
+against index stages 1, 2, and 3. Mixed SHA-1/SHA-256 observations,
+intent-to-add, duplicate or control-character paths, unsupported modes, and
+inconsistent index records block the report. Untracked and conflict contents
+are not inspected in this increment.

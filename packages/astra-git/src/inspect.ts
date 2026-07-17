@@ -3,7 +3,7 @@ import { constants } from "node:fs"
 import { chmod, lstat, mkdtemp, open, opendir, readlink, realpath, rm, type FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path"
-import { parseGitIndexOutput, parseGitStatusOutput } from "./parser"
+import { indexMatchesStatus, parseGitIndexOutput, parseGitStatusOutput } from "./parser"
 import type { GitInspectionBlocked, GitInspectionBlockReason, GitInspectionLimits, GitInspectionResult } from "./types"
 
 export const defaultGitInspectionLimits = {
@@ -142,9 +142,12 @@ async function inspectWithPreparedGit(
   if (parsedAssumeUnchanged.value.hasGitlink || parsedFsmonitor.value.hasGitlink) {
     return blocked(root, "submodules_uninspected")
   }
+  if (!indexMatchesStatus(parsedStatus.value, parsedAssumeUnchanged.value, parsedFsmonitor.value)) {
+    return blocked(root, "git_index_observation_mismatch")
+  }
 
   const outputDigest = digestBytes(
-    new TextEncoder().encode("astra.git-observation.v2\0"),
+    new TextEncoder().encode("astra.git-observation.v3\0"),
     first.status,
     new TextEncoder().encode("\0index-assume-unchanged\0"),
     first.indexAssumeUnchanged,
@@ -159,12 +162,29 @@ async function inspectWithPreparedGit(
     verification: "not_verified" as const,
     submodules: "not_inspected" as const,
     workspaceRoot: root,
-    ...parsedStatus.value,
+    branch: parsedStatus.value.branch,
+    staged: parsedStatus.value.staged,
+    unstaged: parsedStatus.value.unstaged,
+    untracked: parsedStatus.value.untracked,
+    conflicts: parsedStatus.value.conflicts,
+    entryCount: parsedStatus.value.entryCount,
     outputDigest,
+    diff: {
+      source: "status_porcelain_v2" as const,
+      format: "metadata_only" as const,
+      renames: "disabled" as const,
+      durability: "ephemeral" as const,
+      verification: "not_verified" as const,
+      untrackedContent: "not_inspected" as const,
+      conflictContent: "not_inspected" as const,
+      observationDigest: outputDigest,
+      staged: parsedStatus.value.stagedDiff,
+      unstaged: parsedStatus.value.unstagedDiff,
+    },
   }
   return {
     ...report,
-    reportDigest: digestBytes(new TextEncoder().encode("astra.git-report.v2\0" + JSON.stringify(report))),
+    reportDigest: digestBytes(new TextEncoder().encode("astra.git-report.v3\0" + JSON.stringify(report))),
   }
 }
 
@@ -539,8 +559,12 @@ function gitArguments(workspaceRoot: string, command: SandboxedGitInput["command
     "-c",
     "advice.statusHints=false",
   ]
-  if (command === "index-assume-unchanged") return [...common, "ls-files", "--stage", "-v", "-z"]
-  if (command === "index-fsmonitor-valid") return [...common, "ls-files", "--stage", "-f", "-z"]
+  if (command === "index-assume-unchanged") {
+    return [...common, "ls-files", "--full-name", "--stage", "-v", "-z", "--", ":(top)"]
+  }
+  if (command === "index-fsmonitor-valid") {
+    return [...common, "ls-files", "--full-name", "--stage", "-f", "-z", "--", ":(top)"]
+  }
   return [
     ...common,
     "status",
@@ -558,6 +582,7 @@ function gitArguments(workspaceRoot: string, command: SandboxedGitInput["command
 function sanitizedGitEnvironment() {
   return {
     GIT_CONFIG_NOSYSTEM: "1",
+    GIT_ATTR_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
     GIT_OPTIONAL_LOCKS: "0",

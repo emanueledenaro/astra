@@ -29,6 +29,45 @@ export type GitConflict = Readonly<{
   code: string
 }>
 
+export type GitDiffObjectLocation = "head" | "index"
+
+export type GitDiffEndpoint =
+  | Readonly<{
+      location: GitDiffObjectLocation | "worktree"
+      state: "absent"
+    }>
+  | Readonly<{
+      location: GitDiffObjectLocation
+      state: "object"
+      mode: string
+      oid: string
+    }>
+  | Readonly<{
+      location: "worktree"
+      state: "unhashed"
+      mode: string
+    }>
+
+export type GitDiffEntry = Readonly<{
+  path: string
+  change: "added" | "deleted" | "modified" | "type_changed"
+  before: GitDiffEndpoint
+  after: GitDiffEndpoint
+}>
+
+export type GitDiffSnapshot = Readonly<{
+  source: "status_porcelain_v2"
+  format: "metadata_only"
+  renames: "disabled"
+  durability: "ephemeral"
+  verification: "not_verified"
+  untrackedContent: "not_inspected"
+  conflictContent: "not_inspected"
+  observationDigest: `sha256:${string}`
+  staged: ReadonlyArray<GitDiffEntry>
+  unstaged: ReadonlyArray<GitDiffEntry>
+}>
+
 export type GitInspectionReport = Readonly<{
   status: "complete"
   mode: "bounded_read_only"
@@ -44,6 +83,7 @@ export type GitInspectionReport = Readonly<{
   conflicts: ReadonlyArray<GitConflict>
   entryCount: number
   outputDigest: `sha256:${string}`
+  diff: GitDiffSnapshot
   reportDigest: `sha256:${string}`
 }>
 
@@ -85,6 +125,7 @@ export type GitInspectionBlockReason =
   | "git_index_skip_worktree"
   | "git_index_fsmonitor_valid"
   | "git_index_fsmonitor_uninspectable"
+  | "git_index_observation_mismatch"
   | "submodules_uninspected"
   | "observation_changed"
   | "git_ephemeral_copy_failed"
