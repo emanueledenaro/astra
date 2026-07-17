@@ -93,8 +93,32 @@
         "vite-plugin-solid": "catalog:",
       },
     },
+    "packages/astra-cli": {
+      "name": "@astra/cli",
+      "bin": {
+        "astra": "./src/index.ts",
+      },
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+        "@astra/runtime": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
     "packages/astra-domain": {
       "name": "@astra/domain",
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
+    "packages/astra-runtime": {
+      "name": "@astra/runtime",
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+      },
       "devDependencies": {
         "@types/bun": "catalog:",
         "@typescript/native-preview": "catalog:",
@@ -1231,7 +1255,11 @@
 
     "@anycable/core": ["@anycable/core@0.9.2", "", { "dependencies": { "nanoevents": "^7.0.1" } }, "sha512-x5ZXDcW/N4cxWl93CnbHs/u7qq4793jS2kNPWm+duPrXlrva+ml2ZGT7X9tuOBKzyIHf60zWCdIK7TUgMPAwXA=="],
 
+    "@astra/cli": ["@astra/cli@workspace:packages/astra-cli"],
+
     "@astra/domain": ["@astra/domain@workspace:packages/astra-domain"],
+
+    "@astra/runtime": ["@astra/runtime@workspace:packages/astra-runtime"],
 
     "@astrojs/check": ["@astrojs/check@0.9.6", "", { "dependencies": { "@astrojs/language-server": "^2.16.1", "chokidar": "^4.0.1", "kleur": "^4.1.5", "yargs": "^17.7.2" }, "peerDependencies": { "typescript": "^5.0.0" }, "bin": { "astro-check": "bin/astro-check.js" } }, "sha512-jlaEu5SxvSgmfGIFfNgcn5/f+29H61NJzEMfAZ82Xopr4XBchXB1GVlcJsE+elUlsYSbXlptZLX+JMG3b/wZEA=="],
 

@@ -2,26 +2,31 @@
 
 **A predictable, security-first AI development system built on OpenCode.**
 
-Astra is being designed so a developer can always see what the AI intends to do, which authority it has, what changed, what was independently verified, what remains uncertain, and how to recover. The terminal interface, Git Control Plane, Codex-compatible skills and plugins, and animated pixel Lynx will be delivered as later vertical slices.
+Astra is being designed so a developer can always see what the AI intends to do, which authority it has, what changed, what was independently verified, what remains uncertain, and how to recover. The Git Control Plane, Codex-compatible skills and plugins, and animated pixel Lynx will be delivered as later vertical slices.
 
-## Current foundation
+## Current local demo
 
-The first working slice is the pure `@astra/domain` Operation lifecycle:
+The first macOS product slice now includes:
 
 - 15 explicit states from proposal to verified success, failure, recovery, or unresolved ambiguity;
-- a complete fail-closed transition topology;
-- no external effects, providers, credentials, Git commands, or runtime activation;
-- an independent executable ADR fixture with focused tests;
-- a deterministic local demo in `packages/astra-domain`.
+- a separate terminal Workspace Gate with the Lynx identity;
+- bounded static preflight without normal OpenCode workspace bootstrap;
+- visible `read-only`, `activate once`, and `exit` decisions with no persistent trust;
+- a second explicit approval before one create-only demo write;
+- distinct observed and verified states, with exact readback evidence before the scoped `VERIFIED` result.
 
 ```bash
-cd packages/astra-domain
-bun test
-bun run demo
+bun run --cwd packages/astra-cli demo -- /absolute/path/to/workspace
+```
+
+Run the complete negative and positive verification matrix:
+
+```bash
+bun run --cwd packages/astra-cli verify:demo
 ```
 
 > [!IMPORTANT]
-> Astra is in active foundation development and is not ready for installation or production use. The OpenCode documentation below describes the inherited compatibility baseline, not a released Astra product.
+> Astra is in active foundation development and is not ready for installation or production use. This demo performs host execution without a sandbox only after explicit approval. It does not activate providers, plugins, MCP, LSP, Git, shell commands, or the normal OpenCode runtime. The OpenCode documentation below describes the inherited compatibility baseline, not a released Astra product.
 
 See [UPSTREAM.md](UPSTREAM.md) for the exact source baseline, license provenance, and remote policy.
 

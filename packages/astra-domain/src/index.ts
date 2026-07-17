@@ -12,6 +12,15 @@ export {
 
 export * as Operation from "./operation"
 
+export {
+  projectWorkspaceTrustEvent,
+  workspaceTrustEvents,
+  workspaceTrustStates,
+  workspaceTrustTransitions,
+} from "./workspace-trust"
+
+export * as WorkspaceTrust from "./workspace-trust"
+
 export type {
   AcceptedOperationTransition,
   OperationEvent,
@@ -21,3 +30,16 @@ export type {
   OperationTransitionResult,
   RejectedOperationTransition,
 } from "./operation"
+
+export type {
+  AcceptedWorkspaceTrustTransition,
+  RejectedWorkspaceTrustTransition,
+  WorkspaceIdentity,
+  WorkspacePreflightLimits,
+  WorkspaceRiskSurface,
+  WorkspaceTrustEvent,
+  WorkspaceTrustReport,
+  WorkspaceTrustState,
+  WorkspaceTrustTransition,
+  WorkspaceTrustTransitionResult,
+} from "./workspace-trust"

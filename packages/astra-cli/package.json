@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@astra/cli",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "astra": "./src/index.ts"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./session": "./src/workspace-gate.ts",
+    "./terminal": "./src/terminal.ts"
+  },
+  "scripts": {
+    "demo": "bun run ./src/index.ts open",
+    "start": "bun run ./src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsgo --noEmit",
+    "verify:demo": "bun run ./script/verify-demo.ts"
+  },
+  "dependencies": {
+    "@astra/domain": "workspace:*",
+    "@astra/runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:"
+  }
+}

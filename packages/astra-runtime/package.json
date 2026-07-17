@@ -1,18 +1,21 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "@astra/domain",
+  "name": "@astra/runtime",
   "private": true,
   "type": "module",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
-    "./operation": "./src/operation.ts",
-    "./workspace-trust": "./src/workspace-trust.ts"
+    "./preflight": "./src/workspace-preflight.ts",
+    "./controlled-write-plan": "./src/controlled-write-plan.ts",
+    "./controlled-write": "./src/controlled-write.ts"
   },
   "scripts": {
-    "demo": "bun run ./demo/operation.ts",
     "test": "bun test",
     "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@astra/domain": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:",
