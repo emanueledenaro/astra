@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto"
 import { access, lstat, mkdir, realpath } from "node:fs/promises"
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path"
+import {
+  parseGitRepositoryBaselineSnapshot,
+  type GitRepositoryBaselineSnapshot,
+} from "@astra/domain/git-repository-baseline"
 import { parseOperationID, type ActorRef, type OperationID } from "@astra/domain/operation-contract"
 import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
 import {
@@ -21,6 +25,7 @@ export type RecordDeniedControlledWriteInput = Readonly<{
   filename: string
   plan: ControlledWritePlan
   report: WorkspaceTrustReport
+  repositoryBaseline?: GitRepositoryBaselineSnapshot
   policyAskedAt: string
   approvalRejectedAt: string
   recordingStartedAt: string
@@ -49,7 +54,7 @@ export class DeniedOperationRecordingError extends Error {
 
 /**
  * Persists the exact no-effect denial lifecycle for one controlled write.
- * It never dispatches the planned effect and refuses to invent a Git baseline.
+ * It never dispatches the planned effect and refuses to invent repository authority.
  */
 export async function recordDeniedControlledWrite(input: RecordDeniedControlledWriteInput): Promise<OperationRecord> {
   try {
@@ -104,12 +109,6 @@ function denialFacts(input: RecordDeniedControlledWriteInput) {
       "The plan and preflight refer to different workspaces",
     )
   }
-  if (report.surfaces.some((surface) => surface.kind === "git_metadata")) {
-    throw new DeniedOperationRecordingError(
-      "git_baseline_unavailable",
-      "The current increment cannot record a repository Operation without a complete Git baseline",
-    )
-  }
   if (isInsideWorkspace(report.root, input.filename)) {
     throw new DeniedOperationRecordingError(
       "ledger_inside_workspace",
@@ -134,7 +133,7 @@ function denialFacts(input: RecordDeniedControlledWriteInput) {
     locationID: `local:${report.root}`,
     workspaceIdentity: report.identity,
     trustDigest: report.securityDigest,
-    repository: { kind: "non_git", markerDigest: report.securityDigest },
+    repository: operationRepositoryBaseline(input),
     policyDigest,
     adapterDigest,
   } as const
@@ -229,6 +228,46 @@ function denialFacts(input: RecordDeniedControlledWriteInput) {
       },
     ] as const,
   }
+}
+
+function operationRepositoryBaseline(input: RecordDeniedControlledWriteInput) {
+  const gitWorkspace = input.report.surfaces.some((surface) => surface.kind === "git_metadata")
+  if (!gitWorkspace) {
+    if (input.repositoryBaseline) {
+      throw new DeniedOperationRecordingError(
+        "git_baseline_unavailable",
+        "A Git repository baseline cannot authorize a non-Git workspace",
+      )
+    }
+    return { kind: "non_git", markerDigest: input.report.securityDigest } as const
+  }
+
+  const parsed = parseGitRepositoryBaselineSnapshot(input.repositoryBaseline)
+  if (!parsed.ok) {
+    throw new DeniedOperationRecordingError(
+      "git_baseline_unavailable",
+      "A complete, valid Git repository baseline is required",
+    )
+  }
+  if (
+    parsed.value.root.canonicalPath !== input.report.root ||
+    parsed.value.root.device !== input.report.identity?.device ||
+    parsed.value.root.inode !== input.report.identity.inode
+  ) {
+    throw new DeniedOperationRecordingError(
+      "workspace_mismatch",
+      "The Git repository baseline and preflight refer to different workspace identities",
+    )
+  }
+  return {
+    kind: "git",
+    schemaVersion: 1,
+    snapshotDigest: parsed.value.snapshotDigest,
+    observationDigest: parsed.value.observer.observationDigest,
+    root: parsed.value.root,
+    head: parsed.value.head,
+    verification: parsed.value.verification,
+  } as const
 }
 
 function eventDraft(

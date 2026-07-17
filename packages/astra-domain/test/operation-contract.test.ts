@@ -148,6 +148,79 @@ describe("Operation contract decoding", () => {
         repository: { kind: "non_git", markerDigest: digest },
       }),
     ).toMatchObject({ ok: true, value: { repository: { kind: "non_git", markerDigest: digest } } })
+
+    const snapshotBaseline = {
+      ...baseline,
+      repository: {
+        kind: "git",
+        schemaVersion: 1,
+        snapshotDigest: digest,
+        observationDigest: nextDigest,
+        root: { canonicalPath: "/workspace", device: "16777233", inode: "42" },
+        head: {
+          kind: "symbolic",
+          symbolicRef: "refs/heads/durable-coordinator",
+          oid: "453b61e27b2f6c2752a60dd7d8412bdcf4e0aa3d",
+        },
+        verification: "not_verified",
+      },
+    }
+
+    expect(parseWorkspaceBaseline(snapshotBaseline)).toMatchObject({ ok: true, value: snapshotBaseline })
+    expect(
+      parseWorkspaceBaseline({
+        ...snapshotBaseline,
+        repository: { ...snapshotBaseline.repository, observationDigest: undefined },
+      }),
+    ).toMatchObject({ ok: false, issue: { path: "$.repository.observationDigest" } })
+    expect(
+      parseWorkspaceBaseline({
+        ...snapshotBaseline,
+        repository: { ...snapshotBaseline.repository, trackedWorktreeDigest: digest },
+      }),
+    ).toMatchObject({ ok: false, issue: { path: "$.repository.trackedWorktreeDigest", reason: "unexpected_field" } })
+    expect(
+      parseWorkspaceBaseline({
+        ...snapshotBaseline,
+        repository: { ...snapshotBaseline.repository, head: { kind: "unborn", symbolicRef: "refs/heads/main" } },
+      }).ok,
+    ).toBeTrue()
+    expect(
+      parseWorkspaceBaseline({
+        ...snapshotBaseline,
+        repository: {
+          ...snapshotBaseline.repository,
+          head: { kind: "detached", oid: "453b61e27b2f6c2752a60dd7d8412bdcf4e0aa3d" },
+        },
+      }).ok,
+    ).toBeTrue()
+    expect(
+      parseWorkspaceBaseline({
+        ...snapshotBaseline,
+        repository: { ...snapshotBaseline.repository, verification: "verified" },
+      }),
+    ).toMatchObject({ ok: false, issue: { path: "$.repository.verification" } })
+    expect(
+      parseWorkspaceBaseline({
+        ...snapshotBaseline,
+        repository: {
+          ...snapshotBaseline.repository,
+          root: { ...snapshotBaseline.repository.root, canonicalPath: "relative/workspace" },
+        },
+      }),
+    ).toMatchObject({ ok: false, issue: { path: "$.repository.root.canonicalPath" } })
+    expect(
+      parseWorkspaceBaseline({
+        ...snapshotBaseline,
+        repository: {
+          ...snapshotBaseline.repository,
+          root: { ...snapshotBaseline.repository.root, inode: "43" },
+        },
+      }),
+    ).toMatchObject({
+      ok: false,
+      issue: { path: "$.repository.root", reason: "workspace_identity_mismatch" },
+    })
   })
 
   test("bounds retries and makes retry safety explicit", () => {

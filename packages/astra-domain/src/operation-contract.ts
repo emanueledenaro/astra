@@ -43,7 +43,22 @@ export type OperationIntent = Readonly<{
   parameters: NormalizedJsonObject
 }>
 
-export type GitRepositoryBaseline = Readonly<{
+export type GitRepositorySnapshotBaseline = Readonly<{
+  kind: "git"
+  schemaVersion: 1
+  snapshotDigest: ContentDigest
+  observationDigest: ContentDigest
+  root: Readonly<{ canonicalPath: string; device: string; inode: string }>
+  head:
+    | Readonly<{ kind: "unborn"; symbolicRef: string }>
+    | Readonly<{ kind: "symbolic"; symbolicRef: string; oid: string }>
+    | Readonly<{ kind: "detached"; oid: string }>
+  verification: "not_verified"
+}>
+
+export type GitRepositoryBaseline = GitRepositorySnapshotBaseline | LegacyGitRepositoryBaseline
+
+type LegacyGitRepositoryBaseline = Readonly<{
   kind: "git"
   repositoryIdentity: string
   head: string
@@ -356,6 +371,13 @@ export function parseWorkspaceBaseline(input: unknown, path = "$"): OperationCon
   if (!trustDigest.ok) return trustDigest
   const repository = parseRepositoryBaseline(record.value.repository, `${path}.repository`)
   if (!repository.ok) return repository
+  if (
+    "schemaVersion" in repository.value &&
+    (repository.value.root.device !== workspaceIdentity.value.device ||
+      repository.value.root.inode !== workspaceIdentity.value.inode)
+  ) {
+    return rejected(`${path}.repository.root`, "workspace_identity_mismatch")
+  }
   const policyDigest = parseDigest<ContentDigest>(record.value.policyDigest, `${path}.policyDigest`)
   if (!policyDigest.ok) return policyDigest
   const adapterDigest = parseDigest<ContentDigest>(record.value.adapterDigest, `${path}.adapterDigest`)
@@ -1059,6 +1081,11 @@ function parseRepositoryBaseline(
       "trackedWorktreeDigest",
       "untrackedDigest",
       "markerDigest",
+      "schemaVersion",
+      "snapshotDigest",
+      "observationDigest",
+      "root",
+      "verification",
     ],
     path,
   )
@@ -1071,6 +1098,15 @@ function parseRepositoryBaseline(
     return parsed({ kind: "non_git", markerDigest: markerDigest.value })
   }
   if (kindRecord.value.kind !== "git") return rejected(`${path}.kind`, "unsupported_repository_kind")
+  if (
+    Object.hasOwn(kindRecord.value, "schemaVersion") ||
+    Object.hasOwn(kindRecord.value, "snapshotDigest") ||
+    Object.hasOwn(kindRecord.value, "observationDigest") ||
+    Object.hasOwn(kindRecord.value, "root") ||
+    Object.hasOwn(kindRecord.value, "verification")
+  ) {
+    return parseGitRepositorySnapshotBaseline(input, path)
+  }
   const record = parseExactRecord(
     input,
     ["kind", "repositoryIdentity", "head", "indexTreeDigest", "trackedWorktreeDigest", "untrackedDigest"],
@@ -1099,6 +1135,98 @@ function parseRepositoryBaseline(
     trackedWorktreeDigest: trackedWorktreeDigest.value,
     untrackedDigest: untrackedDigest.value,
   })
+}
+
+function parseGitRepositorySnapshotBaseline(
+  input: unknown,
+  path: string,
+): OperationContractParseResult<GitRepositorySnapshotBaseline> {
+  const record = parseExactRecord(
+    input,
+    ["kind", "schemaVersion", "snapshotDigest", "observationDigest", "root", "head", "verification"],
+    path,
+  )
+  if (!record.ok) return record
+  if (record.value.schemaVersion !== 1) return rejected(`${path}.schemaVersion`, "unsupported_schema_version")
+  const snapshotDigest = parseDigest<ContentDigest>(record.value.snapshotDigest, `${path}.snapshotDigest`)
+  if (!snapshotDigest.ok) return snapshotDigest
+  const observationDigest = parseDigest<ContentDigest>(record.value.observationDigest, `${path}.observationDigest`)
+  if (!observationDigest.ok) return observationDigest
+  const root = parseGitRepositoryIdentity(record.value.root, `${path}.root`)
+  if (!root.ok) return root
+  const head = parseGitRepositoryHead(record.value.head, `${path}.head`)
+  if (!head.ok) return head
+  if (record.value.verification !== "not_verified") {
+    return rejected(`${path}.verification`, "unsupported_verification_state")
+  }
+  return parsed({
+    kind: "git",
+    schemaVersion: 1,
+    snapshotDigest: snapshotDigest.value,
+    observationDigest: observationDigest.value,
+    root: root.value,
+    head: head.value,
+    verification: "not_verified",
+  })
+}
+
+function parseGitRepositoryIdentity(
+  input: unknown,
+  path: string,
+): OperationContractParseResult<Readonly<{ canonicalPath: string; device: string; inode: string }>> {
+  const record = parseExactRecord(input, ["canonicalPath", "device", "inode"], path)
+  if (!record.ok) return record
+  const canonicalPath = parseBoundedString(record.value.canonicalPath, `${path}.canonicalPath`, 16_384)
+  if (!canonicalPath.ok) return canonicalPath
+  if (!canonicalPath.value.startsWith("/")) return rejected(`${path}.canonicalPath`, "expected_absolute_path")
+  const device = parseBoundedString(record.value.device, `${path}.device`, 128)
+  if (!device.ok) return device
+  if (!/^(?:0|[1-9][0-9]*)$/.test(device.value)) return rejected(`${path}.device`, "expected_decimal_identity")
+  const inode = parseBoundedString(record.value.inode, `${path}.inode`, 128)
+  if (!inode.ok) return inode
+  if (!/^(?:0|[1-9][0-9]*)$/.test(inode.value)) return rejected(`${path}.inode`, "expected_decimal_identity")
+  return parsed({ canonicalPath: canonicalPath.value, device: device.value, inode: inode.value })
+}
+
+function parseGitRepositoryHead(
+  input: unknown,
+  path: string,
+): OperationContractParseResult<GitRepositorySnapshotBaseline["head"]> {
+  const broad = parseExactRecord(input, ["kind", "symbolicRef", "oid"], path)
+  if (!broad.ok) return broad
+  if (broad.value.kind === "unborn") {
+    const record = parseExactRecord(input, ["kind", "symbolicRef"], path)
+    if (!record.ok) return record
+    const symbolicRef = parseGitSymbolicRef(record.value.symbolicRef, `${path}.symbolicRef`)
+    if (!symbolicRef.ok) return symbolicRef
+    return parsed({ kind: "unborn", symbolicRef: symbolicRef.value })
+  }
+  if (broad.value.kind === "symbolic") {
+    const record = parseExactRecord(input, ["kind", "symbolicRef", "oid"], path)
+    if (!record.ok) return record
+    const symbolicRef = parseGitSymbolicRef(record.value.symbolicRef, `${path}.symbolicRef`)
+    if (!symbolicRef.ok) return symbolicRef
+    if (!validGitObjectID(record.value.oid)) return rejected(`${path}.oid`, "expected_git_object_id")
+    return parsed({ kind: "symbolic", symbolicRef: symbolicRef.value, oid: record.value.oid })
+  }
+  if (broad.value.kind !== "detached") return rejected(`${path}.kind`, "unsupported_git_head_kind")
+  const record = parseExactRecord(input, ["kind", "oid"], path)
+  if (!record.ok) return record
+  if (!validGitObjectID(record.value.oid)) return rejected(`${path}.oid`, "expected_git_object_id")
+  return parsed({ kind: "detached", oid: record.value.oid })
+}
+
+function parseGitSymbolicRef(input: unknown, path: string): OperationContractParseResult<string> {
+  const symbolicRef = parseBoundedString(input, path, 1_024)
+  if (!symbolicRef.ok) return symbolicRef
+  if (!/^refs\/[A-Za-z0-9][^\u0000-\u0020\u007f~^:?*[\\]*$/.test(symbolicRef.value)) {
+    return rejected(path, "expected_git_reference")
+  }
+  return symbolicRef
+}
+
+function validGitObjectID(input: unknown): input is string {
+  return typeof input === "string" && gitObjectID.test(input) && !/^0+$/.test(input)
 }
 
 function parseRetrySafety(input: unknown, path: string): OperationContractParseResult<RetryBudget["retrySafety"]> {
