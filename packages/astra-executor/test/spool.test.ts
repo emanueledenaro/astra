@@ -51,6 +51,27 @@ const receipt = requireReceipt({
   },
 })
 
+const completedReceipt = requireReceipt({
+  ...receipt,
+  receiptID: "0196e4cb-5d80-7b1d-8fb2-263b81670437",
+  effectClass: "provider_turn",
+  resources: ["provider:turn"],
+  observation: {
+    kind: "effect_completed",
+    completionDigest: `sha256:${"8".repeat(64)}`,
+    assurance: "observed_not_verified",
+  },
+  verificationContext: {
+    schemaVersion: 3,
+    admittedBaselineDigest: `sha256:${"d".repeat(64)}`,
+    workspaceIdentity: { device: "1", inode: "2" },
+    executionBoundary: "host_no_sandbox",
+    observationDigest: `sha256:${"8".repeat(64)}`,
+    limitations: ["provider response observed; semantic correctness not independently verified"],
+  },
+  output: { digest: `sha256:${"8".repeat(64)}`, bytes: 12, preview: "provider reply" },
+})
+
 const acknowledgement = {
   receiptID: receipt.receiptID,
   ledgerEventID: "0196e4cb-5d80-7b1d-8fb2-263b81670499",
@@ -58,6 +79,19 @@ const acknowledgement = {
 } as const
 
 describe("durable executor receipt spool", () => {
+  test("round-trips observed completion without upgrading its assurance", async () => {
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        const spool = yield* makeReceiptSpool()
+        yield* spool.initialize()
+        yield* spool.put(completedReceipt)
+        expect((yield* spool.get(completedReceipt.receiptID))?.receipt).toEqual(completedReceipt)
+        expect(JSON.stringify(yield* spool.listPending({ limit: 10 }))).not.toContain("VERIFIED")
+      }),
+    )
+  })
+
   test("keeps an unacknowledged receipt pending across a database reopen", async () => {
     const directory = await mkdtemp(join(tmpdir(), "astra-receipt-spool-"))
     const filename = join(directory, "receipts.sqlite")

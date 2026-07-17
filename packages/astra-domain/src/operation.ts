@@ -8,6 +8,7 @@ export const operationStates = [
   "verifying",
   "reconciliation_required",
   "rolling_back",
+  "completed",
   "succeeded",
   "denied",
   "cancelled",
@@ -31,6 +32,7 @@ export const activeOperationStates = [
 ] as const satisfies ReadonlyArray<OperationState>
 
 export const terminalOperationStates = [
+  "completed",
   "succeeded",
   "denied",
   "cancelled",
@@ -56,6 +58,7 @@ export const operationEvents = [
   "dispatch.cancelled_unclaimed",
   "authorization.invalidated_unclaimed",
   "dispatch.claim_unknown",
+  "effect.completed",
   "effect.observed",
   "execution.failed_without_effect",
   "cancellation.completed_without_effect",
@@ -116,6 +119,7 @@ export const operationTransitions = [
   { from: "dispatch_pending", event: "dispatch.cancelled_unclaimed", to: "cancelled" },
   { from: "dispatch_pending", event: "authorization.invalidated_unclaimed", to: "cancelled" },
   { from: "dispatch_pending", event: "dispatch.claim_unknown", to: "reconciliation_required" },
+  { from: "dispatched", event: "effect.completed", to: "completed" },
   { from: "dispatched", event: "effect.observed", to: "effect_observed" },
   { from: "dispatched", event: "execution.failed_without_effect", to: "failed" },
   { from: "dispatched", event: "cancellation.completed_without_effect", to: "cancelled" },
@@ -192,6 +196,7 @@ export type OperationSemanticKey =
   | "VERIFYING"
   | "RECONCILIATION_REQUIRED"
   | "RECOVERING"
+  | "COMPLETED"
   | "VERIFIED"
   | "DENIED"
   | "CANCELLED"
@@ -214,6 +219,7 @@ const semanticKeys = {
   verifying: "VERIFYING",
   reconciliation_required: "RECONCILIATION_REQUIRED",
   rolling_back: "RECOVERING",
+  completed: "COMPLETED",
   succeeded: "VERIFIED",
   denied: "DENIED",
   cancelled: "CANCELLED",

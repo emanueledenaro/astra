@@ -90,6 +90,12 @@ export async function verifyRecordedControlledWrite(
 
     const receipt = durable.dispatch.receipt
     const context = receipt.verificationContext
+    if ("schemaVersion" in context && context.schemaVersion === 3) {
+      throw new ControlledWriteVerificationError(
+        "invalid_input",
+        "An observed-completion receipt cannot be independently verified as a controlled write",
+      )
+    }
     const baselineAuthority = makeControlledWriteBaselineAuthority(input.report, input.repositoryBaseline)
     const gitContext = "schemaVersion" in context && context.schemaVersion === 2 ? context : null
     const observedAt = new Date().toISOString()
@@ -225,7 +231,7 @@ export async function verifyRecordedControlledWrite(
   }
 }
 
-type ReceiptVerificationContext = OperationReceipt["verificationContext"]
+type ReceiptVerificationContext = Exclude<OperationReceipt["verificationContext"], { readonly schemaVersion: 3 }>
 
 async function inspectWorkspace(
   root: string,

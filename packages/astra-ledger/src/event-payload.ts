@@ -57,7 +57,12 @@ export function parseLifecyclePayload(name: OperationEvent, payload: NormalizedJ
   if (name === "dispatch.requested") return parseDispatchRequestedPayload(payload)
   if (name === "executor.accepted") return parseExecutorAcceptedPayload(payload)
   if (name === "effect.unknown" && "uncertaintyID" in payload) return parseUncertaintyPayload(payload)
-  if (name === "effect.observed" || name === "execution.failed_without_effect" || name === "effect.unknown") {
+  if (
+    name === "effect.completed" ||
+    name === "effect.observed" ||
+    name === "execution.failed_without_effect" ||
+    name === "effect.unknown"
+  ) {
     return parseReceiptPayload(name, payload)
   }
   if (name === "verification.started") return parseVerificationStartedPayload(payload)
@@ -261,11 +266,13 @@ function parseExecutorAcceptedPayload(payload: NormalizedJsonObject): ParsedLife
 function parseReceiptPayload(name: OperationEvent, payload: NormalizedJsonObject): ParsedLifecyclePayload {
   const receipt = requireParsed(parseOperationReceipt(payload), "$.payload")
   const expectedName =
-    receipt.observation.kind === "effect_observed"
-      ? "effect.observed"
-      : receipt.observation.kind === "no_effect_proved"
-        ? "execution.failed_without_effect"
-        : "effect.unknown"
+    receipt.observation.kind === "effect_completed"
+      ? "effect.completed"
+      : receipt.observation.kind === "effect_observed"
+        ? "effect.observed"
+        : receipt.observation.kind === "no_effect_proved"
+          ? "execution.failed_without_effect"
+          : "effect.unknown"
   if (name !== expectedName) {
     throw new OperationEventValidationError(
       "Receipt observation does not match its lifecycle event",

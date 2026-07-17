@@ -412,6 +412,51 @@ describe("Operation contract decoding", () => {
       ok: false,
       issue: { path: "$.verificationContext.schemaVersion", reason: "unsupported_schema_version" },
     })
+
+    const completedReceipt = {
+      ...receipt,
+      observation: {
+        kind: "effect_completed",
+        completionDigest: nextDigest,
+        assurance: "observed_not_verified",
+      },
+      verificationContext: {
+        schemaVersion: 3,
+        admittedBaselineDigest: digest,
+        workspaceIdentity: { device: "1", inode: "2" },
+        executionBoundary: "host_no_sandbox",
+        observationDigest: nextDigest,
+        limitations: ["provider response observed; semantic correctness not independently verified"],
+      },
+    }
+    expect(parseOperationReceipt(completedReceipt)).toMatchObject({ ok: true, value: completedReceipt })
+    expect(
+      parseOperationReceipt({
+        ...completedReceipt,
+        observation: { ...completedReceipt.observation, assurance: "verified" },
+      }),
+    ).toMatchObject({
+      ok: false,
+      issue: { path: "$.observation.assurance" },
+    })
+    expect(
+      parseOperationReceipt({
+        ...completedReceipt,
+        verificationContext: { ...completedReceipt.verificationContext, executionBoundary: "unknown" },
+      }),
+    ).toMatchObject({
+      ok: false,
+      issue: { path: "$.verificationContext.executionBoundary" },
+    })
+    expect(
+      parseOperationReceipt({
+        ...completedReceipt,
+        verificationContext: { ...completedReceipt.verificationContext, targetIdentity: null },
+      }),
+    ).toEqual({
+      ok: false,
+      issue: { path: "$.verificationContext.targetIdentity", reason: "unexpected_field" },
+    })
   })
 
   test("requires snapshot-bound criterion evidence and never accepts verified as a criterion", () => {

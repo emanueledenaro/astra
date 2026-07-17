@@ -38,7 +38,11 @@ describe("durable approved controlled write coordinator", () => {
         admittedRepositorySnapshotDigest: input.repositoryBaseline.snapshotDigest,
         activationGuard: "allowed",
       })
-      if (!receipt || !("schemaVersion" in receipt.verificationContext)) {
+      if (
+        !receipt ||
+        !("schemaVersion" in receipt.verificationContext) ||
+        receipt.verificationContext.schemaVersion !== 2
+      ) {
         throw new Error("Expected a Git-aware receipt")
       }
       expect(receipt.verificationContext.postEffectRepositorySnapshotDigest).not.toBe(

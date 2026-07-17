@@ -61,7 +61,7 @@ import {
 import { parseLifecyclePayload, type ParsedLifecyclePayload } from "./event-payload"
 
 const eventSchemaVersion = 1
-const storageSchemaVersion = 6
+const storageSchemaVersion = 7
 const maximumReadEvents = 256
 const maximumIntegrityEvents = 100_000
 const maximumIntegrityOperations = 10_000
@@ -449,7 +449,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
       sql`SELECT schema_version FROM ledger_meta WHERE singleton = 1 LIMIT 1`,
     )
     if (!rows[0]) return yield* Effect.fail(new LedgerNotInitializedError())
-    if (![1, 2, 3, 4, 5, storageSchemaVersion].includes(rows[0].schema_version)) {
+    if (![1, 2, 3, 4, 5, 6, storageSchemaVersion].includes(rows[0].schema_version)) {
       return yield* Effect.fail(new LedgerCorruptionError("Ledger metadata has an unknown storage schema"))
     }
     if (rows[0].schema_version < storageSchemaVersion) {
@@ -553,7 +553,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
         receipt_json TEXT NOT NULL,
         receipt_digest TEXT NOT NULL,
         outcome_event_name TEXT NOT NULL CHECK (
-          outcome_event_name IN ('effect.observed', 'execution.failed_without_effect', 'effect.unknown')
+          outcome_event_name IN ('effect.completed', 'effect.observed', 'execution.failed_without_effect', 'effect.unknown')
         ),
         event_id TEXT NOT NULL UNIQUE,
         event_cursor INTEGER NOT NULL UNIQUE CHECK (event_cursor > 0),
@@ -602,6 +602,7 @@ function migrateStorage(db: QueryExecutor): Effect.Effect<void, OperationLedgerE
     yield* ensureColumn(db, "capability_reservation", "capability_digest", "TEXT")
     yield* ensureColumn(db, "capability_consumption", "capability_digest", "TEXT")
     yield* ensureColumn(db, "operation_receipt", "capability_digest", "TEXT")
+    yield* ensureReceiptOutcomeConstraint(db)
     yield* db.run(sql`
       UPDATE operation_projection SET
         baseline_trust_digest = COALESCE(baseline_trust_digest, (
@@ -633,6 +634,76 @@ function ensureColumn(db: QueryExecutor, table: string, column: string, declarat
     if (columns.some((candidate) => candidate.name === column)) return
     yield* db.run(sql.raw(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`))
   })
+}
+
+function ensureReceiptOutcomeConstraint(db: QueryExecutor): Effect.Effect<void, OperationLedgerError> {
+  return Effect.gen(function* () {
+    const schema = yield* db.all<{ sql: string | null }>(sql`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operation_receipt' LIMIT 1
+    `)
+    if (schema[0]?.sql?.includes("'effect.completed'")) return
+
+    yield* db.run(sql`
+      CREATE TABLE operation_receipt_v7 (
+        receipt_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        attempt_id TEXT NOT NULL UNIQUE,
+        dispatch_request_id TEXT NOT NULL UNIQUE,
+        executor_claim_id TEXT NOT NULL UNIQUE,
+        capability_grant_id TEXT NOT NULL UNIQUE,
+        capability_digest TEXT NOT NULL,
+        fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+        receipt_json TEXT NOT NULL,
+        receipt_digest TEXT NOT NULL,
+        outcome_event_name TEXT NOT NULL CHECK (
+          outcome_event_name IN ('effect.completed', 'effect.observed', 'execution.failed_without_effect', 'effect.unknown')
+        ),
+        event_id TEXT NOT NULL UNIQUE,
+        event_cursor INTEGER NOT NULL UNIQUE CHECK (event_cursor > 0),
+        FOREIGN KEY (dispatch_request_id) REFERENCES dispatch_outbox(dispatch_request_id),
+        FOREIGN KEY (executor_claim_id) REFERENCES executor_claim(executor_claim_id),
+        FOREIGN KEY (capability_grant_id) REFERENCES capability_consumption(capability_grant_id),
+        FOREIGN KEY (event_id) REFERENCES operation_event(event_id)
+      )
+    `)
+    yield* db.run(sql`
+      INSERT INTO operation_receipt_v7 SELECT
+        receipt_id, operation_id, attempt_id, dispatch_request_id, executor_claim_id,
+        capability_grant_id, capability_digest, fencing_token, receipt_json, receipt_digest,
+        outcome_event_name, event_id, event_cursor
+      FROM operation_receipt
+    `)
+    yield* db.run(sql`
+      CREATE TABLE operation_evidence_v7 (
+        evidence_id TEXT PRIMARY KEY,
+        operation_id TEXT NOT NULL UNIQUE,
+        receipt_id TEXT NOT NULL UNIQUE,
+        verification_plan_id TEXT NOT NULL UNIQUE,
+        evidence_json TEXT NOT NULL,
+        evidence_digest TEXT NOT NULL,
+        started_event_id TEXT NOT NULL UNIQUE,
+        started_cursor INTEGER NOT NULL UNIQUE CHECK (started_cursor > 0),
+        terminal_event_name TEXT NOT NULL CHECK (
+          terminal_event_name IN ('verification.passed', 'verification.failed', 'verification.unknown')
+        ),
+        terminal_event_id TEXT NOT NULL UNIQUE,
+        terminal_cursor INTEGER NOT NULL UNIQUE CHECK (terminal_cursor > 0),
+        FOREIGN KEY (receipt_id) REFERENCES operation_receipt_v7(receipt_id),
+        FOREIGN KEY (started_event_id) REFERENCES operation_event(event_id),
+        FOREIGN KEY (terminal_event_id) REFERENCES operation_event(event_id)
+      )
+    `)
+    yield* db.run(sql`
+      INSERT INTO operation_evidence_v7 SELECT
+        evidence_id, operation_id, receipt_id, verification_plan_id, evidence_json, evidence_digest,
+        started_event_id, started_cursor, terminal_event_name, terminal_event_id, terminal_cursor
+      FROM operation_evidence
+    `)
+    yield* db.run(sql`DROP TABLE operation_evidence`)
+    yield* db.run(sql`DROP TABLE operation_receipt`)
+    yield* db.run(sql`ALTER TABLE operation_receipt_v7 RENAME TO operation_receipt`)
+    yield* db.run(sql`ALTER TABLE operation_evidence_v7 RENAME TO operation_evidence`)
+  }).pipe(Effect.mapError(mapStorageError("Failed to migrate operation receipt outcomes")))
 }
 
 function append(
@@ -1055,6 +1126,8 @@ function ingestReceipt(
             receipt.verificationContext.admittedBaselineDigest !== snapshot.request.baselineDigest ||
             receipt.verificationContext.workspaceIdentity.device !== admittedBaseline.value.workspaceIdentity.device ||
             receipt.verificationContext.workspaceIdentity.inode !== admittedBaseline.value.workspaceIdentity.inode ||
+            !receiptCompletionClassMatches(receipt) ||
+            !receiptObservationBindingMatches(receipt) ||
             !receiptRepositoryBindingMatches(receipt.verificationContext, admittedBaseline.value.repository, false)
           ) {
             return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "binding_mismatch"))
@@ -1560,13 +1633,19 @@ function evidenceEventName(evidence: OperationEvidence): OperationEvent {
 }
 
 function receiptEventName(receipt: OperationReceipt): OperationEvent {
+  if (receipt.observation.kind === "effect_completed") return "effect.completed"
   if (receipt.observation.kind === "effect_observed") return "effect.observed"
   if (receipt.observation.kind === "no_effect_proved") return "execution.failed_without_effect"
   return "effect.unknown"
 }
 
 function isReceiptEvent(name: OperationEvent) {
-  return name === "effect.observed" || name === "execution.failed_without_effect" || name === "effect.unknown"
+  return (
+    name === "effect.completed" ||
+    name === "effect.observed" ||
+    name === "execution.failed_without_effect" ||
+    name === "effect.unknown"
+  )
 }
 
 function isVerificationEvent(name: OperationEvent) {
@@ -2002,6 +2081,7 @@ function dispatchSnapshotStates(snapshot: DispatchSnapshot): ReadonlyArray<Opera
   if (!snapshot.claim) return ["dispatch_pending"]
   if (snapshot.uncertainty) return ["reconciliation_required"]
   if (!snapshot.receipt) return ["dispatched"]
+  if (snapshot.receipt.observation.kind === "effect_completed") return ["completed"]
   if (snapshot.receipt.observation.kind === "effect_observed") {
     return ["effect_observed", "verifying", "succeeded", "failed", "reconciliation_required"]
   }
@@ -2331,6 +2411,8 @@ function loadAndVerifyOperation(
           lifecycle.receipt.verificationContext.admittedBaselineDigest !== baselineTrustDigest ||
           lifecycle.receipt.verificationContext.workspaceIdentity.device !== baselineWorkspaceIdentity?.device ||
           lifecycle.receipt.verificationContext.workspaceIdentity.inode !== baselineWorkspaceIdentity?.inode ||
+          !receiptCompletionClassMatches(lifecycle.receipt) ||
+          !receiptObservationBindingMatches(lifecycle.receipt) ||
           !receiptRepositoryBindingMatches(lifecycle.receipt.verificationContext, baselineRepository, true))
       ) {
         return yield* Effect.fail(new LedgerCorruptionError(`Operation ${operationID} receipt binding is inconsistent`))
@@ -2482,10 +2564,28 @@ function receiptRepositoryBindingMatches(
   allowLegacyGit: boolean,
 ) {
   if (!repository) return false
+  const genericContext = "schemaVersion" in context && context.schemaVersion === 3
+  if (genericContext) return true
   const gitContext = "schemaVersion" in context && context.schemaVersion === 2
   if (repository.kind === "non_git") return !gitContext
   if (!("snapshotDigest" in repository)) return allowLegacyGit && !gitContext
   return gitContext && context.admittedRepositorySnapshotDigest === repository.snapshotDigest
+}
+
+function receiptObservationBindingMatches(receipt: OperationReceipt) {
+  const context = receipt.verificationContext
+  if (receipt.observation.kind === "effect_completed") {
+    return (
+      "schemaVersion" in context &&
+      context.schemaVersion === 3 &&
+      context.observationDigest === receipt.observation.completionDigest
+    )
+  }
+  return !("schemaVersion" in context && context.schemaVersion === 3)
+}
+
+function receiptCompletionClassMatches(receipt: OperationReceipt) {
+  return receipt.observation.kind !== "effect_completed" || receipt.effectClass === "provider_turn"
 }
 
 function parseAndDigestEvent(

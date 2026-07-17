@@ -62,6 +62,36 @@ const receiptEvent = {
   externalBlobDigest: null,
 } as const
 
+const observedCompletionContext = {
+  schemaVersion: 3,
+  admittedBaselineDigest: contentDigest,
+  workspaceIdentity: { device: "16777233", inode: "42" },
+  executionBoundary: "host_no_sandbox",
+  observationDigest: contentDigest,
+  limitations: ["provider response observed; semantic correctness not independently verified"],
+} as const satisfies OperationReceipt["verificationContext"]
+
+const providerResources = ["provider:turn"] as const
+const providerAuthorizedLifecycle = [
+  {
+    ...authorizedLifecycle[0],
+    event: {
+      ...authorizedLifecycle[0].event,
+      payload: {
+        ...admittedPayload,
+        effectSpecification: {
+          ...admittedPayload.effectSpecification,
+          effectClass: "provider_turn",
+          targetDescriptors: [{ resource: "provider:turn", mode: "request_response" }],
+          completionCriteria: ["provider_turn_response_observed"],
+        },
+        resources: providerResources,
+      },
+    },
+  },
+  ...authorizedLifecycle.slice(1),
+] as const
+
 describe("specialized operation receipt ingestion", () => {
   test("maps observations to honest lifecycle states without claiming verification", async () => {
     const cases = [
@@ -112,6 +142,64 @@ describe("specialized operation receipt ingestion", () => {
         }),
       )
     }
+  })
+
+  test("accepts observed completion only for an admitted provider turn", async () => {
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        let now = "2026-07-17T10:00:04.000Z"
+        const ledger = yield* makeOperationLedgerWithClock(() => now)
+        yield* ledger.initialize()
+        yield* ledger.appendBatch(providerAuthorizedLifecycle)
+        yield* ledger.claimDispatch(claimCommand)
+        now = "2026-07-17T10:00:06.000Z"
+        const receipt = makeReceipt(
+          {
+            kind: "effect_completed",
+            completionDigest: contentDigest,
+            assurance: "observed_not_verified",
+          },
+          observedCompletionContext,
+          { effectClass: "provider_turn", resources: providerResources },
+        )
+        const result = yield* ledger.ingestReceipt({ receipt, event: receiptEvent })
+        expect(result).toMatchObject({
+          kind: "ingested",
+          event: { name: "effect.completed" },
+          operation: { state: "completed" },
+        })
+        expect(JSON.stringify(result)).not.toContain("VERIFIED")
+      }),
+    )
+  })
+
+  test("rejects observed completion for workspace writes without terminating the operation", async () => {
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        let now = "2026-07-17T10:00:04.000Z"
+        const ledger = yield* makeOperationLedgerWithClock(() => now)
+        yield* ledger.initialize()
+        yield* ledger.appendBatch(authorizedLifecycle)
+        yield* ledger.claimDispatch(claimCommand)
+        now = "2026-07-17T10:00:06.000Z"
+        const receipt = makeReceipt(
+          {
+            kind: "effect_completed",
+            completionDigest: contentDigest,
+            assurance: "observed_not_verified",
+          },
+          observedCompletionContext,
+        )
+        expect(yield* ledger.ingestReceipt({ receipt, event: receiptEvent }).pipe(Effect.flip)).toMatchObject({
+          _tag: "ReceiptIngestionError",
+          code: "binding_mismatch",
+        })
+        expect(yield* ledger.getOperation(operationID)).toMatchObject({ state: "dispatched", sequence: 5 })
+        expect(yield* ledger.readGlobalCursor()).toBe(5)
+      }),
+    )
   })
 
   test("replays the exact receipt and rejects divergent immutable facts", async () => {
@@ -176,19 +264,32 @@ describe("specialized operation receipt ingestion", () => {
           {
             ...valid,
             verificationContext: {
-              ...valid.verificationContext,
+              ...receiptVerificationContext,
               admittedRepositorySnapshotDigest: alternateContentDigest,
             },
           },
           {
             ...valid,
             verificationContext: {
-              admittedBaselineDigest: valid.verificationContext.admittedBaselineDigest,
-              postEffectWorkspaceDigest: valid.verificationContext.postEffectWorkspaceDigest,
-              workspaceIdentity: valid.verificationContext.workspaceIdentity,
-              targetIdentity: valid.verificationContext.targetIdentity,
-              preflightLimits: valid.verificationContext.preflightLimits,
-              activationGuard: valid.verificationContext.activationGuard,
+              admittedBaselineDigest: receiptVerificationContext.admittedBaselineDigest,
+              postEffectWorkspaceDigest: receiptVerificationContext.postEffectWorkspaceDigest,
+              workspaceIdentity: receiptVerificationContext.workspaceIdentity,
+              targetIdentity: receiptVerificationContext.targetIdentity,
+              preflightLimits: receiptVerificationContext.preflightLimits,
+              activationGuard: receiptVerificationContext.activationGuard,
+            },
+          },
+          { ...valid, verificationContext: observedCompletionContext },
+          {
+            ...valid,
+            observation: {
+              kind: "effect_completed",
+              completionDigest: contentDigest,
+              assurance: "observed_not_verified",
+            },
+            verificationContext: {
+              ...observedCompletionContext,
+              observationDigest: alternateContentDigest,
             },
           },
         ].map(requireReceipt)
@@ -320,6 +421,94 @@ describe("specialized operation receipt ingestion", () => {
     }
   })
 
+  test("reopens an observed completion as completed without upgrading it to verified", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "astra-ledger-completed-receipt-"))
+    const filename = join(directory, "ledger.sqlite")
+    const receipt = makeReceipt(
+      {
+        kind: "effect_completed",
+        completionDigest: contentDigest,
+        assurance: "observed_not_verified",
+      },
+      observedCompletionContext,
+      { effectClass: "provider_turn", resources: providerResources },
+    )
+    try {
+      await withDatabase(
+        filename,
+        Effect.gen(function* () {
+          let now = "2026-07-17T10:00:04.000Z"
+          const ledger = yield* makeOperationLedgerWithClock(() => now)
+          yield* ledger.initialize()
+          yield* ledger.appendBatch(providerAuthorizedLifecycle)
+          yield* ledger.claimDispatch(claimCommand)
+          now = "2026-07-17T10:00:06.000Z"
+          yield* ledger.ingestReceipt({ receipt, event: receiptEvent })
+        }),
+      )
+      await withDatabase(
+        filename,
+        Effect.gen(function* () {
+          const ledger = yield* makeOperationLedger()
+          yield* ledger.initialize()
+          expect(yield* ledger.getOperation(operationID)).toMatchObject({ state: "completed", sequence: 6 })
+          expect(yield* ledger.getDispatchSnapshot(dispatchRequestID)).toMatchObject({
+            receipt,
+            recoveryStatus: "receipt_ingested",
+          })
+          expect(JSON.stringify(yield* ledger.readEvents(operationID, { limit: 10 }))).not.toContain("VERIFIED")
+        }),
+      )
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("migrates a non-empty v6 receipt table without losing durable observations", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "astra-ledger-receipt-v6-"))
+    const filename = join(directory, "ledger.sqlite")
+    const receipt = makeReceipt({ kind: "effect_observed", beforeDigest: null, afterDigest: contentDigest })
+    try {
+      await withDatabase(
+        filename,
+        Effect.gen(function* () {
+          let now = "2026-07-17T10:00:04.000Z"
+          const ledger = yield* makeOperationLedgerWithClock(() => now)
+          yield* ledger.initialize()
+          yield* ledger.appendBatch(authorizedLifecycle)
+          yield* ledger.claimDispatch(claimCommand)
+          now = "2026-07-17T10:00:06.000Z"
+          yield* ledger.ingestReceipt({ receipt, event: receiptEvent })
+        }),
+      )
+      downgradeReceiptTablesToV6(filename)
+
+      await withDatabase(
+        filename,
+        Effect.gen(function* () {
+          const ledger = yield* makeOperationLedger()
+          yield* ledger.initialize()
+          expect(yield* ledger.getOperation(operationID)).toMatchObject({ state: "effect_observed", sequence: 6 })
+          expect(yield* ledger.getDispatchSnapshot(dispatchRequestID)).toMatchObject({
+            receipt,
+            recoveryStatus: "receipt_ingested",
+          })
+        }),
+      )
+
+      const native = new Database(filename, { readonly: true })
+      expect(native.query<{ schema_version: number }, []>("SELECT schema_version FROM ledger_meta").get()).toEqual({
+        schema_version: 7,
+      })
+      expect(
+        native.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = 'operation_receipt'").get()?.sql,
+      ).toContain("'effect.completed'")
+      native.close()
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
   test("fails closed when an immutable receipt is corrupted", async () => {
     const directory = await mkdtemp(join(tmpdir(), "astra-ledger-receipt-corruption-"))
     const filename = join(directory, "ledger.sqlite")
@@ -358,7 +547,14 @@ describe("specialized operation receipt ingestion", () => {
   })
 })
 
-function makeReceipt(observation: OperationReceipt["observation"]): OperationReceipt {
+function makeReceipt(
+  observation: OperationReceipt["observation"],
+  verificationContext: OperationReceipt["verificationContext"] = receiptVerificationContext,
+  effect: Readonly<{
+    effectClass: string
+    resources: ReadonlyArray<string>
+  }> = { effectClass: "workspace_write", resources: ["workspace:marker.txt"] },
+): OperationReceipt {
   return requireReceipt({
     receiptID: "0196e4cb-5d80-7b1d-8fb2-263b81670436",
     operationID,
@@ -369,12 +565,12 @@ function makeReceipt(observation: OperationReceipt["observation"]): OperationRec
     capabilityDigest,
     fencingToken: 1,
     adapter: { identity: dispatchRequest.executor, version: "1", digest: contentDigest },
-    effectClass: "workspace_write",
-    resources: ["workspace:marker.txt"],
+    effectClass: effect.effectClass,
+    resources: effect.resources,
     startedAt: "2026-07-17T10:00:04.000Z",
     endedAt: "2026-07-17T10:00:04.000Z",
     observation,
-    verificationContext: receiptVerificationContext,
+    verificationContext,
     output: { digest: `sha256:${"7".repeat(64)}`, bytes: 5, preview: "wrote marker.txt" },
   })
 }
@@ -383,4 +579,29 @@ function requireReceipt(input: unknown): OperationReceipt {
   const result = parseOperationReceipt(input)
   if (!result.ok) throw new Error(`Invalid receipt fixture at ${result.issue.path}`)
   return result.value
+}
+
+function downgradeReceiptTablesToV6(filename: string) {
+  const native = new Database(filename)
+  const receiptSchema = native
+    .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operation_receipt'")
+    .get()?.sql
+  const evidenceSchema = native
+    .query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'operation_evidence'")
+    .get()?.sql
+  if (!receiptSchema || !evidenceSchema) throw new Error("Current receipt schema is unavailable")
+  native.exec("PRAGMA foreign_keys = OFF")
+  const downgrade = native.transaction(() => {
+    native.exec(receiptSchema.replace("operation_receipt", "operation_receipt_v6").replace("'effect.completed', ", ""))
+    native.exec("INSERT INTO operation_receipt_v6 SELECT * FROM operation_receipt")
+    native.exec(evidenceSchema.replace("operation_evidence", "operation_evidence_v6"))
+    native.exec("INSERT INTO operation_evidence_v6 SELECT * FROM operation_evidence")
+    native.exec("DROP TABLE operation_evidence")
+    native.exec("DROP TABLE operation_receipt")
+    native.exec("ALTER TABLE operation_receipt_v6 RENAME TO operation_receipt")
+    native.exec("ALTER TABLE operation_evidence_v6 RENAME TO operation_evidence")
+    native.run("UPDATE ledger_meta SET schema_version = 6")
+  })
+  downgrade()
+  native.close()
 }

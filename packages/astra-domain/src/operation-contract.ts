@@ -180,13 +180,21 @@ export type OperationReceipt = Readonly<{
   endedAt: string
   observation:
     | Readonly<{ kind: "effect_observed"; beforeDigest: ContentDigest | null; afterDigest: ContentDigest }>
+    | Readonly<{
+        kind: "effect_completed"
+        completionDigest: ContentDigest
+        assurance: "observed_not_verified"
+      }>
     | Readonly<{ kind: "no_effect_proved"; proofDigest: ContentDigest }>
     | Readonly<{ kind: "effect_unknown"; observationDigest: ContentDigest }>
   verificationContext: ReceiptVerificationContext
   output: Readonly<{ digest: ContentDigest; bytes: number; preview: string }>
 }>
 
-export type ReceiptVerificationContext = LegacyReceiptVerificationContext | GitReceiptVerificationContext
+export type ReceiptVerificationContext =
+  | LegacyReceiptVerificationContext
+  | GitReceiptVerificationContext
+  | ObservedCompletionReceiptContext
 
 export type LegacyReceiptVerificationContext = Readonly<{
   admittedBaselineDigest: ContentDigest
@@ -217,6 +225,15 @@ export type GitReceiptVerificationContext = Readonly<{
     maxDurationMs: number
   }>
   activationGuard: "allowed" | "blocked"
+}>
+
+export type ObservedCompletionReceiptContext = Readonly<{
+  schemaVersion: 3
+  admittedBaselineDigest: ContentDigest
+  workspaceIdentity: Readonly<{ device: string; inode: string }>
+  executionBoundary: "host_no_sandbox" | "sandboxed"
+  observationDigest: ContentDigest
+  limitations: ReadonlyArray<string>
 }>
 
 export type OperationEvidence = Readonly<{
@@ -1315,7 +1332,7 @@ function parseReceiptObservation(
 ): OperationContractParseResult<OperationReceipt["observation"]> {
   const broad = parseExactRecord(
     input,
-    ["kind", "beforeDigest", "afterDigest", "proofDigest", "observationDigest"],
+    ["kind", "beforeDigest", "afterDigest", "completionDigest", "assurance", "proofDigest", "observationDigest"],
     path,
   )
   if (!broad.ok) return broad
@@ -1327,6 +1344,20 @@ function parseReceiptObservation(
     const afterDigest = parseDigest<ContentDigest>(record.value.afterDigest, `${path}.afterDigest`)
     if (!afterDigest.ok) return afterDigest
     return parsed({ kind: "effect_observed", beforeDigest: beforeDigest.value, afterDigest: afterDigest.value })
+  }
+  if (broad.value.kind === "effect_completed") {
+    const record = parseExactRecord(input, ["kind", "completionDigest", "assurance"], path)
+    if (!record.ok) return record
+    const completionDigest = parseDigest<ContentDigest>(record.value.completionDigest, `${path}.completionDigest`)
+    if (!completionDigest.ok) return completionDigest
+    if (record.value.assurance !== "observed_not_verified") {
+      return rejected(`${path}.assurance`, "unsupported_completion_assurance")
+    }
+    return parsed({
+      kind: "effect_completed",
+      completionDigest: completionDigest.value,
+      assurance: "observed_not_verified",
+    })
   }
   if (broad.value.kind === "no_effect_proved") {
     const record = parseExactRecord(input, ["kind", "proofDigest"], path)
@@ -1361,11 +1392,18 @@ function parseReceiptVerificationContext(
       "targetIdentity",
       "preflightLimits",
       "activationGuard",
+      "executionBoundary",
+      "observationDigest",
+      "limitations",
     ],
     path,
   )
   if (!broad.ok) return broad
-  if (Object.hasOwn(broad.value, "schemaVersion")) return parseGitReceiptVerificationContext(input, path)
+  if (Object.hasOwn(broad.value, "schemaVersion")) {
+    if (broad.value.schemaVersion === 2) return parseGitReceiptVerificationContext(input, path)
+    if (broad.value.schemaVersion === 3) return parseObservedCompletionReceiptContext(input, path)
+    return rejected(`${path}.schemaVersion`, "unsupported_schema_version")
+  }
 
   const record = parseExactRecord(
     input,
@@ -1426,6 +1464,48 @@ function parseReceiptVerificationContext(
       maxDurationMs: maxDurationMs.value,
     },
     activationGuard: record.value.activationGuard,
+  })
+}
+
+function parseObservedCompletionReceiptContext(
+  input: unknown,
+  path: string,
+): OperationContractParseResult<ObservedCompletionReceiptContext> {
+  const record = parseExactRecord(
+    input,
+    [
+      "schemaVersion",
+      "admittedBaselineDigest",
+      "workspaceIdentity",
+      "executionBoundary",
+      "observationDigest",
+      "limitations",
+    ],
+    path,
+  )
+  if (!record.ok) return record
+  if (record.value.schemaVersion !== 3) return rejected(`${path}.schemaVersion`, "unsupported_schema_version")
+  const admittedBaselineDigest = parseDigest<ContentDigest>(
+    record.value.admittedBaselineDigest,
+    `${path}.admittedBaselineDigest`,
+  )
+  if (!admittedBaselineDigest.ok) return admittedBaselineDigest
+  const workspaceIdentity = parseWorkspaceIdentity(record.value.workspaceIdentity, `${path}.workspaceIdentity`)
+  if (!workspaceIdentity.ok) return workspaceIdentity
+  if (record.value.executionBoundary !== "host_no_sandbox" && record.value.executionBoundary !== "sandboxed") {
+    return rejected(`${path}.executionBoundary`, "unsupported_execution_boundary")
+  }
+  const observationDigest = parseDigest<ContentDigest>(record.value.observationDigest, `${path}.observationDigest`)
+  if (!observationDigest.ok) return observationDigest
+  const limitations = parseDistinctStringArray(record.value.limitations, `${path}.limitations`)
+  if (!limitations.ok) return limitations
+  return parsed({
+    schemaVersion: 3,
+    admittedBaselineDigest: admittedBaselineDigest.value,
+    workspaceIdentity: workspaceIdentity.value,
+    executionBoundary: record.value.executionBoundary,
+    observationDigest: observationDigest.value,
+    limitations: limitations.value,
   })
 }
 

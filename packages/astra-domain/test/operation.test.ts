@@ -22,9 +22,9 @@ import {
 
 describe("Operation transition projector", () => {
   test("matches and accepts the independent ADR-0002 transition fixture", () => {
-    expect(JSON.stringify(operationTransitions.map((transition) => [transition.from, transition.event, transition.to]))).toBe(
-      JSON.stringify(expectedOperationTransitions),
-    )
+    expect(
+      JSON.stringify(operationTransitions.map((transition) => [transition.from, transition.event, transition.to])),
+    ).toBe(JSON.stringify(expectedOperationTransitions))
 
     for (const [from, event, to] of expectedOperationTransitions) {
       expect(projectOperationEvent(from, event)).toEqual({
@@ -66,15 +66,25 @@ describe("Operation transition projector", () => {
   test("reaches succeeded only from independent verification", () => {
     const successTransitions = operationTransitions.filter((transition) => transition.to === "succeeded")
 
-    expect(successTransitions).toEqual([
-      { from: "verifying", event: "verification.passed", to: "succeeded" },
-    ])
+    expect(successTransitions).toEqual([{ from: "verifying", event: "verification.passed", to: "succeeded" }])
     expect(projectOperationEvent("dispatched", "effect.observed")).toEqual({
       accepted: true,
       from: "dispatched",
       event: "effect.observed",
       state: "effect_observed",
     })
+  })
+
+  test("records observed completion without claiming independent verification", () => {
+    expect(projectOperationEvent("dispatched", "effect.completed")).toEqual({
+      accepted: true,
+      from: "dispatched",
+      event: "effect.completed",
+      state: "completed",
+    })
+    expect(operationSemanticKey("completed")).toBe("COMPLETED")
+    expect(operationSemanticKey("completed")).not.toBe("VERIFIED")
+    expect(isTerminalOperationState("completed")).toBeTrue()
   })
 
   test("admits an Operation only from the absent state", () => {
@@ -140,9 +150,7 @@ describe("Operation transition projector", () => {
   test("records rollback only after a linked recovery is verified", () => {
     const transitionsToRollback = operationTransitions.filter((transition) => transition.to === "rolled_back")
 
-    expect(transitionsToRollback).toEqual([
-      { from: "rolling_back", event: "recovery.verified", to: "rolled_back" },
-    ])
+    expect(transitionsToRollback).toEqual([{ from: "rolling_back", event: "recovery.verified", to: "rolled_back" }])
     expect(projectOperationEvent("effect_observed", "recovery.operation_linked").state).toBe("rolling_back")
   })
 
@@ -150,17 +158,21 @@ describe("Operation transition projector", () => {
     expect(operationStates.join("\0")).toBe(expectedOperationStates.join("\0"))
     expect(activeOperationStates.join("\0")).toBe(expectedActiveOperationStates.join("\0"))
     expect(terminalOperationStates.join("\0")).toBe(expectedTerminalOperationStates.join("\0"))
-    expect(operationTransitions).toHaveLength(50)
+    expect(operationTransitions).toHaveLength(51)
   })
 
   test("keeps accepted state values inside the canonical state set", () => {
     const states = new Set<OperationState>(operationStates)
-    expect(operationTransitions.every((transition) => transition.from === null || states.has(transition.from))).toBeTrue()
+    expect(
+      operationTransitions.every((transition) => transition.from === null || states.has(transition.from)),
+    ).toBeTrue()
     expect(operationTransitions.every((transition) => states.has(transition.to))).toBeTrue()
   })
 
   test("partitions active and terminal states without overlap", () => {
-    expect(operationStates.every((state) => isActiveOperationState(state) !== isTerminalOperationState(state))).toBeTrue()
+    expect(
+      operationStates.every((state) => isActiveOperationState(state) !== isTerminalOperationState(state)),
+    ).toBeTrue()
   })
 
   test("uses VERIFIED only for succeeded", () => {
