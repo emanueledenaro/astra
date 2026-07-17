@@ -1,7 +1,15 @@
-import { OPEN_CODE_MODELS_DEV_SNAPSHOT } from "./provider-catalog-embedded"
+import { createHash } from "node:crypto"
+import { OPEN_CODE_MODELS_DEV_SNAPSHOT, OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA } from "./provider-catalog-embedded"
 
 const PROVIDER_ID = "anthropic" as const
+const PROVIDER_NAME = "Anthropic" as const
+const PROVIDER_NPM = "@ai-sdk/anthropic" as const
+const SOURCE_URL = "https://models.dev/api.json" as const
 const MAX_MODELS = 256
+const MODALITIES = ["text", "audio", "image", "video", "pdf"] as const
+
+type Digest = `sha256:${string}`
+type Modality = (typeof MODALITIES)[number]
 
 export type AstraProviderModel = Readonly<{
   id: string
@@ -15,8 +23,13 @@ export type AstraProviderModel = Readonly<{
 
 export type AstraProviderCatalog = Readonly<{
   providerID: typeof PROVIDER_ID
-  providerName: string
+  providerName: typeof PROVIDER_NAME
   models: readonly AstraProviderModel[]
+  provenance: Readonly<{
+    sourceURL: typeof SOURCE_URL
+    sourceContentDigest: Digest
+    providerContentDigest: Digest
+  }>
 }>
 
 export type ProviderCatalogError = Readonly<{
@@ -29,100 +42,181 @@ export type ProviderCatalogResult =
   | Readonly<{ ok: false; error: ProviderCatalogError }>
 
 /**
- * Reads only the build-injected OpenCode ModelsDev snapshot and projects it
- * into Astra's deliberately small public model catalog. Source-mode launches
- * without the build injection fail closed; this boundary has no effectful input.
+ * Reads the generated OpenCode ModelsDev projection and verifies that its
+ * canonical Anthropic bytes still match the embedded provenance digest.
  */
 export function readAstraProviderCatalog(): ProviderCatalogResult {
   try {
-    return projectSnapshot(OPEN_CODE_MODELS_DEV_SNAPSHOT)
+    return projectSnapshot(OPEN_CODE_MODELS_DEV_SNAPSHOT, OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA)
   } catch {
     return unavailable()
   }
 }
 
-function projectSnapshot(snapshot: unknown | undefined): ProviderCatalogResult {
-  if (!isRecord(snapshot)) return unavailable()
+function projectSnapshot(snapshot: unknown, metadataInput: unknown): ProviderCatalogResult {
+  const metadata = projectMetadata(metadataInput)
+  if (!metadata || !isRecord(snapshot) || !hasOnlyKeys(snapshot, [PROVIDER_ID])) return unavailable()
   const anthropic = snapshot[PROVIDER_ID]
-  if (!isRecord(anthropic)) return unavailable()
+  if (!isRecord(anthropic) || !hasOnlyKeys(anthropic, ["id", "name", "npm", "models"])) return unavailable()
+
   const providerID = anthropic.id
   const providerName = anthropic.name
+  const providerNpm = anthropic.npm
   const modelEntries = anthropic.models
-  if (providerID !== PROVIDER_ID || !isDisplayName(providerName) || !isRecord(modelEntries)) return unavailable()
+  if (
+    providerID !== PROVIDER_ID ||
+    providerName !== PROVIDER_NAME ||
+    providerNpm !== PROVIDER_NPM ||
+    !isRecord(modelEntries)
+  ) {
+    return unavailable()
+  }
 
   const entries = Object.entries(modelEntries)
-  if (entries.length > MAX_MODELS) return unavailable()
-  const models = entries.flatMap(([catalogID, model]) => projectModel(catalogID, model))
-  if (models.length === 0) return unavailable()
+  if (entries.length === 0 || entries.length > MAX_MODELS) return unavailable()
+  if (!isCanonicalOrder(entries.map(([catalogID]) => catalogID))) return unavailable()
+  const models = entries.map(([catalogID, model]) => projectModel(catalogID, model))
+  if (models.some((model) => model === null)) return unavailable()
+  const validated = models.filter((model) => model !== null)
+  const canonicalProvider = {
+    id: providerID,
+    name: providerName,
+    npm: providerNpm,
+    models: Object.fromEntries(validated.map((model) => [model.snapshot.id, model.snapshot])),
+  }
+  if (digest(JSON.stringify(canonicalProvider)) !== metadata.providerContentDigest) return unavailable()
 
   return Object.freeze({
     ok: true,
     catalog: Object.freeze({
       providerID: PROVIDER_ID,
-      providerName: providerName.trim(),
-      models: Object.freeze(models.sort((left, right) => left.id.localeCompare(right.id))),
+      providerName: PROVIDER_NAME,
+      models: Object.freeze(validated.map((model) => model.publicModel)),
+      provenance: Object.freeze(metadata),
     }),
   })
 }
 
-function projectModel(catalogID: string, input: unknown): readonly AstraProviderModel[] {
-  if (!isModelID(catalogID) || !isRecord(input)) return []
+function projectMetadata(input: unknown): AstraProviderCatalog["provenance"] | null {
+  if (
+    !isRecord(input) ||
+    !hasOnlyKeys(input, ["schemaVersion", "sourceURL", "sourceContentDigest", "providerContentDigest", "retrieval"])
+  ) {
+    return null
+  }
+  const retrieval = input.retrieval
+  if (
+    input.schemaVersion !== 1 ||
+    input.sourceURL !== SOURCE_URL ||
+    !isDigest(input.sourceContentDigest) ||
+    !isDigest(input.providerContentDigest) ||
+    !isRecord(retrieval) ||
+    !hasOnlyKeys(retrieval, ["method", "offlineReplay", "mediaType"]) ||
+    retrieval.method !== "GET" ||
+    retrieval.offlineReplay !== "--check --offline-source <pinned-api.json>" ||
+    retrieval.mediaType !== "application/json"
+  ) {
+    return null
+  }
+  return {
+    sourceURL: SOURCE_URL,
+    sourceContentDigest: input.sourceContentDigest,
+    providerContentDigest: input.providerContentDigest,
+  }
+}
+
+function projectModel(catalogID: string, input: unknown) {
+  if (!isModelID(catalogID) || !isRecord(input)) return null
+  if (!hasOnlyKeys(input, ["id", "name", "modalities", "limit"])) return null
   const modelID = input.id
   const modelName = input.name
-  const status = input.status
   const modalities = input.modalities
   const limit = input.limit
-  if (modelID !== catalogID || !isDisplayName(modelName) || status === "deprecated") return []
-  if (!isTextModel(modalities) || !isRecord(limit)) return []
+  if (modelID !== catalogID || !isDisplayName(modelName)) return null
+  if (!isRecord(modalities) || !hasOnlyKeys(modalities, ["input", "output"])) return null
+  const inputModalities = copyModalities(modalities.input)
+  const outputModalities = copyModalities(modalities.output)
+  if (!inputModalities || !outputModalities) return null
+  if (!inputModalities.includes("text") || outputModalities.length !== 1 || outputModalities[0] !== "text") return null
+  if (!isRecord(limit) || !hasAllowedKeys(limit, ["context", "input", "output"])) return null
   const context = limit.context
   const modelInput = limit.input
   const output = limit.output
-  if (!isTokenLimit(context) || !isTokenLimit(output)) return []
-  if (modelInput !== undefined && !isTokenLimit(modelInput)) return []
+  if (!isTokenLimit(context) || !isTokenLimit(output)) return null
+  if (modelInput !== undefined && !isTokenLimit(modelInput)) return null
 
-  const limits = Object.freeze({
+  const canonicalLimit = {
     context,
     ...(modelInput === undefined ? {} : { input: modelInput }),
     output,
-  })
-  return [
-    Object.freeze({
+  }
+  return {
+    snapshot: {
       id: catalogID,
-      name: modelName.trim(),
-      limits,
+      name: modelName,
+      modalities: { input: inputModalities, output: outputModalities },
+      limit: canonicalLimit,
+    },
+    publicModel: Object.freeze({
+      id: catalogID,
+      name: modelName,
+      limits: Object.freeze(canonicalLimit),
     }),
-  ]
+  }
 }
 
-function isTextModel(input: unknown) {
-  if (!isRecord(input)) return false
-  const modelInput = input.input
-  const output = input.output
-  if (!Array.isArray(modelInput) || !Array.isArray(output)) return false
-  return modelInput.includes("text") && output.includes("text")
+function copyModalities(input: unknown): Array<Modality> | null {
+  if (!Array.isArray(input) || input.length === 0 || input.length > MODALITIES.length) return null
+  const copy = Array.from(input)
+  if (!copy.every(isModality) || new Set(copy).size !== copy.length) return null
+  return copy
+}
+
+function isCanonicalOrder(modelIDs: ReadonlyArray<string>) {
+  return modelIDs.every((modelID, index) => index === 0 || compareCodeUnits(modelIDs[index - 1]!, modelID) < 0)
+}
+
+function compareCodeUnits(left: string, right: string) {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
 }
 
 function isModelID(input: string) {
-  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(input)
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input)
 }
 
 function isDisplayName(input: unknown): input is string {
-  if (typeof input !== "string") return false
-  const value = input.trim()
-  return value.length > 0 && value.length <= 160 && !Array.from(value).some(isControlCharacter)
-}
-
-function isControlCharacter(input: string) {
-  const code = input.charCodeAt(0)
-  return code <= 31 || code === 127
+  return typeof input === "string" && input.length > 0 && input.length <= 160 && !/[\u0000-\u001f\u007f]/u.test(input)
 }
 
 function isTokenLimit(input: unknown): input is number {
   return typeof input === "number" && Number.isSafeInteger(input) && input > 0
 }
 
+function isModality(input: unknown): input is Modality {
+  return MODALITIES.some((modality) => modality === input)
+}
+
+function isDigest(input: unknown): input is Digest {
+  return typeof input === "string" && /^sha256:[0-9a-f]{64}$/u.test(input)
+}
+
 function isRecord(input: unknown): input is Readonly<Record<string, unknown>> {
   return typeof input === "object" && input !== null && !Array.isArray(input)
+}
+
+function hasOnlyKeys(input: Readonly<Record<string, unknown>>, allowed: ReadonlyArray<string>) {
+  const keys = Object.keys(input)
+  return keys.length === allowed.length && keys.every((key) => allowed.includes(key))
+}
+
+function hasAllowedKeys(input: Readonly<Record<string, unknown>>, allowed: ReadonlyArray<string>) {
+  return Object.keys(input).every((key) => allowed.includes(key))
+}
+
+function digest(input: string): Digest {
+  return `sha256:${createHash("sha256").update(input).digest("hex")}`
 }
 
 function unavailable(): ProviderCatalogResult {

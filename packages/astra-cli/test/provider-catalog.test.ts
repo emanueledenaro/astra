@@ -1,42 +1,20 @@
+import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
 import type { ProviderCatalogResult } from "../src/provider-catalog"
+import { OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA } from "../src/provider-catalog-embedded"
 import { readAstraProviderCatalog } from "../src/provider-catalog"
 
+const textModel = {
+  id: "claude-text",
+  name: "Claude Text",
+  modalities: { input: ["text", "image"], output: ["text"] },
+  limit: { context: 200_000, input: 190_000, output: 10_000 },
+} as const
+
 describe("Astra provider catalog", () => {
-  test("projects only bounded Anthropic text models from the build-injected snapshot", async () => {
-    const result = await readBuiltCatalog(
-      JSON.stringify({
-        other: { id: "other", secret: "must-not-leak", models: {} },
-        anthropic: {
-          id: "anthropic",
-          name: " Anthropic ",
-          api: "https://private.example.invalid",
-          env: ["ANTHROPIC_API_KEY"],
-          models: {
-            "claude-text": {
-              id: "claude-text",
-              name: " Claude Text ",
-              modalities: { input: ["text", "image"], output: ["text"] },
-              limit: { context: 200_000, input: 190_000, output: 10_000 },
-              cost: { input: 123 },
-            },
-            "claude-audio": {
-              id: "claude-audio",
-              name: "Claude Audio",
-              modalities: { input: ["audio"], output: ["audio"] },
-              limit: { context: 1, output: 1 },
-            },
-            "claude-old": {
-              id: "claude-old",
-              name: "Claude Old",
-              status: "deprecated",
-              modalities: { input: ["text"], output: ["text"] },
-              limit: { context: 1, output: 1 },
-            },
-          },
-        },
-      }),
-    )
+  test("accepts an exactly bound canonical Anthropic snapshot", async () => {
+    const snapshot = makeSnapshot({ "claude-text": textModel })
+    const result = await readBuiltCatalog(JSON.stringify(snapshot), JSON.stringify(metadataFor(snapshot)))
 
     expect(result).toEqual({
       ok: true,
@@ -50,72 +28,111 @@ describe("Astra provider catalog", () => {
             limits: { context: 200_000, input: 190_000, output: 10_000 },
           },
         ],
+        provenance: {
+          sourceURL: "https://models.dev/api.json",
+          sourceContentDigest: `sha256:${"1".repeat(64)}`,
+          providerContentDigest: digest(JSON.stringify(snapshot.anthropic)),
+        },
       },
     })
-    expect(JSON.stringify(result)).not.toContain("must-not-leak")
-    expect(JSON.stringify(result)).not.toContain("ANTHROPIC_API_KEY")
-    expect(JSON.stringify(result)).not.toContain("private.example.invalid")
   })
 
-  test("fails closed when the build has no embedded snapshot", () => {
-    expect(readAstraProviderCatalog()).toEqual({
-      ok: false,
-      error: {
-        code: "catalog_unavailable",
-        message: "Embedded OpenCode model catalog is unavailable.",
+  test("loads only non-empty official Anthropic API models in local source mode", () => {
+    const result = readAstraProviderCatalog()
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.catalog.providerID).toBe("anthropic")
+    expect(result.catalog.providerName).toBe("Anthropic")
+    expect(result.catalog.models.length).toBeGreaterThan(0)
+    expect(result.catalog.models.every((model) => model.id.startsWith("claude-"))).toBe(true)
+    expect(new Set(result.catalog.models.map((model) => model.id)).size).toBe(result.catalog.models.length)
+    expect(result.catalog.models.map((model) => model.id)).toEqual(
+      result.catalog.models.map((model) => model.id).sort(compareCodeUnits),
+    )
+    expect(result.catalog.provenance.sourceURL).toBe("https://models.dev/api.json")
+    expect(result.catalog.provenance.sourceContentDigest).toBe(
+      OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA.sourceContentDigest,
+    )
+    expect(result.catalog.provenance.providerContentDigest).toBe(
+      OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA.providerContentDigest,
+    )
+  })
+
+  test("fails closed when a build has no embedded snapshot or metadata", async () => {
+    expect((await readBuiltCatalog("undefined", "undefined")).ok).toBe(false)
+    expect((await readBuiltCatalog(JSON.stringify(makeSnapshot({ "claude-text": textModel })), "undefined")).ok).toBe(
+      false,
+    )
+  })
+
+  test("rejects snapshot tampering when the provider digest is stale", async () => {
+    const original = makeSnapshot({ "claude-text": textModel })
+    const tampered = makeSnapshot({
+      "claude-text": { ...textModel, limit: { ...textModel.limit, output: 99_999 } },
+    })
+    const result = await readBuiltCatalog(JSON.stringify(tampered), JSON.stringify(metadataFor(original)))
+
+    expect(result.ok).toBe(false)
+  })
+
+  test("rejects non-canonical API fields, adapters, models, and ordering", async () => {
+    const snapshot = makeSnapshot({ "claude-text": textModel })
+    const api = { anthropic: { ...snapshot.anthropic, api: "https://proxy.invalid" } }
+    const npm = { anthropic: { ...snapshot.anthropic, npm: "@hostile/adapter" } }
+    const audio = makeSnapshot({
+      "claude-audio": {
+        id: "claude-audio",
+        name: "Claude Audio",
+        modalities: { input: ["audio"], output: ["audio"] },
+        limit: { context: 10, output: 5 },
       },
     })
+    const unsorted = makeSnapshot({
+      "claude-z": { ...textModel, id: "claude-z", name: "Claude Z" },
+      "claude-a": { ...textModel, id: "claude-a", name: "Claude A" },
+    })
+
+    expect((await readBuiltCatalog(JSON.stringify(api), JSON.stringify(metadataFor(api)))).ok).toBe(false)
+    expect((await readBuiltCatalog(JSON.stringify(npm), JSON.stringify(metadataFor(npm)))).ok).toBe(false)
+    expect((await readBuiltCatalog(JSON.stringify(audio), JSON.stringify(metadataFor(audio)))).ok).toBe(false)
+    expect((await readBuiltCatalog(JSON.stringify(unsorted), JSON.stringify(metadataFor(unsorted)))).ok).toBe(false)
   })
 
   test("sanitizes a hostile build injection without leaking its error", async () => {
-    const result = await readBuiltCatalog(`({ get anthropic() { throw new Error("sk-ant-secret"); } })`)
+    const result = await readBuiltCatalog(
+      `({ get anthropic() { throw new Error("sk-ant-secret"); } })`,
+      JSON.stringify(metadataFor(makeSnapshot({ "claude-text": textModel }))),
+    )
 
     expect(result.ok).toBe(false)
     expect(JSON.stringify(result)).not.toContain("sk-ant-secret")
   })
 
   test("copies validated fields once so stateful getters cannot change public data", async () => {
-    const result = await readBuiltCatalog(`(() => {
-      let reads = 0;
-      return {
-        anthropic: {
-          id: "anthropic",
-          get name() { reads += 1; return reads === 1 ? "Anthropic" : "sk-ant-secret"; },
-          models: {
-            claude: {
-              id: "claude",
-              name: "Claude",
-              modalities: { input: ["text"], output: ["text"] },
-              limit: { context: 10, output: 5 }
-            }
+    const snapshot = makeSnapshot({ "claude-text": textModel })
+    const result = await readBuiltCatalog(
+      `(() => {
+        let reads = 0;
+        return {
+          anthropic: {
+            id: "anthropic",
+            get name() { reads += 1; return reads === 1 ? "Anthropic" : "sk-ant-secret"; },
+            npm: "@ai-sdk/anthropic",
+            models: ${JSON.stringify(snapshot.anthropic.models)}
           }
-        }
-      };
-    })()`)
+        };
+      })()`,
+      JSON.stringify(metadataFor(snapshot)),
+    )
 
     expect(result.ok).toBe(true)
     expect(JSON.stringify(result)).not.toContain("sk-ant-secret")
-    if (!result.ok) return
-    expect(result.catalog.providerName).toBe("Anthropic")
   })
 
   test("returns immutable public catalog data", async () => {
-    const result = await readBuiltCatalog(
-      JSON.stringify({
-        anthropic: {
-          id: "anthropic",
-          name: "Anthropic",
-          models: {
-            claude: {
-              id: "claude",
-              name: "Claude",
-              modalities: { input: ["text"], output: ["text"] },
-              limit: { context: 10, output: 5 },
-            },
-          },
-        },
-      }),
-    )
+    const snapshot = makeSnapshot({ "claude-text": textModel })
+    const result = await readBuiltCatalog(JSON.stringify(snapshot), JSON.stringify(metadataFor(snapshot)))
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -123,10 +140,36 @@ describe("Astra provider catalog", () => {
     expect(Object.isFrozen(result.catalog.models)).toBe(true)
     expect(Object.isFrozen(result.catalog.models[0])).toBe(true)
     expect(Object.isFrozen(result.catalog.models[0]?.limits)).toBe(true)
+    expect(Object.isFrozen(result.catalog.provenance)).toBe(true)
   })
 })
 
-async function readBuiltCatalog(snapshotExpression: string) {
+function makeSnapshot(models: Readonly<Record<string, unknown>>) {
+  return {
+    anthropic: {
+      id: "anthropic",
+      name: "Anthropic",
+      npm: "@ai-sdk/anthropic",
+      models,
+    },
+  } as const
+}
+
+function metadataFor(snapshot: Readonly<{ anthropic: unknown }>) {
+  return {
+    schemaVersion: 1,
+    sourceURL: "https://models.dev/api.json",
+    sourceContentDigest: `sha256:${"1".repeat(64)}`,
+    providerContentDigest: digest(JSON.stringify(snapshot.anthropic)),
+    retrieval: {
+      method: "GET",
+      offlineReplay: "--check --offline-source <pinned-api.json>",
+      mediaType: "application/json",
+    },
+  } as const
+}
+
+async function readBuiltCatalog(snapshotExpression: string, metadataExpression: string) {
   const build = await Bun.build({
     entrypoints: [`${import.meta.dir}/../src/provider-catalog.ts`],
     target: "bun",
@@ -135,7 +178,10 @@ async function readBuiltCatalog(snapshotExpression: string) {
         name: "astra-test-embedded-models",
         setup(builder) {
           builder.onLoad({ filter: /provider-catalog-embedded\.ts$/ }, () => ({
-            contents: `export const OPEN_CODE_MODELS_DEV_SNAPSHOT = ${snapshotExpression}`,
+            contents: `
+              export const OPEN_CODE_MODELS_DEV_SNAPSHOT = ${snapshotExpression};
+              export const OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA = ${metadataExpression};
+            `,
             loader: "ts",
           }))
         },
@@ -145,11 +191,31 @@ async function readBuiltCatalog(snapshotExpression: string) {
   if (!build.success || !build.outputs[0]) throw new Error("Provider catalog test bundle failed.")
   const moduleURL = URL.createObjectURL(new Blob([await build.outputs[0].text()], { type: "text/javascript" }))
   try {
-    const module = (await import(moduleURL)) as Readonly<{
-      readAstraProviderCatalog: () => ProviderCatalogResult
-    }>
+    const module: unknown = await import(moduleURL)
+    if (!isProviderCatalogModule(module)) throw new Error("Provider catalog test bundle has an invalid export.")
     return module.readAstraProviderCatalog()
   } finally {
     URL.revokeObjectURL(moduleURL)
   }
+}
+
+function isProviderCatalogModule(
+  input: unknown,
+): input is Readonly<{ readAstraProviderCatalog: () => ProviderCatalogResult }> {
+  return (
+    typeof input === "object" &&
+    input !== null &&
+    "readAstraProviderCatalog" in input &&
+    typeof input.readAstraProviderCatalog === "function"
+  )
+}
+
+function compareCodeUnits(left: string, right: string) {
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
+}
+
+function digest(input: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(input).digest("hex")}`
 }
