@@ -11,6 +11,24 @@ export {
   prepareGitUnstageAll,
   verifyGitUnstageAll,
 } from "./unstage"
+export {
+  captureGitStageInventory,
+  executeGitStageSelected,
+  prepareGitStageSelected,
+  verifyGitStageSelected,
+} from "./stage"
+export type {
+  GitStageBlockReason,
+  GitStageDependencies,
+  GitStageDurableClaim,
+  GitStageDurableClaimResult,
+  GitStageExecutionResult,
+  GitStageHostInvocation,
+  GitStageHostObservation,
+  GitStageInventoryResult,
+  GitStagePreparationResult,
+  GitStageVerificationResult,
+} from "./stage"
 export type {
   GitUnstageAllBlockReason,
   GitUnstageAllConsent,
