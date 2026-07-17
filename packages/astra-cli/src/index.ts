@@ -6,6 +6,7 @@ import {
   type DurableExecution,
   type DurableVerification,
   type EffectApproval,
+  type GitInspection,
   type WorkspaceDecision,
 } from "./workspace-gate"
 import { operationLedgerPath, receiptSpoolPath } from "./app-state"
@@ -57,6 +58,10 @@ type ApprovedVerifierModule = Readonly<{
   ) => Promise<DurableVerification>
 }>
 
+type GitInspectionModule = Readonly<{
+  inspectGitWorkspace: (workspaceRoot: string) => Promise<GitInspection>
+}>
+
 type Arguments = Readonly<{
   workspace: string
   decision?: WorkspaceDecision
@@ -73,6 +78,12 @@ if (!parsed.ok) {
   try {
     process.exitCode = (
       await runWorkspaceGate(parsed.arguments.workspace, terminal.io, {
+        async inspectGitWorkspace(workspaceRoot) {
+          const moduleName = ["@astra", "git"].join("/")
+          const loaded: unknown = await import(moduleName)
+          if (!isGitInspectionModule(loaded)) throw new Error("Astra Git inspection adapter is unavailable")
+          return loaded.inspectGitWorkspace(workspaceRoot)
+        },
         async recordDeniedOperation(input) {
           const moduleName = ["@astra/runtime", "operation-ledger"].join("/")
           const loaded: unknown = await import(moduleName)
@@ -106,7 +117,13 @@ function parseArguments(
   values: ReadonlyArray<string>,
 ): Readonly<{ ok: true; arguments: Arguments }> | Readonly<{ ok: false; help: boolean; message?: string }> {
   if (values.length === 0 || values[0] === "--help" || values[0] === "-h") return { ok: false, help: true }
-  if (values[0] !== "open") return { ok: false, help: false, message: "Expected the `open` command." }
+  if (values[0] === "inspect-git") {
+    if (values.length !== 2 || !values[1] || values[1].startsWith("--")) {
+      return { ok: false, help: false, message: "The `inspect-git` command requires exactly one workspace path." }
+    }
+    return { ok: true, arguments: { workspace: values[1], decision: "inspect-git" } }
+  }
+  if (values[0] !== "open") return { ok: false, help: false, message: "Expected the `open` or `inspect-git` command." }
 
   const workspace = values[1]
   if (!workspace || workspace.startsWith("--")) {
@@ -170,8 +187,17 @@ function isApprovedVerifierModule(value: unknown): value is ApprovedVerifierModu
   )
 }
 
+function isGitInspectionModule(value: unknown): value is GitInspectionModule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "inspectGitWorkspace" in value &&
+    typeof value.inspectGitWorkspace === "function"
+  )
+}
+
 function isWorkspaceDecision(value: string): value is WorkspaceDecision {
-  return value === "read-only" || value === "activate-once" || value === "exit"
+  return value === "read-only" || value === "inspect-git" || value === "activate-once" || value === "exit"
 }
 
 function isEffectApproval(value: string): value is EffectApproval {
@@ -179,5 +205,8 @@ function isEffectApproval(value: string): value is EffectApproval {
 }
 
 function printUsage() {
-  console.log("Usage: astra open <workspace> [--decision read-only|activate-once|exit] [--approval approve|deny]")
+  console.log(
+    "Usage: astra open <workspace> [--decision read-only|inspect-git|activate-once|exit] [--approval approve|deny]",
+  )
+  console.log("       astra inspect-git <workspace>")
 }

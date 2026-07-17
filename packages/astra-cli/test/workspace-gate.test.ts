@@ -101,6 +101,75 @@ describe("workspace gate", () => {
     expect(terminal.lines.join("\n")).not.toContain("SNAPSHOT")
   })
 
+  test("runs Git inspection only after the explicit G decision and remains untrusted", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO("inspect-git")
+    let inspections = 0
+
+    const result = await runWorkspaceGate(root, terminal.io, {
+      async inspectGitWorkspace(workspaceRoot) {
+        inspections += 1
+        expect(workspaceRoot).toBe(root)
+        return {
+          status: "complete",
+          mode: "bounded_read_only",
+          baseline: "not_captured",
+          activationAllowed: false,
+          verification: "not_verified",
+          submodules: "not_inspected",
+          workspaceRoot,
+          branch: {
+            oid: "0123456789abcdef0123456789abcdef01234567",
+            head: "main",
+            upstream: "origin/main",
+            ahead: 1,
+            behind: 2,
+            stashCount: 0,
+            aheadBehindScope: "local_ref_only",
+          },
+          staged: [{ path: "same.txt", index: "M", worktree: "M" }],
+          unstaged: [{ path: "same.txt", index: "M", worktree: "M" }],
+          untracked: ["new.txt"],
+          conflicts: [],
+          entryCount: 2,
+          outputDigest: `sha256:${"1".repeat(64)}`,
+          reportDigest: `sha256:${"2".repeat(64)}`,
+        }
+      },
+    })
+    const output = terminal.lines.join("\n")
+
+    expect(result).toMatchObject({ exitCode: 0, workspaceState: "UNTRUSTED", operationState: null })
+    expect(inspections).toBe(1)
+    expect(output).toContain("[G] inspect Git")
+    expect(output).toContain("bounded read-only • baseline not captured • submodules not inspected")
+    expect(output).toContain("+1 -2 (LOCAL REF ONLY)")
+    expect(output).toContain("STAGED     same.txt")
+    expect(output).toContain("UNSTAGED   same.txt")
+    expect(output).toContain("WORKSPACE STATE  UNTRUSTED")
+    expect(output).not.toContain("HOST EXECUTION")
+    expect(output).not.toContain("VERIFIED")
+    expect(await exists(join(root, demoMarkerName))).toBeFalse()
+  })
+
+  test("does not call the Git adapter during ordinary read-only open", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const terminal = scriptedIO("read-only")
+    let inspections = 0
+
+    await runWorkspaceGate(root, terminal.io, {
+      async inspectGitWorkspace() {
+        inspections += 1
+        throw new Error("must not run")
+      },
+    })
+
+    expect(inspections).toBe(0)
+    expect(terminal.lines.join("\n")).not.toContain("GIT MODE")
+  })
+
   test("keeps a hostile Git workspace read-only when an override requests activation", async () => {
     let requests = 0
     const server = Bun.serve({

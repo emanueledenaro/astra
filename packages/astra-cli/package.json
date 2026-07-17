@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@astra/domain": "workspace:*",
+    "@astra/git": "workspace:*",
     "@astra/runtime": "workspace:*"
   },
   "devDependencies": {

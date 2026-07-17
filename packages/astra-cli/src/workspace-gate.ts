@@ -1,6 +1,7 @@
 import { Operation, WorkspaceTrust } from "@astra/domain"
 import type { OperationEvent, OperationState } from "@astra/domain/operation"
 import type { WorkspaceTrustEvent, WorkspaceTrustReport, WorkspaceTrustState } from "@astra/domain/workspace-trust"
+import type { GitInspectionResult } from "@astra/git"
 import { createControlledWritePlan } from "@astra/runtime/controlled-write-plan"
 import { checkWorkspaceActivation, revalidateWorkspaceSnapshot, scanWorkspace } from "@astra/runtime/preflight"
 import {
@@ -9,14 +10,15 @@ import {
   renderOperationState,
   renderWorkspaceReport,
   renderWorkspaceState,
+  sanitizeTerminalText,
 } from "./terminal"
 
-export type WorkspaceDecision = "read-only" | "activate-once" | "exit"
+export type WorkspaceDecision = "read-only" | "inspect-git" | "activate-once" | "exit"
 export type EffectApproval = "approve" | "deny"
 
 export type WorkspaceGateIO = Readonly<{
   write: (line: string) => void
-  chooseWorkspaceDecision: (activationAllowed: boolean) => Promise<WorkspaceDecision>
+  chooseWorkspaceDecision: (activationAllowed: boolean, gitInspectionAllowed: boolean) => Promise<WorkspaceDecision>
   approveControlledWrite: () => Promise<EffectApproval>
 }>
 
@@ -55,7 +57,10 @@ export type DurableVerification = Readonly<{
   }>
 }>
 
+export type GitInspection = GitInspectionResult
+
 export type WorkspaceGateDependencies = Readonly<{
+  inspectGitWorkspace?: (workspaceRoot: string) => Promise<GitInspection>
   recordDeniedOperation?: (
     input: Readonly<{
       plan: ReturnType<typeof createControlledWritePlan>
@@ -98,13 +103,16 @@ export async function runWorkspaceGate(
   )
   for (const line of renderWorkspaceReport(report)) io.write(line)
   const activationCheck = checkWorkspaceActivation(report)
+  const gitInspectionAllowed = supportsGitInspection(report)
   io.write(
     activationCheck.allowed
       ? "CHOICES    [R] read-only   [A] activate once   [Q] exit"
-      : "CHOICES    [R] read-only   [Q] exit   • activate once unavailable",
+      : gitInspectionAllowed
+        ? "CHOICES    [R] read-only   [G] inspect Git   [Q] exit   • activate once unavailable"
+        : "CHOICES    [R] read-only   [Q] exit   • activate once unavailable",
   )
 
-  const decision = await io.chooseWorkspaceDecision(activationCheck.allowed)
+  const decision = await io.chooseWorkspaceDecision(activationCheck.allowed, gitInspectionAllowed)
   if (decision === "exit") {
     workspaceState = advanceWorkspace(workspaceState, "decision.exit", io)
     io.write("EXIT       no trust stored • no effect dispatched")
@@ -114,6 +122,30 @@ export async function runWorkspaceGate(
     workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
     io.write("READ ONLY  bounded report only • no trust stored • no effect dispatched")
     return { exitCode: 0, workspaceState, operationState: null, report }
+  }
+  if (decision === "inspect-git") {
+    workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
+    if (!gitInspectionAllowed || !dependencies.inspectGitWorkspace) {
+      io.write("GIT INSPECTION BLOCKED  unsupported workspace boundary or adapter unavailable")
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    let inspection: GitInspection
+    try {
+      inspection = await dependencies.inspectGitWorkspace(report.root)
+    } catch {
+      io.write("GIT INSPECTION BLOCKED  bounded adapter failed closed")
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    if (inspection.workspaceRoot !== report.root) {
+      io.write("GIT INSPECTION BLOCKED  adapter result does not match the opened workspace")
+      io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+      return { exitCode: 2, workspaceState, operationState: null, report }
+    }
+    for (const line of renderGitInspection(inspection)) io.write(line)
+    io.write("WORKSPACE STATE  UNTRUSTED • activation unavailable • no trust stored")
+    return { exitCode: inspection.status === "complete" ? 0 : 2, workspaceState, operationState: null, report }
   }
   if (!activationCheck.allowed && activationCheck.reason === "git_baseline_not_inspected") {
     workspaceState = advanceWorkspace(workspaceState, "decision.read_only", io)
@@ -244,6 +276,50 @@ export async function runWorkspaceGate(
   )
   workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
   return { exitCode: verification.status === "failed" ? 1 : 2, workspaceState, operationState, report }
+}
+
+function supportsGitInspection(report: WorkspaceTrustReport) {
+  const git = report.surfaces.filter((surface) => surface.kind === "git_metadata")
+  return (
+    report.completeness === "complete" &&
+    git.length === 1 &&
+    git[0]?.path === ".git" &&
+    git[0].entryKind === "directory"
+  )
+}
+
+function renderGitInspection(inspection: GitInspection) {
+  if (inspection.status === "blocked") {
+    return [
+      `GIT INSPECTION BLOCKED  ${sanitizeTerminalText(inspection.reason)}`,
+      "GIT MODE   bounded read-only • baseline not captured • submodules not inspected",
+    ]
+  }
+
+  const branch = inspection.branch.head ?? `(detached at ${inspection.branch.oid?.slice(0, 12) ?? "unknown"})`
+  const upstream = inspection.branch.upstream
+    ? `${inspection.branch.upstream} • +${inspection.branch.ahead ?? 0} -${inspection.branch.behind ?? 0} (LOCAL REF ONLY)`
+    : "none"
+  const lines = [
+    "GIT MODE   bounded read-only • baseline not captured • submodules not inspected",
+    `GIT BRANCH ${sanitizeTerminalText(branch)}`,
+    `UPSTREAM   ${sanitizeTerminalText(upstream)}`,
+    `STASH      ${inspection.branch.stashCount}`,
+    `CHANGES    ${inspection.staged.length} staged • ${inspection.unstaged.length} unstaged • ${inspection.untracked.length} untracked • ${inspection.conflicts.length} conflicts`,
+  ]
+  const paths = [
+    ...inspection.staged.map((entry) => `STAGED     ${sanitizeTerminalText(entry.path)}`),
+    ...inspection.unstaged.map((entry) => `UNSTAGED   ${sanitizeTerminalText(entry.path)}`),
+    ...inspection.untracked.map((path) => `UNTRACKED  ${sanitizeTerminalText(path)}`),
+    ...inspection.conflicts.map(
+      (entry) => `CONFLICT   ${sanitizeTerminalText(entry.code)} • ${sanitizeTerminalText(entry.path)}`,
+    ),
+  ]
+  lines.push(...paths.slice(0, 50))
+  if (paths.length > 50) lines.push(`MORE       ${paths.length - 50} bounded entries omitted from terminal output`)
+  lines.push(`GIT REPORT ${sanitizeTerminalText(inspection.reportDigest)}`)
+  lines.push("AUTHORITY  none • activation remains unavailable")
+  return lines
 }
 
 function requireMatchingDurableDenial(value: DurableDenial, operationID: string) {

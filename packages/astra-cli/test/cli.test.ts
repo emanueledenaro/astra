@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 const roots: Array<string> = []
@@ -77,6 +77,27 @@ describe("Astra CLI durable state", () => {
     expect(await exists(join(root, ".astra-demo-marker"))).toBeFalse()
     expect(await exists(dataDirectory)).toBeFalse()
   })
+
+  test("inspect-git explicitly runs the bounded adapter without creating app state or trust", async () => {
+    const root = await realpath(await temporaryDirectory("astra-cli-git-workspace-"))
+    await runGit(root, "init", "-q", "--initial-branch=main")
+    await writeFile(join(root, "tracked.txt"), "initial\n")
+    await runGit(root, "add", "tracked.txt")
+    await runGit(root, "-c", "user.name=Astra", "-c", "user.email=astra@example.invalid", "commit", "-qm", "initial")
+    await writeFile(join(root, "tracked.txt"), "changed\n")
+    const dataDirectory = join(await temporaryDirectory("astra-cli-git-data-parent-"), "not-created")
+    const run = await runCliCommand(dataDirectory, "inspect-git", root)
+
+    expect(run.exitCode).toBe(0)
+    expect(run.stderr).toBe("")
+    expect(run.stdout).toContain("GIT MODE   bounded read-only")
+    expect(run.stdout).toContain("UNSTAGED   tracked.txt")
+    expect(run.stdout).toContain("WORKSPACE STATE  UNTRUSTED")
+    expect(run.stdout).toContain("activation remains unavailable")
+    expect(run.stdout).not.toContain("HOST EXECUTION")
+    expect(run.stdout).not.toContain("VERIFIED")
+    expect(await exists(dataDirectory)).toBeFalse()
+  })
 })
 
 async function workspace() {
@@ -94,6 +115,11 @@ async function temporaryDirectory(prefix: string) {
 async function runCli(root: string, dataDirectory: string, decision: string, approval?: string) {
   const command = [process.execPath, "src/index.ts", "open", root, "--decision", decision]
   if (approval) command.push("--approval", approval)
+  return runCliCommand(dataDirectory, ...command.slice(2))
+}
+
+async function runCliCommand(dataDirectory: string, ...arguments_: ReadonlyArray<string>) {
+  const command = [process.execPath, "src/index.ts", ...arguments_]
   const child = Bun.spawn(command, {
     cwd: packageRoot,
     env: {
@@ -113,6 +139,17 @@ async function runCli(root: string, dataDirectory: string, decision: string, app
     new Response(child.stderr).text(),
   ])
   return { exitCode, stdout, stderr }
+}
+
+async function runGit(root: string, ...arguments_: ReadonlyArray<string>) {
+  const child = Bun.spawn(["/Applications/Xcode.app/Contents/Developer/usr/bin/git", "-C", root, ...arguments_], {
+    env: { PATH: "/usr/bin:/bin", LC_ALL: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+  if (exitCode !== 0) throw new Error(`Git fixture command failed: ${stderr}`)
 }
 
 async function readOperation(filename: string, operationID: string) {

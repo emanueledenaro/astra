@@ -100,6 +100,7 @@
       },
       "dependencies": {
         "@astra/domain": "workspace:*",
+        "@astra/git": "workspace:*",
         "@astra/runtime": "workspace:*",
       },
       "devDependencies": {
@@ -124,6 +125,13 @@
       },
       "devDependencies": {
         "@effect/sql-sqlite-bun": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
+    "packages/astra-git": {
+      "name": "@astra/git",
+      "devDependencies": {
         "@types/bun": "catalog:",
         "@typescript/native-preview": "catalog:",
       },
@@ -1293,6 +1301,8 @@
     "@astra/domain": ["@astra/domain@workspace:packages/astra-domain"],
 
     "@astra/executor": ["@astra/executor@workspace:packages/astra-executor"],
+
+    "@astra/git": ["@astra/git@workspace:packages/astra-git"],
 
     "@astra/ledger": ["@astra/ledger@workspace:packages/astra-ledger"],
 

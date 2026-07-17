@@ -15,11 +15,17 @@ export function createTerminalIO(overrides: TerminalOverrides) {
 
   const io: WorkspaceGateIO = {
     write: (line) => console.log(line),
-    async chooseWorkspaceDecision(activationAllowed) {
+    async chooseWorkspaceDecision(activationAllowed, gitInspectionAllowed) {
       if (overrides.decision) return overrides.decision
       while (true) {
-        const answer = (await question("Choose [R] read-only, [A] activate once, [Q] exit: ")).toLowerCase()
+        const choices = gitInspectionAllowed
+          ? "Choose [R] read-only, [G] inspect Git, [Q] exit: "
+          : activationAllowed
+            ? "Choose [R] read-only, [A] activate once, [Q] exit: "
+            : "Choose [R] read-only, [Q] exit: "
+        const answer = (await question(choices)).toLowerCase()
         if (answer === "r" || answer === "read-only") return "read-only"
+        if (gitInspectionAllowed && (answer === "g" || answer === "inspect-git")) return "inspect-git"
         if (answer === "q" || answer === "exit") return "exit"
         if (activationAllowed && (answer === "a" || answer === "activate-once")) return "activate-once"
       }
