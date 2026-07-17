@@ -73,6 +73,7 @@ const observedCompletionContext = {
 
 const providerResources = ["provider:turn"] as const
 const hostCommandResources = ["process:/bin/pwd", "workspace:/tmp/astra"] as const
+const skillActivationResources = ["workspace:/tmp/astra", "skill:.opencode/skills/safe/SKILL.md"] as const
 const providerAuthorizedLifecycle = [
   {
     ...authorizedLifecycle[0],
@@ -107,6 +108,28 @@ const hostCommandAuthorizedLifecycle = [
           completionCriteria: ["host_process_exit_observed"],
         },
         resources: hostCommandResources,
+      },
+    },
+  },
+  ...authorizedLifecycle.slice(1),
+] as const
+
+const skillActivationAuthorizedLifecycle = [
+  {
+    ...authorizedLifecycle[0],
+    event: {
+      ...authorizedLifecycle[0].event,
+      payload: {
+        ...admittedPayload,
+        effectSpecification: {
+          ...admittedPayload.effectSpecification,
+          effectClass: "skill_instruction_activation",
+          targetDescriptors: [
+            { resource: "skill:.opencode/skills/safe/SKILL.md", mode: "read_exact_file_once" },
+          ],
+          completionCriteria: ["private_session_skill_bundle_observed"],
+        },
+        resources: skillActivationResources,
       },
     },
   },
@@ -221,6 +244,82 @@ describe("specialized operation receipt ingestion", () => {
           operation: { state: "completed" },
         })
         expect(JSON.stringify(result)).not.toContain("VERIFIED")
+      }),
+    )
+  })
+
+  test("accepts observed skill activation completion without opening completion to unrelated effects", async () => {
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        let now = "2026-07-17T10:00:04.000Z"
+        const ledger = yield* makeOperationLedgerWithClock(() => now)
+        yield* ledger.initialize()
+        yield* ledger.appendBatch(skillActivationAuthorizedLifecycle)
+        yield* ledger.claimDispatch(claimCommand)
+        now = "2026-07-17T10:00:06.000Z"
+        const result = yield* ledger.ingestReceipt({
+          receipt: makeReceipt(
+            {
+              kind: "effect_completed",
+              completionDigest: contentDigest,
+              assurance: "observed_not_verified",
+            },
+            observedCompletionContext,
+            { effectClass: "skill_instruction_activation", resources: skillActivationResources },
+          ),
+          event: receiptEvent,
+        })
+        expect(result).toMatchObject({
+          kind: "ingested",
+          event: { name: "effect.completed" },
+          operation: { state: "completed" },
+        })
+        expect(JSON.stringify(result)).not.toContain("VERIFIED")
+      }),
+    )
+
+    await withDatabase(
+      ":memory:",
+      Effect.gen(function* () {
+        let now = "2026-07-17T10:00:04.000Z"
+        const ledger = yield* makeOperationLedgerWithClock(() => now)
+        yield* ledger.initialize()
+        const unrelatedLifecycle = [
+          {
+            ...authorizedLifecycle[0],
+            event: {
+              ...authorizedLifecycle[0].event,
+              payload: {
+                ...admittedPayload,
+                effectSpecification: {
+                  ...admittedPayload.effectSpecification,
+                  effectClass: "unrelated_extension_effect",
+                },
+              },
+            },
+          },
+          ...authorizedLifecycle.slice(1),
+        ] as const
+        yield* ledger.appendBatch(unrelatedLifecycle)
+        yield* ledger.claimDispatch(claimCommand)
+        now = "2026-07-17T10:00:06.000Z"
+        const error = yield* ledger
+          .ingestReceipt({
+            receipt: makeReceipt(
+              {
+                kind: "effect_completed",
+                completionDigest: contentDigest,
+                assurance: "observed_not_verified",
+              },
+              observedCompletionContext,
+              { effectClass: "unrelated_extension_effect", resources: ["workspace:marker.txt"] },
+            ),
+            event: receiptEvent,
+          })
+          .pipe(Effect.flip)
+        expect(error).toMatchObject({ _tag: "ReceiptIngestionError", code: "binding_mismatch" })
+        expect(yield* ledger.getOperation(operationID)).toMatchObject({ state: "dispatched", sequence: 5 })
       }),
     )
   })

@@ -67,7 +67,7 @@ const maximumIntegrityEvents = 100_000
 const maximumIntegrityOperations = 10_000
 const maximumBatchEvents = 32
 const emptyDigest = `sha256:${"0".repeat(64)}`
-const observedCompletionEffectClasses = ["provider_turn", "host_command"] as const
+const observedCompletionEffectClasses = ["provider_turn", "host_command", "skill_instruction_activation"] as const
 
 const makeDatabase = EffectDrizzleSqlite.makeWithDefaults()
 type Database = Effect.Success<typeof makeDatabase>
