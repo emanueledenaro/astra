@@ -12,8 +12,11 @@ export {
 
 export * as Operation from "./operation"
 export * as OperationContract from "./operation-contract"
+export * as ControlledWriteControl from "./controlled-write-control"
 export * as ExecutionCapability from "./execution-capability"
+export * as ExtensionCapability from "./extension-capability"
 export * as GitControlInspection from "./git-control-inspection"
+export * as GitControlMutation from "./git-control-mutation"
 export * as GitRepositoryBaseline from "./git-repository-baseline"
 export * as SessionAuthority from "./session-authority"
 
@@ -36,6 +39,28 @@ export * as WorkspaceTrust from "./workspace-trust"
 
 export type { AstraSessionAuthority, AstraSessionAuthorityParseResult } from "./session-authority"
 
+export {
+  controlledWriteBoundaryLabel,
+  controlledWriteDemoTarget,
+  controlledWriteNetworkWarning,
+  parseControlledWriteDecisionRequest,
+  parseControlledWriteDecisionResult,
+  parseControlledWritePrepareRequest,
+  parseControlledWritePrepareResult,
+  parseControlledWritePreview,
+  parseControlledWriteProgress,
+} from "./controlled-write-control"
+
+export type {
+  ControlledWriteControlParseResult,
+  ControlledWriteDecisionRequest,
+  ControlledWriteDecisionResult,
+  ControlledWritePrepareRequest,
+  ControlledWritePrepareResult,
+  ControlledWritePreview,
+  ControlledWriteProgress,
+} from "./controlled-write-control"
+
 export type {
   GitControlInspectionBlockReason,
   GitControlInspectionBlockedSummary,
@@ -47,11 +72,41 @@ export type {
 
 export { parseGitControlInspectionSummary } from "./git-control-inspection"
 
+export {
+  computeGitUnstageAllProposalDigest,
+  gitUnstageAllBoundaryLabel,
+  gitUnstageAllLimitations,
+  parseGitUnstageAllDecision,
+  parseGitUnstageAllObservation,
+  parseGitUnstageAllPreview,
+} from "./git-control-mutation"
+
+export type {
+  GitUnstageAllBaseline,
+  GitUnstageAllDecision,
+  GitUnstageAllObservation,
+  GitUnstageAllParseResult,
+  GitUnstageAllPreview,
+  GitUnstageAllPreviewAuthority,
+} from "./git-control-mutation"
+
 export type {
   ExecutionCapability as ExecutionCapabilityGrant,
   ExecutionCapabilityManifest,
   ExecutionCapabilityParseResult,
 } from "./execution-capability"
+
+export {
+  computeSkillActivationCapabilityDigest,
+  isWorkspaceOpenCodeSkillPath,
+  parseSkillActivationCapability,
+} from "./extension-capability"
+
+export type {
+  SkillActivationCapability,
+  SkillActivationCapabilityManifest,
+  SkillActivationCapabilityParseResult,
+} from "./extension-capability"
 
 export type {
   GitRepositoryBaselineBlockReason,
