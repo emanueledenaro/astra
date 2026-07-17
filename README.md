@@ -1,3 +1,34 @@
+# Astra
+
+**A predictable, security-first AI development system built on OpenCode.**
+
+Astra is being designed so a developer can always see what the AI intends to do, which authority it has, what changed, what was independently verified, what remains uncertain, and how to recover. The terminal interface, Git Control Plane, Codex-compatible skills and plugins, and animated pixel Lynx will be delivered as later vertical slices.
+
+## Current foundation
+
+The first working slice is the pure `@astra/domain` Operation lifecycle:
+
+- 15 explicit states from proposal to verified success, failure, recovery, or unresolved ambiguity;
+- a complete fail-closed transition topology;
+- no external effects, providers, credentials, Git commands, or runtime activation;
+- an independent executable ADR fixture with focused tests;
+- a deterministic local demo in `packages/astra-domain`.
+
+```bash
+cd packages/astra-domain
+bun test
+bun run demo
+```
+
+> [!IMPORTANT]
+> Astra is in active foundation development and is not ready for installation or production use. The OpenCode documentation below describes the inherited compatibility baseline, not a released Astra product.
+
+See [UPSTREAM.md](UPSTREAM.md) for the exact source baseline, license provenance, and remote policy.
+
+---
+
+## Inherited OpenCode documentation
+
 <p align="center">
   <a href="https://opencode.ai">
     <picture>

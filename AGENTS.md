@@ -1,3 +1,24 @@
+# Astra Engineering Rules
+
+Astra is based on OpenCode and preserves its MIT license, provenance, provider support, and compatible behavior. These rules take precedence for every new `astra-*` package; inherited OpenCode packages retain their existing rules until deliberately migrated.
+
+- New Astra mutations MUST be represented as typed Operations.
+- The model may propose intent; deterministic policy grants authority.
+- Opening a workspace MUST NOT execute repository-controlled code.
+- A tool result, process exit, provider finish event, or observed effect is never verified success.
+- Ambiguous effects become `reconciliation_required` or `inconclusive`, never success.
+- Providers MUST NOT be removed, disabled, initialized, or changed by unrelated Astra work.
+- New Astra domain code is strict, pure, dependency-light, and has no filesystem, process, network, Git, database, provider, credential, extension, or UI access.
+- Public fork, push, publication, and deployment require explicit product-owner approval.
+- Use English for code, comments, documentation, commits, and identifiers.
+- Keep changes small, name intent, expose effects, avoid speculative abstractions, and test public behavior.
+
+## Fast-track foundation
+
+For local demo work, choose the standard secure reversible architecture and use one bounded review for contradictions or severe risks. Defer full hardening and multiplatform certification without claiming they already exist.
+
+## Upstream OpenCode rules
+
 - To regenerate the legacy JavaScript SDK, run `./packages/sdk/js/script/build.ts`.
 - After changing the public Protocol or Server `HttpApi`, run `bun run generate` from `packages/client`. Do not edit `src/generated` or `src/generated-effect` directly.
 - Keep runtime dependencies directed from Schema to Core and Protocol, then from Core and Protocol to Server. Client runtime code may depend on Schema and Protocol but never Core or Server; `sdk-next` composes Client, Core, and Server.
