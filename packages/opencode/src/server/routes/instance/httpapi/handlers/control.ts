@@ -5,6 +5,8 @@ import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { RootHttpApi } from "../api"
 import { LogInput } from "../groups/control"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { Flag } from "@opencode-ai/core/flag/flag"
+import { HttpApiError } from "effect/unstable/httpapi"
 
 export const controlHandlers = HttpApiBuilder.group(RootHttpApi, "control", (handlers) =>
   Effect.gen(function* () {
@@ -14,6 +16,7 @@ export const controlHandlers = HttpApiBuilder.group(RootHttpApi, "control", (han
       params: { providerID: ProviderV2.ID }
       payload: Auth.Info
     }) {
+      if (Flag.ASTRA_SAFE_START) return yield* new HttpApiError.BadRequest({})
       yield* auth.set(ctx.params.providerID, ctx.payload).pipe(Effect.orDie)
       return true
     })
@@ -21,6 +24,7 @@ export const controlHandlers = HttpApiBuilder.group(RootHttpApi, "control", (han
     const authRemove = Effect.fn("ControlHttpApi.authRemove")(function* (ctx: {
       params: { providerID: ProviderV2.ID }
     }) {
+      if (Flag.ASTRA_SAFE_START) return yield* new HttpApiError.BadRequest({})
       yield* auth.remove(ctx.params.providerID).pipe(Effect.orDie)
       return true
     })

@@ -1890,6 +1890,40 @@ describe("OPENCODE_DISABLE_PROJECT_CONFIG", () => {
 describe("ASTRA_SAFE_START", () => {
   const remote = wellKnown({ config: { username: "remote-user" } })
 
+  it.instance("blocks workspace config writes at the service boundary", () =>
+    withProcessEnvs(
+      { ASTRA_SAFE_START: "1" },
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const file = path.join(test.directory, "config.json")
+        const original = JSON.stringify({ username: "preserve-me" })
+        yield* FSUtil.use.writeFileString(file, original)
+
+        const exit = yield* Effect.exit(Config.use.update({ username: "must-not-write" }))
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        expect(yield* FSUtil.use.readFileString(file)).toBe(original)
+      }),
+    ),
+  )
+
+  it.effect("blocks global config writes at the service boundary", () =>
+    withGlobalConfig({ config: { username: "preserve-me" } }, ({ dir }) =>
+      withProcessEnvs(
+        { ASTRA_SAFE_START: "1" },
+        Effect.gen(function* () {
+          const file = path.join(dir, "opencode.json")
+          const original = yield* FSUtil.use.readFileString(file)
+
+          const exit = yield* Effect.exit(Config.use.updateGlobal({ username: "must-not-write" }))
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          expect(yield* FSUtil.use.readFileString(file)).toBe(original)
+        }),
+      ),
+    ),
+  )
+
   remote.it.instance("loads only the sealed Astra config without remote or workspace discovery", () =>
     withProcessEnvs(
       {
@@ -1918,6 +1952,8 @@ describe("ASTRA_SAFE_START", () => {
         expect(config.plugin).toEqual([])
         expect(config.mcp).toEqual({})
         expect(config.instructions).toEqual([])
+        expect(config.snapshot).toBe(false)
+        expect(config.compaction).toEqual({ auto: false, prune: false })
         expect(yield* Config.use.directories()).toEqual([])
         expect(remote.seen.wellKnown).toBeUndefined()
         expect(yield* FSUtil.use.readFileString(workspaceConfig)).toBe(untrusted)

@@ -326,6 +326,8 @@ const layer = Layer.effect(
               mcp: {},
               command: {},
               instructions: [],
+              snapshot: false,
+              compaction: { auto: false, prune: false },
             } satisfies Info,
             directories: [],
             deps: [],
@@ -647,6 +649,9 @@ const layer = Layer.effect(
     })
 
     const update = Effect.fn("Config.update")(function* (config: Info) {
+      if (Flag.ASTRA_SAFE_START) {
+        yield* Effect.die(new Error("Config writes are blocked during Astra safe start"))
+      }
       const dir = yield* InstanceState.directory
       const file = path.join(dir, "config.json")
       const existing = yield* loadFile(file)
@@ -660,6 +665,9 @@ const layer = Layer.effect(
     })
 
     const updateGlobal = Effect.fn("Config.updateGlobal")(function* (config: Info) {
+      if (Flag.ASTRA_SAFE_START) {
+        yield* Effect.die(new Error("Global config writes are blocked during Astra safe start"))
+      }
       const file = globalConfigFile()
       const before = (yield* readConfigFile(file)) ?? "{}"
       const patch = writableGlobal(config)

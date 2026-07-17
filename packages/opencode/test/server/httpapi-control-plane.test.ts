@@ -24,6 +24,24 @@ const input = MoveSession.Input.make({
   moveChanges: true,
 })
 const called = Ref.makeUnsafe<MoveSession.Input | undefined>(undefined)
+const authSetCalls = Ref.makeUnsafe(0)
+const authRemoveCalls = Ref.makeUnsafe(0)
+
+function withSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+}
 
 const apiLayer = HttpRouter.serve(
   HttpApiBuilder.layer(RootHttpApi).pipe(
@@ -36,7 +54,12 @@ const apiLayer = HttpRouter.serve(
   { disableListenLog: true, disableLogger: true },
 ).pipe(
   Layer.provideMerge(NodeHttpServer.layerTest),
-  Layer.provide(Layer.mock(Auth.Service)({})),
+  Layer.provide(
+    Layer.mock(Auth.Service)({
+      set: () => Ref.update(authSetCalls, (value) => value + 1),
+      remove: () => Ref.update(authRemoveCalls, (value) => value + 1),
+    }),
+  ),
   Layer.provide(Layer.mock(Config.Service)({})),
   Layer.provide(Layer.mock(Installation.Service)({})),
   Layer.provide(
@@ -49,6 +72,26 @@ const apiLayer = HttpRouter.serve(
 const it = testEffect(apiLayer)
 
 describe("control-plane HttpApi", () => {
+  it.live("rejects auth writes during Astra safe start before calling the auth service", () =>
+    withSafeStart(
+      Effect.gen(function* () {
+        yield* Ref.set(authSetCalls, 0)
+        yield* Ref.set(authRemoveCalls, 0)
+
+        const setResponse = yield* HttpClientRequest.put("/auth/test").pipe(
+          HttpClientRequest.setBody(HttpBody.jsonUnsafe({ type: "api", key: "must-not-write" })),
+          HttpClient.execute,
+        )
+        const removeResponse = yield* HttpClientRequest.delete("/auth/test").pipe(HttpClient.execute)
+
+        expect(setResponse.status).toBe(400)
+        expect(removeResponse.status).toBe(400)
+        expect(yield* Ref.get(authSetCalls)).toBe(0)
+        expect(yield* Ref.get(authRemoveCalls)).toBe(0)
+      }),
+    ),
+  )
+
   it.live("moves a session through the root control-plane route", () =>
     Effect.gen(function* () {
       const response = yield* HttpClientRequest.post("/experimental/control-plane/move-session").pipe(

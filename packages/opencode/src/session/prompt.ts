@@ -56,6 +56,7 @@ import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1096,6 +1097,13 @@ const layer = Layer.effect(
           const { user: lastUser, assistant: lastAssistant, finished: lastFinished, tasks } = MessageV2.latest(msgs)
 
           if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+          if (Flag.ASTRA_SAFE_START && tasks.some((task) => task.type === "compaction")) {
+            yield* Effect.logWarning("blocking pending compaction during Astra safe start", {
+              "session.id": sessionID,
+              reason: "pending_compaction_disabled",
+            })
+            break
+          }
 
           const lastAssistantMsg = msgs.findLast(
             (msg) => msg.info.role === "assistant" && msg.info.id === lastAssistant?.id,
@@ -1130,7 +1138,7 @@ const layer = Layer.effect(
           }
 
           step++
-          if (step === 1)
+          if (step === 1 && !Flag.ASTRA_SAFE_START)
             yield* title({
               session,
               modelID: lastUser.model.modelID,
@@ -1159,6 +1167,7 @@ const layer = Layer.effect(
           }
 
           if (
+            !Flag.ASTRA_SAFE_START &&
             lastFinished &&
             lastFinished.summary !== true &&
             (yield* compaction.isOverflow({ tokens: lastFinished.tokens, model }))
@@ -1249,7 +1258,7 @@ const layer = Layer.effect(
               })
             }
 
-            if (step === 1)
+            if (step === 1 && !Flag.ASTRA_SAFE_START)
               yield* summary.summarize({ sessionID, messageID: lastUser.id }).pipe(Effect.ignore, Effect.forkIn(scope))
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
@@ -1317,7 +1326,7 @@ const layer = Layer.effect(
             }
 
             if (result === "stop") return "break" as const
-            if (result === "compact") {
+            if (result === "compact" && !Flag.ASTRA_SAFE_START) {
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
@@ -1335,7 +1344,9 @@ const layer = Layer.effect(
           continue
         }
 
-        yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
+        if (!Flag.ASTRA_SAFE_START) {
+          yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
+        }
         return yield* lastAssistant(sessionID)
       },
     )

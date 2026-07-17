@@ -6,6 +6,7 @@ import { resetDatabase } from "../fixture/db"
 import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 import { it } from "../lib/effect"
 import { waitGlobalBusEvent } from "./global-bus"
+import { withAstraSafeStart } from "../lib/astra-safe-start"
 
 function app() {
   return Server.Default().app
@@ -24,12 +25,61 @@ const tmpdirEffect = (options: Parameters<typeof tmpdir>[0]) =>
     (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
   )
 
+function withEnvironment<A, E, R>(environment: Readonly<Record<string, string>>, effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = Object.fromEntries(Object.keys(environment).map((key) => [key, process.env[key]]))
+      Object.assign(process.env, environment)
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        for (const [key, value] of Object.entries(previous)) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }),
+  )
+}
+
 afterEach(async () => {
   await disposeAllInstances()
   await resetDatabase()
 })
 
 describe("config HttpApi", () => {
+  it.live(
+    "rejects config updates during Astra safe start without creating config.json",
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirEffect({ config: { formatter: false, lsp: false } })
+      const file = path.join(tmp.path, "config.json")
+
+      yield* withAstraSafeStart(tmp.path, (environment) =>
+        withEnvironment(
+          environment,
+          Effect.gen(function* () {
+            const response = yield* Effect.promise(() =>
+              Promise.resolve(
+                app().request("/config", {
+                  method: "PATCH",
+                  headers: {
+                    "content-type": "application/json",
+                    "x-opencode-directory": tmp.path,
+                  },
+                  body: JSON.stringify({ username: "must-not-write" }),
+                }),
+              ),
+            )
+
+            expect(response.status).toBe(400)
+            expect(yield* Effect.promise(() => Bun.file(file).exists())).toBe(false)
+          }),
+        ),
+      )
+    }),
+  )
+
   it.live(
     "serves config update through the default server app",
     Effect.gen(function* () {

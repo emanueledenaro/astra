@@ -86,6 +86,52 @@ const languageBaseURL = (language: unknown) => (language as { config: { baseURL:
 
 const it = testEffect(LayerNode.compile(LayerNode.group([Provider.node, Env.node, Plugin.node])))
 const experimentalModels = testEffect(providerLayer({ enableExperimentalModels: true }))
+const invalidCatalogModels = Layer.succeed(
+  ModelsDev.Service,
+  ModelsDev.Service.of({
+    get: () =>
+      Effect.succeed({
+        hostile: {
+          id: "hostile",
+          name: "Hostile",
+          env: ["HOSTILE_PROVIDER_KEY"],
+          models: {
+            valid: {
+              id: "valid",
+              name: "Valid",
+              cost: { input: 1, output: 1 },
+              limit: { context: 128_000, output: 16_000 },
+            },
+            invalid: {
+              id: "invalid",
+              name: "Invalid",
+              cost: { input: Number.NaN, output: 1 },
+              limit: { context: 128_000, output: 16_000 },
+            },
+          },
+        },
+      } as unknown as Record<string, ModelsDev.Provider>),
+    refresh: () => Effect.void,
+  }),
+)
+const filteredCatalog = testEffect(
+  LayerNode.compile(
+    LayerNode.group([
+      Provider.node,
+      FSUtil.node,
+      Env.node,
+      Config.node,
+      Auth.node,
+      Plugin.node,
+      ModelsDev.node,
+      RuntimeFlags.node,
+    ]),
+    [
+      [ModelsDev.node, invalidCatalogModels],
+      [RuntimeFlags.node, RuntimeFlags.layer({})],
+    ],
+  ),
+)
 
 const alphaProviderConfig = {
   provider: {
@@ -118,6 +164,16 @@ it.instance("provider loaded from env variable", () =>
     // merge additional options.
     expect(providers[ProviderV2.ID.anthropic].source).toBe("env")
     expect(providers[ProviderV2.ID.anthropic].options.headers["anthropic-beta"]).toBeDefined()
+  }),
+)
+
+filteredCatalog.instance("internal provider clone filters invalid catalog models", () =>
+  Effect.gen(function* () {
+    yield* setProcessEnv("HOSTILE_PROVIDER_KEY", "test-key")
+    const providers = yield* Provider.use.list()
+
+    expect(providers[ProviderV2.ID.make("hostile")].models.valid).toBeDefined()
+    expect(providers[ProviderV2.ID.make("hostile")].models.invalid).toBeUndefined()
   }),
 )
 
@@ -1557,6 +1613,66 @@ test("public provider info omits invalid models", () => {
 
   expect(result.models.valid).toBeDefined()
   expect(result.models.invalid).toBeUndefined()
+})
+
+test("public provider info projects hostile provider and model options without credentials", () => {
+  const provider = Provider.fromModelsDevProvider({
+    id: "test",
+    name: "Test",
+    env: [],
+    models: {
+      valid: {
+        id: "valid",
+        name: "Valid",
+        cost: { input: 1, output: 1 },
+        limit: { context: 128_000, output: 16_000 },
+      },
+    },
+  } as unknown as ModelsDev.Provider)
+  provider.key = "key-canary"
+  provider.options = {
+    privateKey: "private-key-canary",
+    Cookie: "cookie-canary",
+    "Azure-Api-Key": "azure-key-canary",
+    api_token: "api-token-canary",
+    nested: { credentials: { password: "nested-password-canary" } },
+  }
+  provider.models.valid.api.url =
+    "https://user:password@provider.example/path-token-canary/v1?api_token=url-token-canary#hash-token-canary"
+  provider.models.valid.options = { nested: { privateKey: "model-private-key-canary" } }
+  provider.models.valid.headers = {
+    Cookie: "model-cookie-canary",
+    "Azure-Api-Key": "model-azure-key-canary",
+  }
+  provider.models.valid.variants = {
+    fast: { api_token: "variant-token-canary" },
+    careful: { nested: { credentials: "variant-credentials-canary" } },
+  }
+
+  const result = Provider.toPublicInfo(provider)
+  const serialized = JSON.stringify(result)
+
+  expect(result.key).toBeUndefined()
+  expect(result.options).toEqual({})
+  expect(result.models.valid.options).toEqual({})
+  expect(result.models.valid.headers).toEqual({})
+  expect(result.models.valid.variants).toEqual({ fast: {}, careful: {} })
+  expect(result.models.valid.api.url).toBe("https://provider.example")
+  for (const canary of [
+    "key-canary",
+    "cookie-canary",
+    "azure-key-canary",
+    "api-token-canary",
+    "nested-password-canary",
+    "url-token-canary",
+    "path-token-canary",
+    "hash-token-canary",
+    "model-private-key-canary",
+    "variant-token-canary",
+    "variant-credentials-canary",
+  ]) {
+    expect(serialized).not.toContain(canary)
+  }
 })
 
 it.instance("model variants are generated for reasoning models", () =>

@@ -22,6 +22,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { buildPrompt } from "@opencode-ai/core/session/compaction"
 import { SessionCompactionEvent } from "@opencode-ai/schema/session-compaction-event"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 export const Event = SessionCompactionEvent
 
@@ -32,6 +33,7 @@ const PRUNE_PROTECTED_TOOLS = ["skill"]
 const DEFAULT_TAIL_TURNS = 2
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
 const MAX_PRESERVE_RECENT_TOKENS = 8_000
+const SAFE_START_MESSAGE = "Session compaction is blocked during Astra safe start"
 type Turn = {
   start: number
   end: number
@@ -241,6 +243,7 @@ const layer = Layer.effect(
     // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
     // calls, then erases output of older tool calls to free context space
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
+      if (Flag.ASTRA_SAFE_START) yield* Effect.die(new Error(SAFE_START_MESSAGE))
       const cfg = yield* config.get()
       if (!cfg.compaction?.prune) return
       yield* Effect.logInfo("pruning")
@@ -293,6 +296,7 @@ const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      if (Flag.ASTRA_SAFE_START) yield* Effect.die(new Error(SAFE_START_MESSAGE))
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
@@ -517,6 +521,7 @@ const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      if (Flag.ASTRA_SAFE_START) yield* Effect.die(new Error(SAFE_START_MESSAGE))
       const msg = yield* session.updateMessage({
         id: MessageID.ascending(),
         role: "user",

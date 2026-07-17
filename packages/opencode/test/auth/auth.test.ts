@@ -1,12 +1,47 @@
 import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect } from "effect"
+import { Effect, Exit } from "effect"
 import { Auth } from "../../src/auth"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(LayerNode.compile(Auth.node))
 
+function withSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+}
+
 describe("Auth", () => {
+  it.instance("blocks set and remove at the auth service boundary during Astra safe start", () =>
+    Effect.gen(function* () {
+      const auth = yield* Auth.Service
+      yield* auth.set("existing", { type: "api", key: "preserve-me" })
+
+      const results = yield* withSafeStart(
+        Effect.all([
+          Effect.exit(auth.set("new", { type: "api", key: "must-not-write" })),
+          Effect.exit(auth.remove("existing")),
+        ]),
+      )
+      const data = yield* auth.all()
+
+      expect(results.every(Exit.isFailure)).toBe(true)
+      expect(data.new).toBeUndefined()
+      expect(data.existing).toEqual({ type: "api", key: "preserve-me" })
+    }),
+  )
+
   it.instance("set normalizes trailing slashes in keys", () =>
     Effect.gen(function* () {
       const auth = yield* Auth.Service
