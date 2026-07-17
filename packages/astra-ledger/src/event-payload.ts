@@ -1,5 +1,8 @@
 import {
   parseAdmissionKey,
+  parseDispatchRequest,
+  parseExecutorClaim,
+  parseOperationAuthority,
   parseOperationEffectSpecification,
   parseOperationIntent,
   parseOperationResources,
@@ -9,6 +12,9 @@ import {
   parseRetryBudget,
   parseWorkspaceBaseline,
   type OperationEventEnvelope,
+  type DispatchRequest,
+  type ExecutorClaim,
+  type OperationAuthority,
 } from "@astra/domain/operation-contract"
 import type { OperationEvent } from "@astra/domain/operation"
 import { OperationEventValidationError } from "./error"
@@ -19,12 +25,20 @@ export type ParsedLifecyclePayload = Readonly<{
   payload: NormalizedJsonObject
   admissionKey: string | null
   decisionID: string | null
+  authority: OperationAuthority | null
+  dispatchRequest: DispatchRequest | null
+  executorClaim: ExecutorClaim | null
+  baselineTrustDigest: string | null
+  baselineAdapterDigest: string | null
 }>
 
 export function parseLifecyclePayload(name: OperationEvent, payload: NormalizedJsonObject): ParsedLifecyclePayload {
   if (name === "operation.admitted") return parseAdmittedPayload(payload)
   if (name === "policy.ask") return parsePolicyAskPayload(payload)
   if (name === "approval.rejected") return parseApprovalRejectedPayload(payload)
+  if (name === "approval.granted") return parseApprovalGrantedPayload(payload)
+  if (name === "dispatch.requested") return parseDispatchRequestedPayload(payload)
+  if (name === "executor.accepted") return parseExecutorAcceptedPayload(payload)
   throw new OperationEventValidationError(
     `Event ${name} is not supported by the first durable ledger increment`,
     "$.name",
@@ -62,6 +76,11 @@ function parseAdmittedPayload(payload: NormalizedJsonObject): ParsedLifecyclePay
   return {
     admissionKey: parsedAdmissionKey,
     decisionID: null,
+    authority: null,
+    dispatchRequest: null,
+    executorClaim: null,
+    baselineTrustDigest: baseline.trustDigest,
+    baselineAdapterDigest: baseline.adapterDigest,
     payload: {
       admissionKey: parsedAdmissionKey,
       intent,
@@ -81,6 +100,11 @@ function parsePolicyAskPayload(payload: NormalizedJsonObject): ParsedLifecyclePa
   return {
     admissionKey: null,
     decisionID: requireCanonicalUUID(payload.decisionID, "$.payload.decisionID"),
+    authority: null,
+    dispatchRequest: null,
+    executorClaim: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
     payload: {
       approverClass: requireBoundedString(payload.approverClass, "$.payload.approverClass"),
       decisionID: requireCanonicalUUID(payload.decisionID, "$.payload.decisionID"),
@@ -97,10 +121,57 @@ function parseApprovalRejectedPayload(payload: NormalizedJsonObject): ParsedLife
   return {
     admissionKey: null,
     decisionID: requireCanonicalUUID(payload.decisionID, "$.payload.decisionID"),
+    authority: null,
+    dispatchRequest: null,
+    executorClaim: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
     payload: {
       decisionID: requireCanonicalUUID(payload.decisionID, "$.payload.decisionID"),
       reasonCode: requireBoundedString(payload.reasonCode, "$.payload.reasonCode"),
     },
+  }
+}
+
+function parseApprovalGrantedPayload(payload: NormalizedJsonObject): ParsedLifecyclePayload {
+  const authority = requireParsed(parseOperationAuthority(payload), "$.payload")
+  return {
+    admissionKey: null,
+    decisionID: authority.decisionID,
+    authority,
+    dispatchRequest: null,
+    executorClaim: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
+    payload: authority,
+  }
+}
+
+function parseDispatchRequestedPayload(payload: NormalizedJsonObject): ParsedLifecyclePayload {
+  const dispatchRequest = requireParsed(parseDispatchRequest(payload), "$.payload")
+  return {
+    admissionKey: null,
+    decisionID: null,
+    authority: null,
+    dispatchRequest,
+    executorClaim: null,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
+    payload: dispatchRequest,
+  }
+}
+
+function parseExecutorAcceptedPayload(payload: NormalizedJsonObject): ParsedLifecyclePayload {
+  const executorClaim = requireParsed(parseExecutorClaim(payload), "$.payload")
+  return {
+    admissionKey: null,
+    decisionID: null,
+    authority: null,
+    dispatchRequest: null,
+    executorClaim,
+    baselineTrustDigest: null,
+    baselineAdapterDigest: null,
+    payload: executorClaim,
   }
 }
 

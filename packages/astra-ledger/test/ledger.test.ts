@@ -12,9 +12,8 @@ import {
   LedgerCorruptionError,
   OperationConcurrencyError,
   OperationTransitionError,
-  makeOperationLedger,
 } from "../src"
-import { makeOperationLedgerWithFault } from "../src/testing"
+import { makeOperationLedgerWithClock, makeOperationLedgerWithFault } from "../src/testing"
 import {
   admittedPayload,
   admissionKey,
@@ -30,6 +29,8 @@ import {
 
 const withDatabase = <A, E>(filename: string, effect: Effect.Effect<A, E, SqlClientService>) =>
   Effect.runPromise(effect.pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped))
+
+const makeTestLedger = () => makeOperationLedgerWithClock(() => "2026-07-17T10:00:04.000Z")
 
 const lifecycle = [
   appendCommand({
@@ -72,7 +73,7 @@ describe("Operation ledger denial lifecycle", () => {
       const written = await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           yield* ledger.initialize()
           return yield* ledger.appendBatch(lifecycle)
         }),
@@ -88,7 +89,7 @@ describe("Operation ledger denial lifecycle", () => {
       const reopened = await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           yield* ledger.initialize()
           return yield* ledger.getOperation(operationID)
         }),
@@ -105,7 +106,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         const first = yield* ledger.append(lifecycle[0])
         const replay = yield* ledger.append(lifecycle[0])
@@ -127,7 +128,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         const rejected = yield* ledger
           .appendBatch([
@@ -154,7 +155,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         yield* ledger.append(lifecycle[0])
 
@@ -183,7 +184,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         yield* ledger.append(lifecycle[0])
         const conflict = yield* ledger
@@ -206,7 +207,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         const first = yield* ledger.append(lifecycle[0])
         const second = yield* ledger.append({
@@ -229,7 +230,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         const error = yield* ledger
           .append({
@@ -248,7 +249,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         const error = yield* ledger
           .append({
@@ -270,7 +271,7 @@ describe("Operation ledger denial lifecycle", () => {
     await withDatabase(
       ":memory:",
       Effect.gen(function* () {
-        const ledger = yield* makeOperationLedger()
+        const ledger = yield* makeTestLedger()
         yield* ledger.initialize()
         expect("delete" in ledger).toBeFalse()
         expect("remove" in ledger).toBeFalse()
@@ -290,7 +291,7 @@ describe("Operation ledger denial lifecycle", () => {
       await withDatabase(
         join(directory, "operations.sqlite"),
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           yield* ledger.initialize()
           expect(yield* ledger.readDurability()).toEqual({
             journalMode: "wal",
@@ -330,7 +331,7 @@ describe("Operation ledger atomicity and integrity", () => {
       await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           yield* ledger.initialize()
           yield* ledger.append(lifecycle[0])
         }),
@@ -342,7 +343,7 @@ describe("Operation ledger atomicity and integrity", () => {
       const error = await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           return yield* ledger.initialize().pipe(Effect.flip)
         }),
       )
@@ -359,7 +360,7 @@ describe("Operation ledger atomicity and integrity", () => {
       await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           yield* ledger.initialize()
           yield* ledger.append(lifecycle[0])
         }),
@@ -371,7 +372,7 @@ describe("Operation ledger atomicity and integrity", () => {
       const error = await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           return yield* ledger.initialize().pipe(Effect.flip)
         }),
       )
@@ -388,7 +389,7 @@ describe("Operation ledger atomicity and integrity", () => {
       await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           yield* ledger.initialize()
           yield* ledger.append(lifecycle[0])
         }),
@@ -400,7 +401,7 @@ describe("Operation ledger atomicity and integrity", () => {
       const error = await withDatabase(
         filename,
         Effect.gen(function* () {
-          const ledger = yield* makeOperationLedger()
+          const ledger = yield* makeTestLedger()
           yield* ledger.initialize().pipe(Effect.ignore)
           return yield* ledger
             .append({

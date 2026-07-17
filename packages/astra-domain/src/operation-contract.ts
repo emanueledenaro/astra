@@ -28,6 +28,8 @@ export type CorrelationID = Brand<string, "CorrelationID">
 export type AdmissionKey = Brand<string, "AdmissionKey">
 export type IdempotencyKey = Brand<string, "IdempotencyKey">
 export type ContentDigest = Brand<string, "ContentDigest">
+export type DispatchRequestID = Brand<string, "DispatchRequestID">
+export type ExecutorClaimID = Brand<string, "ExecutorClaimID">
 
 export type UserActorRef = Readonly<{ kind: "user"; subject: string }>
 export type SystemActorRef = Readonly<{ kind: "system"; subject: string; componentDigest: ContentDigest }>
@@ -118,6 +120,30 @@ export type OperationDispatch = Readonly<{
   capabilityGrantID: CapabilityGrantID
 }>
 
+export type DispatchRequest = Readonly<{
+  dispatchRequestID: DispatchRequestID
+  operationID: OperationID
+  attemptID: AttemptID
+  capabilityGrantID: CapabilityGrantID
+  baselineDigest: ContentDigest
+  executor: string
+  adapterDigest: ContentDigest
+  idempotencyKey: IdempotencyKey
+  requestedAt: string
+  authorizationExpiresAt: string
+}>
+
+export type ExecutorClaim = Readonly<{
+  executorClaimID: ExecutorClaimID
+  dispatchRequestID: DispatchRequestID
+  operationID: OperationID
+  attemptID: AttemptID
+  executor: string
+  fencingToken: number
+  acceptedAt: string
+  claimExpiresAt: string
+}>
+
 export type OperationReceipt = Readonly<{
   receiptID: ReceiptID
   operationID: OperationID
@@ -184,8 +210,28 @@ export function parseOperationID(input: unknown, path = "$"): OperationContractP
   return parseUUID<OperationID>(input, path)
 }
 
+export function parseAttemptID(input: unknown, path = "$"): OperationContractParseResult<AttemptID> {
+  return parseUUID<AttemptID>(input, path)
+}
+
+export function parseCapabilityGrantID(input: unknown, path = "$"): OperationContractParseResult<CapabilityGrantID> {
+  return parseUUID<CapabilityGrantID>(input, path)
+}
+
+export function parseContentDigest(input: unknown, path = "$"): OperationContractParseResult<ContentDigest> {
+  return parseDigest<ContentDigest>(input, path)
+}
+
 export function parseAdmissionKey(input: unknown, path = "$"): OperationContractParseResult<AdmissionKey> {
   return parseDigest<AdmissionKey>(input, path)
+}
+
+export function parseDispatchRequestID(input: unknown, path = "$"): OperationContractParseResult<DispatchRequestID> {
+  return parseUUID<DispatchRequestID>(input, path)
+}
+
+export function parseExecutorClaimID(input: unknown, path = "$"): OperationContractParseResult<ExecutorClaimID> {
+  return parseUUID<ExecutorClaimID>(input, path)
 }
 
 export function parseOperationIdentity(
@@ -484,6 +530,111 @@ export function parseOperationDispatch(input: unknown, path = "$"): OperationCon
     adapterDigest: adapterDigest.value,
     idempotencyKey: idempotencyKey.value,
     capabilityGrantID: capabilityGrantID.value,
+  })
+}
+
+export function parseDispatchRequest(input: unknown, path = "$"): OperationContractParseResult<DispatchRequest> {
+  const record = parseExactRecord(
+    input,
+    [
+      "dispatchRequestID",
+      "operationID",
+      "attemptID",
+      "capabilityGrantID",
+      "baselineDigest",
+      "executor",
+      "adapterDigest",
+      "idempotencyKey",
+      "requestedAt",
+      "authorizationExpiresAt",
+    ],
+    path,
+  )
+  if (!record.ok) return record
+  const dispatchRequestID = parseDispatchRequestID(record.value.dispatchRequestID, `${path}.dispatchRequestID`)
+  if (!dispatchRequestID.ok) return dispatchRequestID
+  const operationID = parseOperationID(record.value.operationID, `${path}.operationID`)
+  if (!operationID.ok) return operationID
+  const attemptID = parseUUID<AttemptID>(record.value.attemptID, `${path}.attemptID`)
+  if (!attemptID.ok) return attemptID
+  const capabilityGrantID = parseUUID<CapabilityGrantID>(record.value.capabilityGrantID, `${path}.capabilityGrantID`)
+  if (!capabilityGrantID.ok) return capabilityGrantID
+  const baselineDigest = parseDigest<ContentDigest>(record.value.baselineDigest, `${path}.baselineDigest`)
+  if (!baselineDigest.ok) return baselineDigest
+  const executor = parseBoundedString(record.value.executor, `${path}.executor`, 512)
+  if (!executor.ok) return executor
+  const adapterDigest = parseDigest<ContentDigest>(record.value.adapterDigest, `${path}.adapterDigest`)
+  if (!adapterDigest.ok) return adapterDigest
+  const idempotencyKey = parseDigest<IdempotencyKey>(record.value.idempotencyKey, `${path}.idempotencyKey`)
+  if (!idempotencyKey.ok) return idempotencyKey
+  const requestedAt = parseCanonicalTimestamp(record.value.requestedAt, `${path}.requestedAt`)
+  if (!requestedAt.ok) return requestedAt
+  const authorizationExpiresAt = parseCanonicalTimestamp(
+    record.value.authorizationExpiresAt,
+    `${path}.authorizationExpiresAt`,
+  )
+  if (!authorizationExpiresAt.ok) return authorizationExpiresAt
+  if (Date.parse(authorizationExpiresAt.value) <= Date.parse(requestedAt.value)) {
+    return rejected(`${path}.authorizationExpiresAt`, "not_after_requested_at")
+  }
+  return parsed({
+    dispatchRequestID: dispatchRequestID.value,
+    operationID: operationID.value,
+    attemptID: attemptID.value,
+    capabilityGrantID: capabilityGrantID.value,
+    baselineDigest: baselineDigest.value,
+    executor: executor.value,
+    adapterDigest: adapterDigest.value,
+    idempotencyKey: idempotencyKey.value,
+    requestedAt: requestedAt.value,
+    authorizationExpiresAt: authorizationExpiresAt.value,
+  })
+}
+
+export function parseExecutorClaim(input: unknown, path = "$"): OperationContractParseResult<ExecutorClaim> {
+  const record = parseExactRecord(
+    input,
+    [
+      "executorClaimID",
+      "dispatchRequestID",
+      "operationID",
+      "attemptID",
+      "executor",
+      "fencingToken",
+      "acceptedAt",
+      "claimExpiresAt",
+    ],
+    path,
+  )
+  if (!record.ok) return record
+  const executorClaimID = parseExecutorClaimID(record.value.executorClaimID, `${path}.executorClaimID`)
+  if (!executorClaimID.ok) return executorClaimID
+  const dispatchRequestID = parseDispatchRequestID(record.value.dispatchRequestID, `${path}.dispatchRequestID`)
+  if (!dispatchRequestID.ok) return dispatchRequestID
+  const operationID = parseOperationID(record.value.operationID, `${path}.operationID`)
+  if (!operationID.ok) return operationID
+  const attemptID = parseUUID<AttemptID>(record.value.attemptID, `${path}.attemptID`)
+  if (!attemptID.ok) return attemptID
+  const executor = parseBoundedString(record.value.executor, `${path}.executor`, 512)
+  if (!executor.ok) return executor
+  const fencingToken = parsePositiveInteger(record.value.fencingToken, `${path}.fencingToken`)
+  if (!fencingToken.ok) return fencingToken
+  const acceptedAt = parseCanonicalTimestamp(record.value.acceptedAt, `${path}.acceptedAt`)
+  if (!acceptedAt.ok) return acceptedAt
+  const claimExpiresAt = parseCanonicalTimestamp(record.value.claimExpiresAt, `${path}.claimExpiresAt`)
+  if (!claimExpiresAt.ok) return claimExpiresAt
+  if (Date.parse(claimExpiresAt.value) <= Date.parse(acceptedAt.value)) {
+    return rejected(`${path}.claimExpiresAt`, "not_after_accepted_at")
+  }
+  return parsed({
+    executorClaimID: executorClaimID.value,
+    dispatchRequestID: dispatchRequestID.value,
+    operationID: operationID.value,
+    attemptID: attemptID.value,
+    executor: executor.value,
+    fencingToken: fencingToken.value,
+    acceptedAt: acceptedAt.value,
+    claimExpiresAt: claimExpiresAt.value,
   })
 }
 

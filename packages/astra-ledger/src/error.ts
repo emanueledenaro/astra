@@ -111,7 +111,40 @@ export class LedgerInjectedFault extends Error {
   }
 }
 
-export type LedgerFaultPoint = "after_event_insert" | "after_projection_update"
+export class DispatchClaimError extends Error {
+  readonly _tag = "DispatchClaimError"
+
+  constructor(
+    readonly dispatchRequestID: string,
+    readonly code:
+      | "not_found"
+      | "request_mismatch"
+      | "already_claimed"
+      | "authorization_expired"
+      | "specialized_claim_required",
+  ) {
+    super(`Cannot claim dispatch ${dispatchRequestID}: ${code}`)
+    this.name = this._tag
+  }
+}
+
+export class CapabilityConflictError extends Error {
+  readonly _tag = "CapabilityConflictError"
+
+  constructor(readonly capabilityGrantID: string) {
+    super(`Capability grant ${capabilityGrantID} is already reserved or consumed`)
+    this.name = this._tag
+  }
+}
+
+export type LedgerFaultPoint =
+  | "after_event_insert"
+  | "after_projection_update"
+  | "after_dispatch_event_insert"
+  | "after_outbox_insert"
+  | "after_claim_insert"
+  | "after_claim_event_insert"
+  | "after_capability_consumption"
 
 export type OperationLedgerError =
   | LedgerStorageError
@@ -124,6 +157,8 @@ export type OperationLedgerError =
   | LedgerReadLimitError
   | LedgerNotInitializedError
   | LedgerInjectedFault
+  | DispatchClaimError
+  | CapabilityConflictError
 
 export function mapStorageError(message: string) {
   return (cause: unknown): OperationLedgerError =>
@@ -141,6 +176,8 @@ function isOperationLedgerError(cause: unknown): cause is OperationLedgerError {
     cause instanceof AdmissionConflictError ||
     cause instanceof LedgerReadLimitError ||
     cause instanceof LedgerNotInitializedError ||
-    cause instanceof LedgerInjectedFault
+    cause instanceof LedgerInjectedFault ||
+    cause instanceof DispatchClaimError ||
+    cause instanceof CapabilityConflictError
   )
 }

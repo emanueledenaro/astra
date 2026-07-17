@@ -1,5 +1,7 @@
 export {
   AdmissionConflictError,
+  CapabilityConflictError,
+  DispatchClaimError,
   EventConflictError,
   LedgerCorruptionError,
   LedgerInjectedFault,
@@ -17,10 +19,15 @@ export type {
   AppendOperationEvent,
   AppendOperationEventResult,
   LedgerDurability,
+  LedgerClock,
   OperationEventDraft,
   OperationLedger,
   OperationRecord,
   PersistedOperationEvent,
+  ClaimDispatchCommand,
+  ClaimDispatchResult,
+  DispatchSnapshot,
+  RecoveryCandidate,
 } from "./ledger"
 
 export type { OperationLedgerError } from "./error"

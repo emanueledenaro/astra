@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test"
 import {
   parseActorRef,
   parseAdmissionKey,
+  parseDispatchRequest,
+  parseDispatchRequestID,
+  parseExecutorClaim,
+  parseExecutorClaimID,
   parseOperationAuthority,
   parseOperationDispatch,
   parseOperationEventEnvelope,
@@ -208,6 +212,56 @@ describe("Operation contract decoding", () => {
         idempotencyKey: nextDigest,
       }),
     ).toMatchObject({ ok: false, issue: { path: "$.capabilityGrantID" } })
+  })
+
+  test("decodes exact dispatch requests and executor claims", () => {
+    const dispatchRequestID = "0196e4cb-5d80-7b1d-8fb2-263b81670440"
+    const executorClaimID = "0196e4cb-5d80-7b1d-8fb2-263b81670441"
+    const dispatchRequest = {
+      dispatchRequestID,
+      operationID,
+      attemptID,
+      capabilityGrantID,
+      baselineDigest: digest,
+      executor: "astra-executor:local",
+      adapterDigest: digest,
+      idempotencyKey: nextDigest,
+      requestedAt: "2026-07-17T10:00:01.000Z",
+      authorizationExpiresAt: "2026-07-17T10:05:00.000Z",
+    }
+    const claim = {
+      executorClaimID,
+      dispatchRequestID,
+      operationID,
+      attemptID,
+      executor: "astra-executor:local",
+      fencingToken: 1,
+      acceptedAt: "2026-07-17T10:00:02.000Z",
+      claimExpiresAt: "2026-07-17T10:01:02.000Z",
+    }
+
+    expect(parseDispatchRequestID(dispatchRequestID)).toMatchObject({ ok: true, value: dispatchRequestID })
+    expect(parseExecutorClaimID(executorClaimID)).toMatchObject({ ok: true, value: executorClaimID })
+    expect(parseDispatchRequest(dispatchRequest)).toMatchObject({ ok: true, value: dispatchRequest })
+    expect(parseExecutorClaim(claim)).toMatchObject({ ok: true, value: claim })
+    expect(
+      parseDispatchRequest({ ...dispatchRequest, requestedAt: dispatchRequest.authorizationExpiresAt }),
+    ).toMatchObject({
+      ok: false,
+      issue: { path: "$.authorizationExpiresAt", reason: "not_after_requested_at" },
+    })
+    expect(parseExecutorClaim({ ...claim, fencingToken: 0 })).toMatchObject({
+      ok: false,
+      issue: { path: "$.fencingToken" },
+    })
+    expect(parseExecutorClaim({ ...claim, acceptedAt: claim.claimExpiresAt })).toMatchObject({
+      ok: false,
+      issue: { path: "$.claimExpiresAt", reason: "not_after_accepted_at" },
+    })
+    expect(parseExecutorClaim({ ...claim, reclaimed: true })).toEqual({
+      ok: false,
+      issue: { path: "$.reclaimed", reason: "unexpected_field" },
+    })
   })
 
   test("decodes receipts as observations without turning them into verification", () => {
