@@ -8,9 +8,11 @@ Produce a local Astra release candidate that is functional, independently verifi
 
 ## Bottom line
 
-Astra now launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. Read-only and Activate once are bound to a private session authority, but every inherited AI, shell, write, provider, plugin, skill, MCP, LSP, formatter, and VCS effect remains blocked.
+Astra launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. Read-only and Activate once are bound to a private session authority, but every inherited AI, shell, general write, provider, plugin, skill, MCP, LSP, formatter, and VCS mutation remains blocked in the product TUI.
 
-This is a verified safe-opening checkpoint, not a release candidate. The next dependency is the macOS sandbox and capability kernel that will let selected effects cross the boundary without weakening it.
+This is a verified safe-opening and host-execution checkpoint, not a release candidate. One developer verification effect crosses the Operation Kernel through a bounded host process with explicit consent, durable authority, receipts, recovery, and independent verification. It is always labelled `HOST EXECUTION — NO SANDBOX`; the UI does not claim host network isolation or OS-enforced filesystem scope.
+
+General macOS sandboxing is deferred to hardening. The experimental sandbox work is preserved under `packages/astra-sandbox`, but it is dormant and has unresolved timeout and cleanup review findings, so it is excluded from the working product checkpoint. The read-only Git observer continues to use its separate, existing Seatbelt boundary. Neither is a dependency for the next usable product slice.
 
 ## Repository
 
@@ -67,11 +69,14 @@ This is a verified safe-opening checkpoint, not a release candidate. The next de
 ### Durable Operation Kernel
 
 - Typed Operation states, immutable intent/authority/dispatch/effect/verification facts, append-only SQLite ledger, outbox, one-shot capability claim, fencing token, receipt spool, recovery, and reconciliation-required states are implemented for the create-only developer slice.
+- The approved effect is bound to one immutable capability digest covering the exact executable identity, program, arguments, working directory, input, workspace identity, create-only target, environment, limits, and declared execution boundary.
+- Host Bun starts from `/` with automatic installation, workspace environment loading, and workspace Bun configuration disabled; a hostile `bunfig.toml`, preload, and `.env` canary remains untouched.
 - Denial is durable and produces no dispatch or effect.
 - Approved execution revalidates workspace and Git authority before the effect.
 - A missing or ambiguous receipt never triggers a blind retry.
 - Only the verifier can append exact evidence and reach the scoped `VERIFIED` state; a zero exit code is insufficient.
-- The positive slice remains `HOST EXECUTION — NO SANDBOX` and is not connected to the product TUI.
+- The positive slice uses a bounded child process on the real host, remains `HOST EXECUTION — NO SANDBOX`, and is not connected to the product TUI.
+- Host networking is truthfully declared as not isolated. Create-only scope is enforced by the sealed worker and repeated application checks, not by the host OS.
 
 ### TUI and Lynx
 
@@ -80,37 +85,41 @@ This is a verified safe-opening checkpoint, not a release candidate. The next de
 - Lynx has deterministic terminal frames and an illustrated two-frame raster concept pack under `assets/lynx`.
 - The illustrated pack is not yet wired into a terminal animation; the current TUI uses the deterministic terminal Lynx.
 
-## Verification evidence
+## Latest integration evidence
 
 - Toolchain: Bun `1.3.14`; frozen install succeeds.
-- Domain: 43 tests, 1,953 expectations; typecheck passes.
-- Ledger: 46 tests, 175 expectations; typecheck passes.
-- Runtime: 50 tests, 193 expectations; typecheck passes.
-- Executor: 5 tests, 19 expectations; typecheck passes.
-- Git: 44 tests, 157 expectations; typecheck passes.
+- Domain: 50 tests, 1,979 expectations; typecheck passes.
+- Ledger: 47 tests, 181 expectations; typecheck passes.
+- Runtime: 54 tests, 209 expectations; typecheck passes.
+- Executor: 7 tests, 22 expectations; typecheck passes.
 - CLI: 57 tests, 270 expectations; typecheck passes.
+- Core provider catalog: 10 tests, 28 expectations; typecheck passes.
+- OpenCode safe-boundary, Git, shell, extension, and MCP subset: 245 tests, 549 expectations; typecheck passes.
+- OpenCode snapshot regression suite: 56 pass, 1 platform skip, 737 expectations.
 - TUI: 216 pass, 1 skip, 558 expectations; typecheck passes. Existing KV fixture warnings are noisy but non-failing.
-- OpenCode safe-boundary subset: 148 tests, 288 expectations; typecheck passes.
-- Current verified total: 609 passing tests, 1 skipped test, and 3,613 expectations across the declared checkpoint.
+- Latest working-product integration gate: 742 passing tests, 2 skipped tests, and 4,533 expectations.
+- The preserved sandbox prototype has 12 passing tests and 59 expectations, but is excluded from the working-product gate until its open timeout and cleanup findings are resolved during hardening.
 - `git diff --check` passes; changed files pass Prettier after formatting.
-- The developer demo matrix was rerun after integration: hostile read-only open produced zero effects, denial was durable with no dispatch, one approved create-only effect reached independent exact verification, the network canary received zero requests, and no trust was persisted.
+- The developer demo matrix was rerun after integration: hostile read-only open produced zero effects, denial was durable with no dispatch, one approved create-only host effect reached independent exact verification, the network canary received zero requests during that fixture, and no trust was persisted.
+- The capability preview truthfully reported that host network access was not isolated and that create-only scope was application-enforced.
 - Real fixture: `G -> A` opened `ACTIVE ONCE • EFFECTS BLOCKED`; typed input did not submit; the complete fixture fingerprint stayed `a9fb1d24358e0d08776d051f2e63fd12b81d292b2e98d4147cc9d767bacc5f28`; no workspace file or authority directory remained.
 - Real large-repository diagnosis proved that the earlier false `STALE` result was a timeout. With realistic bounded limits, two captures produced the same digest.
 - Independent security review confirmed closure of the three safe-opening P1 findings: inherited project/Git startup, child authority replacement, and nested-symlink read escape.
+- The latest independent review also confirmed closure of workspace Bun startup execution and generic safe-start Git process bypasses; no P0/P1 remains in the reviewed host checkpoint.
 
 ## Remaining release-candidate work
 
-| Area                        | State and next dependency                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------------------------- |
-| General effect bridge       | Missing; TUI must route every effect through the Operation Kernel                                 |
-| macOS sandbox/capabilities  | Next; add immutable capability manifest, Seatbelt backend, probe, and fail-close                  |
-| Git Control Plane mutations | Missing; add typed stage/unstage, commit, branch, fetch, merge/rebase, recovery                   |
-| Providers and credentials   | Providers preserved structurally; parity gate and Keychain broker missing                         |
-| Plugins, skills, and MCP    | Safe-start disabled; manifest, quarantine, capability grants, and isolation missing               |
-| Complete TUI/CLI            | Agent queue, operation evidence, recovery, Git, provider, and extension views missing             |
-| Upstream compatibility      | Intake workflow, drift gates, parity, and rehearsal missing                                       |
-| Hardening                   | Full E2E, hostile fixtures, scans, SBOM, performance, accessibility, Linux/Windows matrix missing |
-| Local release candidate     | Package, version, changelog, checksums, provenance, recovery manual, and final demo missing       |
+| Area                        | State and next dependency                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------------------------- |
+| General effect bridge       | Next; route provider, shell, and file effects through the Operation Kernel                         |
+| macOS sandbox               | Deferred to hardening; prototype preserved and backend boundary remains injectable                 |
+| Git Control Plane mutations | Missing; add typed stage/unstage, commit, branch, fetch, merge/rebase, recovery                    |
+| Providers and credentials   | Next; provider registry is preserved, but usable governed chat and credential handling are missing |
+| Plugins, skills, and MCP    | Safe-start disabled; manifest, quarantine, capability grants, and isolation missing                |
+| Complete TUI/CLI            | Agent queue, operation evidence, recovery, Git, provider, and extension views missing              |
+| Upstream compatibility      | Intake workflow, drift gates, parity, and rehearsal missing                                        |
+| Hardening                   | Full E2E, hostile fixtures, scans, SBOM, performance, accessibility, Linux/Windows matrix missing  |
+| Local release candidate     | Package, version, changelog, checksums, provenance, recovery manual, and final demo missing        |
 
 ## Safety invariants
 
@@ -127,8 +136,9 @@ This is a verified safe-opening checkpoint, not a release candidate. The next de
 
 ## Next executable work
 
-1. Define the canonical execution capability manifest and bind its digest through authority, ledger, dispatch, receipt, and verification.
-2. Implement and self-test the macOS Seatbelt backend with minimal environment, filesystem/network scope, timeout, and process-tree cleanup.
-3. Route the first controlled TUI operation through the sandboxed Operation Kernel while preserving denial-without-effect.
-4. Build typed Git stage/unstage and local commit operations; keep push unavailable.
-5. Continue provider parity, Keychain broker, extension isolation, complete TUI/CLI, hardening, and local RC packaging.
+1. Connect a real OpenCode provider turn to the Astra chat through a visible, consented network Operation.
+2. Route bounded shell and file changes through the same capability, ledger, receipt, recovery, and verification boundaries.
+3. Build typed Git stage/unstage and local commit operations in the TUI; keep push unavailable without separate authorization.
+4. Add governed plugin, skill, and MCP discovery and activation without weakening safe workspace opening.
+5. Complete the TUI operation, evidence, recovery, Git, provider, and extension views.
+6. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.
