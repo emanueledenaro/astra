@@ -59,8 +59,8 @@ describe("provider turn Operation coordinator", () => {
             origin: fixture.input.plan.origin,
           },
           logicalPayload: fixture.input.plan.logicalPayload,
-          executionBoundary: "host_no_sandbox",
-          boundaryLabel: "HOST EXECUTION — NO SANDBOX",
+          executionBoundary: "network_egress_host_no_sandbox",
+          boundaryLabel: "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX",
         })
         expect(await operationState(fixture.input)).toBe("awaiting_approval")
         expect(await eventNames(fixture.input)).toEqual(["operation.admitted", "policy.ask"])
@@ -118,7 +118,7 @@ describe("provider turn Operation coordinator", () => {
       state: "reconciliation_required",
       status: "effect_unknown",
       sequence: 6,
-      boundaryLabel: "HOST EXECUTION — NO SANDBOX",
+      boundaryLabel: "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX",
     })
     expect(approvals).toBe(1)
     expect(providerCalls).toBe(1)
@@ -333,6 +333,59 @@ describe("provider turn Operation coordinator", () => {
         ...fixture.input,
         plan: {
           ...fixture.input.plan,
+          credential: { ...fixture.input.plan.credential, handle: "auth:openai:other" },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          credential: { ...fixture.input.plan.credential, accountFingerprint: digest("other account") },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          credential: { ...fixture.input.plan.credential, headerName: "x-api-key" },
+          wireRequest: { ...fixture.input.plan.wireRequest, headerNames: ["content-type", "x-api-key"] },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          wireRequest: { ...fixture.input.plan.wireRequest, path: "/v1/responses" },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          wireRequest: {
+            ...fixture.input.plan.wireRequest,
+            headerNames: ["authorization", "content-type", "x-provider-feature"],
+          },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          wireRequest: { ...fixture.input.plan.wireRequest, timeoutMilliseconds: 9_000 },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          wireRequest: { ...fixture.input.plan.wireRequest, maximumResponseBytes: 512_000 },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
           logicalPayload: { digest: digest("other logical payload"), bytes: fixture.input.plan.logicalPayload.bytes },
         },
       },
@@ -383,6 +436,45 @@ describe("provider turn Operation coordinator", () => {
       { ...fixture.input, plan: { ...fixture.input.plan, modelID: "model-divergent" } },
       { ...fixture.input, plan: { ...fixture.input.plan, variant: "variant-divergent" } },
       { ...fixture.input, plan: { ...fixture.input.plan, origin: "https://redirect.example.test" } },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          credential: { ...fixture.input.plan.credential, handle: "auth:openai:divergent" },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          credential: { ...fixture.input.plan.credential, accountFingerprint: digest("divergent account") },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          credential: { ...fixture.input.plan.credential, headerName: "x-api-key" },
+          wireRequest: { ...fixture.input.plan.wireRequest, headerNames: ["content-type", "x-api-key"] },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          wireRequest: { ...fixture.input.plan.wireRequest, path: "/v1/divergent" },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          wireRequest: {
+            ...fixture.input.plan.wireRequest,
+            headerNames: ["authorization", "content-type", "x-provider-feature"],
+          },
+        },
+      },
       {
         ...fixture.input,
         plan: {
@@ -555,6 +647,14 @@ describe("provider turn Operation coordinator", () => {
         },
       }),
     ).toThrow()
+    for (const origin of ["http://localhost:8787", "http://127.0.0.2:8787"]) {
+      expect(() =>
+        makeProviderTurnOperationFacts({
+          ...fixture.input,
+          plan: { ...fixture.input.plan, origin, transportPolicy: "test_only_loopback_http" },
+        }),
+      ).toThrow()
+    }
     expect(
       makeProviderTurnOperationFacts({
         ...fixture.input,
@@ -565,6 +665,16 @@ describe("provider turn Operation coordinator", () => {
         },
       }).preview.provider,
     ).toMatchObject({ origin: "http://127.0.0.1:8787", transportPolicy: "test_only_loopback_http" })
+    expect(
+      makeProviderTurnOperationFacts({
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          origin: "http://[::1]:8787",
+          transportPolicy: "test_only_loopback_http",
+        },
+      }).preview.provider,
+    ).toMatchObject({ origin: "http://[::1]:8787", transportPolicy: "test_only_loopback_http" })
   })
 
   test("ignores an unrelated pending receipt while recovering the exact Operation", async () => {
@@ -632,8 +742,20 @@ async function operationInput() {
       variant: "high",
       origin: "https://api.example.test",
       transportPolicy: "https_only",
+      credential: {
+        handle: "auth:openai:primary",
+        accountFingerprint: digest("provider-account:fixture@example.test"),
+        headerName: "authorization",
+      },
+      wireRequest: {
+        method: "POST",
+        path: "/v1/chat/completions",
+        headerNames: ["authorization", "content-type"],
+        timeoutMilliseconds: 10_000,
+        maximumResponseBytes: 1_048_576,
+      },
       logicalPayload: { digest: digest("logical payload without raw prompt storage"), bytes: 47 },
-      executionBoundary: "host_no_sandbox",
+      executionBoundary: "network_egress_host_no_sandbox",
       createdAt: new Date(base).toISOString(),
     },
     report,

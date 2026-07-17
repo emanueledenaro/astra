@@ -22,13 +22,14 @@ import {
 } from "./controlled-write-authority"
 
 const authorizationLifetimeMilliseconds = 300_000
+export const providerTurnMaximumRequestBytes = 4_194_304
 
 export const providerTurnPolicyDigest = digest("astra-policy:provider-turn-explicit-consent:v1")
-export const providerTurnAdapterDigest = digest("astra-runtime:provider-turn:bounded-adapter-seam:v2")
+export const providerTurnAdapterDigest = digest("astra-runtime:provider-turn:bounded-adapter-seam:v3")
 export const providerTurnObserverDigest = digest("astra-observer:provider-turn-finish:v1")
 export const providerTurnExecutor = "astra-executor:provider-turn"
 
-export const providerTurnExecutionBoundaryLabel = "HOST EXECUTION — NO SANDBOX"
+export const providerTurnExecutionBoundaryLabel = "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX"
 
 export type ProviderTurnPlan = Readonly<{
   operationID: string
@@ -40,8 +41,20 @@ export type ProviderTurnPlan = Readonly<{
   variant: string | null
   origin: string
   transportPolicy: "https_only" | "test_only_loopback_http"
+  credential: Readonly<{
+    handle: string
+    accountFingerprint: string
+    headerName: string
+  }>
+  wireRequest: Readonly<{
+    method: "POST"
+    path: string
+    headerNames: ReadonlyArray<string>
+    timeoutMilliseconds: number
+    maximumResponseBytes: number
+  }>
   logicalPayload: Readonly<{ digest: string; bytes: number }>
-  executionBoundary: "host_no_sandbox"
+  executionBoundary: "network_egress_host_no_sandbox"
   createdAt: string
 }>
 
@@ -59,8 +72,14 @@ export type ProviderTurnPreview = Readonly<{
     origin: string
     transportPolicy: ProviderTurnPlan["transportPolicy"]
   }>
+  credential: Readonly<{
+    handle: string
+    accountFingerprint: ContentDigest
+    headerName: string
+  }>
+  wireRequest: ProviderTurnPlan["wireRequest"]
   logicalPayload: Readonly<{ digest: ContentDigest; bytes: number }>
-  executionBoundary: "host_no_sandbox"
+  executionBoundary: "network_egress_host_no_sandbox"
   boundaryLabel: typeof providerTurnExecutionBoundaryLabel
 }>
 
@@ -71,9 +90,11 @@ export type UntrustedProviderTurnAdapterRequest = Readonly<{
   workspace: ProviderTurnPreview["workspace"] & Readonly<{ baselineDigest: ContentDigest }>
   session: ProviderTurnPreview["session"]
   provider: ProviderTurnPreview["provider"]
+  credential: ProviderTurnPreview["credential"]
   expectedOrigin: string
+  wireRequest: ProviderTurnPreview["wireRequest"]
   logicalPayload: ProviderTurnPreview["logicalPayload"]
-  executionBoundary: "host_no_sandbox"
+  executionBoundary: "network_egress_host_no_sandbox"
   capability: Readonly<{
     capabilityGrantID: string
     attemptID: string
@@ -104,6 +125,18 @@ export function snapshotProviderTurnOperationFactsInput(
     variant: source.plan.variant === null ? null : requireString(source.plan.variant),
     origin: requireString(source.plan.origin),
     transportPolicy: source.plan.transportPolicy,
+    credential: {
+      handle: requireString(source.plan.credential.handle),
+      accountFingerprint: requireString(source.plan.credential.accountFingerprint),
+      headerName: requireString(source.plan.credential.headerName),
+    },
+    wireRequest: {
+      method: source.plan.wireRequest.method,
+      path: requireString(source.plan.wireRequest.path),
+      headerNames: source.plan.wireRequest.headerNames.map(requireString),
+      timeoutMilliseconds: source.plan.wireRequest.timeoutMilliseconds,
+      maximumResponseBytes: source.plan.wireRequest.maximumResponseBytes,
+    },
     logicalPayload: {
       digest: requireString(source.plan.logicalPayload.digest),
       bytes: source.plan.logicalPayload.bytes,
@@ -186,6 +219,18 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       origin: input.plan.origin,
       transportPolicy: input.plan.transportPolicy,
     },
+    credential: {
+      handle: input.plan.credential.handle,
+      accountFingerprint: requireContentDigest(input.plan.credential.accountFingerprint),
+      headerName: input.plan.credential.headerName,
+    },
+    wireRequest: {
+      method: input.plan.wireRequest.method,
+      path: input.plan.wireRequest.path,
+      headerNames: [...input.plan.wireRequest.headerNames],
+      timeoutMilliseconds: input.plan.wireRequest.timeoutMilliseconds,
+      maximumResponseBytes: input.plan.wireRequest.maximumResponseBytes,
+    },
     logicalPayload: {
       digest: logicalPayloadDigest,
       bytes: input.plan.logicalPayload.bytes,
@@ -209,7 +254,10 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
   const resources = [
     `workspace:${input.report.root}`,
     `provider:${input.plan.providerID}/${input.plan.modelID}`,
+    `credential:${input.plan.credential.handle}`,
+    `provider-account:${input.plan.credential.accountFingerprint}`,
     `network-origin:${input.plan.origin}`,
+    `network-endpoint:${input.plan.origin}${input.plan.wireRequest.path}`,
   ] as const
   const intent = {
     kind: "provider_turn",
@@ -222,6 +270,8 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       variant: input.plan.variant,
       origin: input.plan.origin,
       transportPolicy: input.plan.transportPolicy,
+      credential: preview.credential,
+      wireRequest: preview.wireRequest,
       logicalPayload: preview.logicalPayload,
       executionBoundary: input.plan.executionBoundary,
     },
@@ -251,7 +301,10 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       targetDescriptors: [
         { resource: resources[0], mode: "identity_guard" },
         { resource: resources[1], mode: "execute_once" },
-        { resource: resources[2], mode: "send_logical_payload" },
+        { resource: resources[2], mode: "credential_handle_guard" },
+        { resource: resources[3], mode: "account_fingerprint_guard" },
+        { resource: resources[4], mode: "origin_guard" },
+        { resource: resources[5], mode: "send_logical_payload" },
       ],
       partialEffect: "reconciliation_required",
       completionCriteria: [completionCriterion],
@@ -280,9 +333,14 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
     },
     session: { ...preview.session },
     provider: { ...preview.provider },
+    credential: { ...preview.credential },
     expectedOrigin: preview.provider.origin,
+    wireRequest: {
+      ...preview.wireRequest,
+      headerNames: [...preview.wireRequest.headerNames],
+    },
     logicalPayload: { ...preview.logicalPayload },
-    executionBoundary: "host_no_sandbox",
+    executionBoundary: "network_egress_host_no_sandbox",
     capability: {
       capabilityGrantID,
       attemptID,
@@ -456,8 +514,8 @@ function requireInput(input: ProviderTurnOperationFactsInput) {
   if (input.plan.workspaceRoot !== input.report.root) {
     throw new TypeError("The provider turn and preflight workspace do not match")
   }
-  if (input.plan.executionBoundary !== "host_no_sandbox") {
-    throw new TypeError("Provider turns must explicitly declare host execution without a sandbox")
+  if (input.plan.executionBoundary !== "network_egress_host_no_sandbox") {
+    throw new TypeError("Provider turns must explicitly declare host network egress without a network sandbox")
   }
   requireBoundedIdentifier(input.plan.sessionID, "session ID")
   requireBoundedIdentifier(input.plan.messageID, "message ID")
@@ -465,8 +523,14 @@ function requireInput(input: ProviderTurnOperationFactsInput) {
   requireBoundedIdentifier(input.plan.modelID, "model ID")
   if (input.plan.variant !== null) requireBoundedIdentifier(input.plan.variant, "model variant")
   requireCanonicalOrigin(input.plan.origin, input.plan.transportPolicy)
+  requireCredentialBinding(input.plan.credential, input.plan.wireRequest.headerNames)
+  requireWireRequest(input.plan.wireRequest)
   requireContentDigest(input.plan.logicalPayload.digest)
-  if (!Number.isSafeInteger(input.plan.logicalPayload.bytes) || input.plan.logicalPayload.bytes < 0) {
+  if (
+    !Number.isSafeInteger(input.plan.logicalPayload.bytes) ||
+    input.plan.logicalPayload.bytes < 0 ||
+    input.plan.logicalPayload.bytes > providerTurnMaximumRequestBytes
+  ) {
     throw new TypeError("The provider logical payload byte count is invalid")
   }
   const values = [input.plan.createdAt, input.policyAskedAt, input.recordingStartedAt]
@@ -475,6 +539,76 @@ function requireInput(input: ProviderTurnOperationFactsInput) {
     throw new TypeError("Provider turn observations must use a monotonic timeline")
   }
 }
+
+function requireCredentialBinding(
+  input: ProviderTurnPlan["credential"],
+  headerNames: ProviderTurnPlan["wireRequest"]["headerNames"],
+) {
+  requireBoundedIdentifier(input.handle, "credential handle")
+  requireContentDigest(input.accountFingerprint)
+  if (!isCanonicalHeaderName(input.headerName) || !headerNames.includes(input.headerName)) {
+    throw new TypeError("The provider credential header must be bound to the request")
+  }
+}
+
+function requireWireRequest(input: ProviderTurnPlan["wireRequest"]) {
+  if (input.method !== "POST") throw new TypeError("Provider turns require an explicit POST request")
+  let endpoint: URL
+  try {
+    endpoint = new URL(input.path, "https://astra.invalid")
+  } catch {
+    throw new TypeError("The provider request path is invalid")
+  }
+  if (
+    !input.path.startsWith("/") ||
+    input.path.startsWith("//") ||
+    endpoint.origin !== "https://astra.invalid" ||
+    endpoint.pathname !== input.path ||
+    endpoint.search !== "" ||
+    endpoint.hash !== ""
+  ) {
+    throw new TypeError("The provider request path must be canonical and contain no query or fragment")
+  }
+  if (
+    input.headerNames.length < 1 ||
+    input.headerNames.length > 32 ||
+    input.headerNames.some((name) => !isCanonicalHeaderName(name)) ||
+    input.headerNames.some((name, index) => index > 0 && name <= input.headerNames[index - 1]!)
+  ) {
+    throw new TypeError("Provider request header names must be unique, lowercase, and sorted")
+  }
+  if (
+    !Number.isSafeInteger(input.timeoutMilliseconds) ||
+    input.timeoutMilliseconds < 100 ||
+    input.timeoutMilliseconds > 30_000
+  ) {
+    throw new TypeError("The provider request timeout is outside the bounded transport policy")
+  }
+  if (
+    !Number.isSafeInteger(input.maximumResponseBytes) ||
+    input.maximumResponseBytes < 1 ||
+    input.maximumResponseBytes > 1_048_576
+  ) {
+    throw new TypeError("The provider response limit is outside the bounded transport policy")
+  }
+}
+
+function isCanonicalHeaderName(input: string) {
+  return /^[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(input) && !forbiddenRequestHeaders.has(input)
+}
+
+const forbiddenRequestHeaders = new Set([
+  "connection",
+  "content-length",
+  "cookie",
+  "expect",
+  "host",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+])
 
 function requireCanonicalOrigin(input: string, transportPolicy: ProviderTurnPlan["transportPolicy"]) {
   let url: URL
@@ -487,14 +621,18 @@ function requireCanonicalOrigin(input: string, transportPolicy: ProviderTurnPlan
     throw new TypeError("The provider origin must be canonical and contain no credentials")
   }
   if (transportPolicy === "https_only" && url.protocol === "https:") return
-  if (transportPolicy === "test_only_loopback_http" && url.protocol === "http:" && isLoopbackHostname(url.hostname)) {
+  if (
+    transportPolicy === "test_only_loopback_http" &&
+    url.protocol === "http:" &&
+    isProviderTurnLiteralLoopbackHostname(url.hostname)
+  ) {
     return
   }
   throw new TypeError("Provider origins require HTTPS; HTTP is reserved for explicit test-only loopback use")
 }
 
-function isLoopbackHostname(hostname: string) {
-  return hostname === "localhost" || hostname === "[::1]" || /^127(?:\.[0-9]{1,3}){3}$/u.test(hostname)
+export function isProviderTurnLiteralLoopbackHostname(hostname: string) {
+  return hostname === "127.0.0.1" || hostname === "[::1]"
 }
 
 function requireBoundedIdentifier(input: string, name: string) {

@@ -323,7 +323,7 @@ function makeReceipt(
     canonicalJson({
       capabilityDigest: facts.capabilityDigest,
       classification: "provider_turn_execution_ambiguous",
-      executionBoundary: "host_no_sandbox",
+      executionBoundary: "network_egress_host_no_sandbox",
       observation,
     }),
   )
@@ -469,7 +469,7 @@ async function recordUncertainty(
       digest: digest(
         canonicalJson({
           capabilityDigest: facts.capabilityDigest,
-          executionBoundary: "host_no_sandbox",
+          executionBoundary: "network_egress_host_no_sandbox",
           observation: "provider_receipt_missing",
         }),
       ),
