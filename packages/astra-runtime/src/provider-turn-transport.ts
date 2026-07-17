@@ -4,11 +4,14 @@ import type { Socket } from "node:net"
 import { checkServerIdentity as verifyServerIdentity, connect, type PeerCertificate } from "node:tls"
 import {
   executeProviderTurn,
+  trustedObservedProviderTurnAdapterDescriptor,
   untrustedProviderTurnAdapterDescriptor,
   type DurableProviderTurnResult,
   type ExecuteProviderTurnInput,
   type ProviderTurnAdapterExecutionAuthority,
   type ProviderTurnHttpResponseEvidence,
+  type TrustedObservedProviderTurnAdapter,
+  type TrustedObservedProviderTurnAdapterFinishEvent,
   type UntrustedProviderTurnAdapter,
   type UntrustedProviderTurnAdapterFinishEvent,
 } from "./provider-turn-coordinator"
@@ -57,6 +60,14 @@ export type TrustedProviderWireValues = Readonly<{
   body: Uint8Array
 }>
 
+export type TrustedObservedProviderRawResponse = Readonly<{
+  statusCode: number
+  headers: ReadonlyArray<readonly [name: string, value: string]>
+  body: Uint8Array
+}>
+
+export type TrustedObservedProviderCompletion = TrustedObservedProviderTurnAdapterFinishEvent["completion"]
+
 type TrustedProviderHttpResponse = Readonly<{
   body: Uint8Array
   evidence: ProviderTurnHttpResponseEvidence
@@ -64,6 +75,7 @@ type TrustedProviderHttpResponse = Readonly<{
 
 type TrustedProviderTurnBaseDependencies = Readonly<{
   requestApproval: (preview: ProviderTurnPreview) => Promise<"approve" | "reject">
+  onNetworkDispatch?: () => void
   now?: () => number
 }>
 
@@ -75,6 +87,7 @@ type Resolver = (
 type TrustedTransportTestHooks = Readonly<{
   beforeCredentialWrite?: () => Promise<void>
   onConnectAttempt?: () => void
+  onNetworkDispatch?: () => void
 }>
 
 export type TrustedProviderTurnDependencies =
@@ -100,11 +113,51 @@ export function executeProviderTurnWithTrustedTransport(
       : dependencies.mode === "test_only_https_seam"
         ? dependencies.resolver
         : undefined,
-    dependencies.mode === "production_https" ? {} : dependencies,
+    dependencies.mode === "production_https"
+      ? dependencies.onNetworkDispatch
+        ? { onNetworkDispatch: dependencies.onNetworkDispatch }
+        : {}
+      : dependencies,
   )
   return executeProviderTurn(source, {
     requestApproval: dependencies.requestApproval,
     untrustedAdapter: transport,
+    ...(dependencies.now ? { now: dependencies.now } : {}),
+  })
+}
+
+/**
+ * Defers parent credential consumption until the coordinator has persisted
+ * explicit approval and claimed the one-shot dispatch. The trusted parser must
+ * return bounded provider-neutral evidence; the coordinator validates it again
+ * before recording observed completion.
+ */
+export function executeProviderTurnWithTrustedObservedTransport(
+  source: ExecuteProviderTurnInput,
+  resolveWireValues: () => Promise<TrustedProviderWireValues>,
+  parseResponse: (response: TrustedObservedProviderRawResponse) => TrustedObservedProviderCompletion,
+  dependencies: TrustedProviderTurnDependencies,
+): Promise<DurableProviderTurnResult> {
+  assertExecutionMode(source, dependencies.mode)
+  const transport = trustedObservedTransportAdapter(
+    source,
+    resolveWireValues,
+    parseResponse,
+    dependencies.now ?? Date.now,
+    dependencies.mode === "production_https"
+      ? defaultResolver
+      : dependencies.mode === "test_only_https_seam"
+        ? dependencies.resolver
+        : undefined,
+    dependencies.mode === "production_https"
+      ? dependencies.onNetworkDispatch
+        ? { onNetworkDispatch: dependencies.onNetworkDispatch }
+        : {}
+      : dependencies,
+  )
+  return executeProviderTurn(source, {
+    requestApproval: dependencies.requestApproval,
+    trustedAdapter: transport,
     ...(dependencies.now ? { now: dependencies.now } : {}),
   })
 }
@@ -135,6 +188,44 @@ function trustedTransportAdapter(
           ? await executePinnedHttps(adapterRequest, wire, evidence, authority, now, testHooks)
           : await executeLiteralLoopbackHttp(adapterRequest, wire, evidence, authority, now, testHooks)
       return finishEvent(adapterRequest, response, evidence)
+    },
+  }
+}
+
+function trustedObservedTransportAdapter(
+  source: ExecuteProviderTurnInput,
+  resolveWireValues: () => Promise<TrustedProviderWireValues>,
+  parseResponse: (response: TrustedObservedProviderRawResponse) => TrustedObservedProviderCompletion,
+  now: () => number,
+  resolver: Resolver | undefined,
+  testHooks: TrustedTransportTestHooks,
+): TrustedObservedProviderTurnAdapter {
+  return {
+    descriptor: trustedObservedProviderTurnAdapterDescriptor,
+    async execute(adapterRequest, authority) {
+      validateExecutionAuthority(adapterRequest, authority, now())
+      const wire = snapshotWireValues(source, await resolveWireValues())
+      assertRequestBinding(adapterRequest, wire)
+      const evidence =
+        adapterRequest.provider.transportPolicy === "https_only"
+          ? await resolveProviderNetwork(
+              adapterRequest.networkPolicy,
+              now,
+              resolver,
+              Date.parse(authority.transportDeadlineAt),
+            )
+          : loopbackEvidence(adapterRequest.networkPolicy, now())
+      assertBeforeDeadline(authority, now())
+      const response =
+        adapterRequest.provider.transportPolicy === "https_only"
+          ? await executePinnedHttps(adapterRequest, wire, evidence, authority, now, testHooks)
+          : await executeLiteralLoopbackHttp(adapterRequest, wire, evidence, authority, now, testHooks)
+      const completion = parseResponse({
+        statusCode: response.evidence.statusCode,
+        headers: response.evidence.contentType ? [["content-type", response.evidence.contentType]] : [],
+        body: Uint8Array.from(response.body),
+      })
+      return observedFinishEvent(adapterRequest, response, evidence, completion)
     },
   }
 }
@@ -247,6 +338,7 @@ function executeRawHttpRequest(
           if (!(await authority.revalidateBeforeWrite())) throw new Error("Provider transport authority was revoked")
           if (settled) return
           assertBeforeDeadline(authority, now())
+          testHooks.onNetworkDispatch?.()
           connected.setNoDelay(true)
           connected.write(makeRawRequest(adapterRequest, wire))
         } catch {
@@ -597,6 +689,30 @@ function finishEvent(
     httpEvidence: response.evidence,
     finishReason: "other",
     response: response.body,
+  }
+}
+
+function observedFinishEvent(
+  adapterRequest: UntrustedProviderTurnAdapterRequest,
+  response: TrustedProviderHttpResponse,
+  networkEvidence: ProviderTurnNetworkResolutionEvidence,
+  completion: TrustedObservedProviderCompletion,
+): TrustedObservedProviderTurnAdapterFinishEvent {
+  return {
+    type: "provider.observed-completion",
+    requestBinding: {
+      operationID: adapterRequest.operationID,
+      attemptID: adapterRequest.capability.attemptID,
+      capabilityGrantID: adapterRequest.capability.capabilityGrantID,
+      capabilityDigest: adapterRequest.capability.capabilityDigest,
+      expectedOrigin: adapterRequest.expectedOrigin,
+      logicalPayloadDigest: adapterRequest.logicalPayload.digest,
+      logicalPayloadBytes: adapterRequest.logicalPayload.bytes,
+    },
+    finalOrigin: adapterRequest.expectedOrigin,
+    networkEvidence,
+    httpEvidence: response.evidence,
+    completion,
   }
 }
 

@@ -81,6 +81,18 @@ describe("bounded skill inventory", () => {
     })
   })
 
+  test("rejects terminal control characters in skill path segments", async () => {
+    for (const segment of ["line\nbreak", "escape\u001b[2J"]) {
+      const root = await fixture()
+      await skill(root, `.opencode/skills/${segment}/SKILL.md`)
+      expect(await inspectWorkspaceSkills(root)).toMatchObject({
+        status: "blocked",
+        reason: "skill_inventory_unreadable",
+        verification: "not_verified",
+      })
+    }
+  })
+
   test("fails closed on inventory and byte limits", async () => {
     const root = await fixture()
     await skill(root, ".opencode/skill/one/SKILL.md", "one")

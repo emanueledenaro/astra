@@ -8,6 +8,10 @@ import {
   type GitControlInspectionSummary,
 } from "@astra/domain/git-control-inspection"
 import {
+  parseGitUnstageControlRequest,
+  type GitUnstageControlRequest,
+} from "@astra/domain/git-unstage-control"
+import {
   controlledWriteBoundaryLabel,
   controlledWriteNetworkWarning,
   parseControlledWriteDecisionRequest,
@@ -27,12 +31,33 @@ import type {
   ControlledWritePrepareResult as InternalControlledWritePrepareResult,
   ControlledWriteProgress as InternalControlledWriteProgress,
 } from "./controlled-write-control"
+import {
+  parseSkillControlRequest,
+  parseSkillActivationDecisionResult,
+  parseSkillActivationPrepareResult,
+  parseSkillActivationProgress,
+  parseSkillInventoryResult,
+  type SkillActivationDecisionRequest,
+  type SkillActivationDecisionResult,
+  type SkillActivationPrepareResult,
+  type SkillActivationProgress,
+  type SkillControlRequest,
+  type SkillInventoryResult,
+} from "../../astra-domain/src/skill-activation-control"
+import {
+  createAstraSkillActivationRegistration,
+  type AstraSkillActivationControl,
+} from "./skill-activation-control"
+import type { AstraGitUnstageControl } from "./git-unstage-control"
+import { createAstraGitUnstageControlHandler } from "./git-unstage-control-handler"
+import { serveAstraGitUnstageControlRequest } from "./git-unstage-control-server-hook"
 
 const requestLimitBytes = 2_048
 const maximumRequestsPerSession = 1_024
 const maximumObservedEntries = 10_000
 const defaultInspectionTimeoutMs = 30_000
 const defaultControlledWriteTimeoutMs = 60_000
+const defaultSkillActivationTimeoutMs = 60_000
 const socketFilename = "control.sock"
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -46,7 +71,12 @@ type GitInspectRequest = Readonly<{
   token: string
 }>
 
-type ControlRequest = GitInspectRequest | ControlledWritePrepareRequest | ControlledWriteDecisionRequest
+type ControlRequest =
+  | GitInspectRequest
+  | GitUnstageControlRequest
+  | ControlledWritePrepareRequest
+  | ControlledWriteDecisionRequest
+  | SkillControlRequest
 
 export type AstraTuiControlServer = Readonly<{
   socketPath: string
@@ -60,12 +90,15 @@ export type AstraTuiControlServerInput = Readonly<{
   workspaceRoot: string
   sessionID: string
   controlledWriteControl?: AstraControlledWriteControl
+  gitUnstageControl?: AstraGitUnstageControl
+  skillActivationControl?: AstraSkillActivationControl
 }>
 
 export type AstraTuiControlServerDependencies = Readonly<{
   inspectGitWorkspace: (workspaceRoot: string) => Promise<unknown>
   inspectionTimeoutMs?: number
   controlledWriteTimeoutMs?: number
+  skillActivationTimeoutMs?: number
 }>
 
 /**
@@ -92,6 +125,13 @@ export async function startAstraTuiControlServer(
   const pending = new Set<Promise<void>>()
   const usedRequestIDs = new Set<string>()
   const preparedOperations = new Map<string, string>()
+  const preparedSkillOperations = new Map<string, string>()
+  const skillRegistration = input.skillActivationControl
+    ? createAstraSkillActivationRegistration(input.skillActivationControl)
+    : undefined
+  const gitUnstageHandler = input.gitUnstageControl
+    ? createAstraGitUnstageControlHandler({ sessionID: input.sessionID, token, control: input.gitUnstageControl })
+    : undefined
   let activeRequestID: string | undefined
   let cancelActiveInspection: (() => void) | undefined
   let accepting = true
@@ -104,7 +144,20 @@ export async function startAstraTuiControlServer(
 
     const task = receiveRequest(socket)
       .then(async (request) => {
-        if (!accepting || !request || !authorized(request, input.sessionID, token)) {
+        if (!accepting || !request) {
+          socket.end()
+          return
+        }
+        if (isGitUnstageRequest(request)) {
+          if (!gitUnstageHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraGitUnstageControlRequest(socket, request, gitUnstageHandler)
+          return
+        }
+        if (!authorized(request, input.sessionID, token)) {
           socket.end()
           return
         }
@@ -130,6 +183,17 @@ export async function startAstraTuiControlServer(
 
         activeRequestID = request.requestId
         ownedRequestID = request.requestId
+        if (isSkillRequest(request)) {
+          await handleSkillActivationRequest(
+            socket,
+            request,
+            skillRegistration,
+            dependencies.skillActivationTimeoutMs ?? defaultSkillActivationTimeoutMs,
+            preparedSkillOperations,
+          )
+          if (activeRequestID === request.requestId) activeRequestID = undefined
+          return
+        }
         if (request.method !== "git.inspect") {
           await handleControlledWriteRequest(
             socket,
@@ -228,10 +292,14 @@ function parseRequest(input: string): ControlRequest | null {
   if (!input.endsWith("\n") || input.slice(0, -1).includes("\n")) return null
   try {
     const value: unknown = JSON.parse(input.slice(0, -1))
+    const gitUnstage = parseGitUnstageControlRequest(value)
+    if (gitUnstage.ok) return gitUnstage.value
     const prepare = parseControlledWritePrepareRequest(value)
     if (prepare.ok) return prepare.value
     const decision = parseControlledWriteDecisionRequest(value)
     if (decision.ok) return decision.value
+    const skill = parseSkillControlRequest(value)
+    if (skill.ok) return skill.value
     const record = exactRecord(value, ["schemaVersion", "method", "requestId", "sessionID", "token"])
     if (
       !record ||
@@ -260,6 +328,14 @@ function parseRequest(input: string): ControlRequest | null {
 
 function authorized(request: ControlRequest, sessionID: string, token: string) {
   return sameSecret(request.sessionID, sessionID) && sameSecret(request.token, token)
+}
+
+function isGitUnstageRequest(request: ControlRequest): request is GitUnstageControlRequest {
+  return request.method === "git-unstage.prepare" || request.method === "git-unstage.decide"
+}
+
+function isSkillRequest(request: ControlRequest): request is SkillControlRequest {
+  return request.method === "skill.inventory" || request.method === "skill.prepare" || request.method === "skill.decide"
 }
 
 async function handleControlledWriteRequest(
@@ -314,6 +390,137 @@ async function handleControlledWriteRequest(
   socket.end(encodeControlledWriteTerminal(request.requestId, result))
   await operation.settled
   preparedOperations.delete(request.proposalID)
+}
+
+async function handleSkillActivationRequest(
+  socket: Socket,
+  request: SkillControlRequest,
+  registration: ReturnType<typeof createAstraSkillActivationRegistration> | undefined,
+  timeoutMs: number,
+  preparedOperations: Map<string, string>,
+) {
+  if (!registration) {
+    socket.end(encodeSkillTerminal(request.requestId, blockedSkillResult(request, "control_unavailable")))
+    return
+  }
+
+  const operation = runBoundedOperation(
+    () =>
+      registration.handle(stripSkillAuthority(request), (progress) => {
+        const operationID = request.method === "skill.decide" ? preparedOperations.get(request.proposalID) : undefined
+        if (
+          request.method !== "skill.decide" ||
+          !operationID ||
+          progress.requestId !== request.requestId ||
+          progress.proposalID !== request.proposalID ||
+          progress.operationID !== operationID
+        ) return
+        const parsed = parseSkillActivationProgress(progress)
+        if (parsed.ok) void write(socket, encodeSkillProgress(request.requestId, parsed.value))
+      }),
+    timeoutMs,
+  )
+  const bounded = await operation.outcome
+  const result =
+    bounded.status === "complete"
+      ? requirePublicSkillResult(request, bounded.value, preparedOperations)
+      : skillOperationUnavailable(
+          request,
+          preparedOperations,
+          bounded.status === "timed_out" ? "control_response_timed_out" : "control_failed",
+        )
+  if (request.method === "skill.prepare" && result.status === "prepared") {
+    preparedOperations.set(result.preview.proposalID, result.preview.operationID)
+  }
+  socket.end(encodeSkillTerminal(request.requestId, result))
+  await operation.settled
+  if (request.method === "skill.decide") preparedOperations.delete(request.proposalID)
+}
+
+function stripSkillAuthority(request: SkillControlRequest) {
+  if (request.method === "skill.inventory") {
+    return { method: request.method, requestId: request.requestId } as const
+  }
+  if (request.method === "skill.prepare") {
+    return {
+      method: request.method,
+      requestId: request.requestId,
+      inventoryID: request.inventoryID,
+      candidateID: request.candidateID,
+    } as const
+  }
+  return {
+    method: request.method,
+    requestId: request.requestId,
+    proposalID: request.proposalID,
+    decision: request.decision,
+  } as const
+}
+
+function requirePublicSkillResult(
+  request: SkillControlRequest,
+  input: unknown,
+  preparedOperations: Map<string, string>,
+): SkillInventoryResult | SkillActivationPrepareResult | SkillActivationDecisionResult {
+  if (request.method === "skill.inventory") {
+    const parsed = parseSkillInventoryResult(input)
+    return parsed.ok && parsed.value.requestId === request.requestId
+      ? parsed.value
+      : blockedSkillResult(request, "protocol_invalid")
+  }
+  if (request.method === "skill.prepare") {
+    const parsed = parseSkillActivationPrepareResult(input)
+    return parsed.ok && parsed.value.requestId === request.requestId
+      ? parsed.value
+      : blockedSkillResult(request, "protocol_invalid")
+  }
+  const parsed = parseSkillActivationDecisionResult(input)
+  const operationID = preparedOperations.get(request.proposalID)
+  if (
+    parsed.ok &&
+    parsed.value.requestId === request.requestId &&
+    parsed.value.proposalID === request.proposalID &&
+    (!("operationID" in parsed.value) || parsed.value.operationID === operationID)
+  ) return parsed.value
+  return operationID
+    ? skillReconciliation(request, operationID, "durable_state_unavailable")
+    : blockedSkillResult(request, "protocol_invalid")
+}
+
+function skillOperationUnavailable(
+  request: SkillControlRequest,
+  preparedOperations: Map<string, string>,
+  reason: "control_response_timed_out" | "control_failed",
+): SkillInventoryResult | SkillActivationPrepareResult | SkillActivationDecisionResult {
+  if (request.method !== "skill.decide") return blockedSkillResult(request, reason)
+  const operationID = preparedOperations.get(request.proposalID)
+  return operationID
+    ? skillReconciliation(request, operationID, "durable_state_unavailable")
+    : blockedSkillResult(request, "proposal_unknown")
+}
+
+function blockedSkillResult(
+  request: SkillControlRequest,
+  reason: string,
+): SkillInventoryResult | SkillActivationPrepareResult | SkillActivationDecisionResult {
+  const common = { schemaVersion: 1 as const, requestId: request.requestId, status: "blocked" as const, reason }
+  return request.method === "skill.decide" ? { ...common, proposalID: request.proposalID } : common
+}
+
+function skillReconciliation(
+  request: SkillActivationDecisionRequest,
+  operationID: string,
+  reason: "effect_unknown" | "durable_state_unavailable",
+): SkillActivationDecisionResult {
+  return {
+    schemaVersion: 1,
+    requestId: request.requestId,
+    proposalID: request.proposalID,
+    operationID,
+    status: "reconciliation_required",
+    reason,
+    verification: "not_verified",
+  }
 }
 
 function mapPrepareResult(
@@ -656,8 +863,21 @@ function encodeControlledWriteTerminal(
   return JSON.stringify({ schemaVersion: 1, type: "controlled-write.terminal", requestId, result }) + "\n"
 }
 
+function encodeSkillProgress(requestId: string, progress: SkillActivationProgress) {
+  return JSON.stringify({ schemaVersion: 1, type: "skill.progress", requestId, progress }) + "\n"
+}
+
+function encodeSkillTerminal(
+  requestId: string,
+  result: SkillInventoryResult | SkillActivationPrepareResult | SkillActivationDecisionResult,
+) {
+  return JSON.stringify({ schemaVersion: 1, type: "skill.terminal", requestId, result }) + "\n"
+}
+
 function encodeBlockedTerminal(request: ControlRequest, reason: string) {
+  if (isGitUnstageRequest(request)) throw new Error("Git Unstage requests are owned by their dedicated handler")
   if (request.method === "git.inspect") return encodeTerminal(request.requestId, blocked(mapControlBlockReason(reason)))
+  if (isSkillRequest(request)) return encodeSkillTerminal(request.requestId, blockedSkillResult(request, reason))
   if (request.method === "controlled-write.prepare") {
     return encodeControlledWriteTerminal(request.requestId, blockedPrepareResult(request.requestId, reason))
   }

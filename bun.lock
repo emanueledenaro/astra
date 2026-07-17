@@ -103,6 +103,7 @@
         "@astra/git": "workspace:*",
         "@astra/runtime": "workspace:*",
         "@opencode-ai/tui": "workspace:*",
+        "opencode": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "catalog:",

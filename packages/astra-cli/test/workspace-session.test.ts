@@ -109,6 +109,11 @@ test("binds displayed Git inspection to the baseline activated by the next decis
     status: "opened",
     mode: "activate-once",
     repositoryBaseline: { snapshotDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/) },
+    repositoryInspection: {
+      status: "complete",
+      outputDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      reportDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+    },
   })
   expect(views).toEqual([
     { git: "not-inspected", activationAllowed: false },

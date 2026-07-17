@@ -120,7 +120,6 @@ const authority = {
     gitIdentity: { device: "1", inode: "3" },
     indexDigest: digest("b"),
     indexMetadataDigest: digest("c"),
-    indexIdentity: { device: "1", inode: "4", size: 256 },
     head: { kind: "symbolic", symbolicRef: "refs/heads/main", oid: "a".repeat(40) },
     refsDigest: digest("d"),
     worktreeDigest: digest("e"),
@@ -140,13 +139,20 @@ const authority = {
     "/tmp/astra-git-unstage-b31db7fe-cb82-4c7b-9f32-45fe7af4692b/index",
     "/tmp/astra-git-unstage-b31db7fe-cb82-4c7b-9f32-45fe7af4692b/index.lock",
   ],
+  sealedExecutableScratch: {
+    root: "/private/tmp",
+    directoryPrefix: "astra-git-exec-",
+    executableName: "git",
+    lifecycle: "created_after_claim_cleanup_required_before_return",
+    purposes: ["baseline_revalidation", "operation_execution", "post_state_observation", "independent_verification"],
+  },
   scratchCleanup: "required_before_return",
   authorizationConsumption: "durable_operation_kernel_claim_required",
   preserves: { worktree: "required", head: "required", refs: "required", objectStore: "not_observed" },
   network: "not_requested_host_unrestricted",
   splitIndex: {
-    config: "absent",
-    sharedIndexFiles: "absent",
+    config: "validated_after_claim",
+    sharedIndexFiles: "validated_after_claim",
     indexExtension: "rejected_by_baseline",
     invocation: "forced_disabled",
   },
@@ -160,5 +166,7 @@ function digest(seed: string): `sha256:${string}` {
 }
 
 function proposalDigest(value: unknown): `sha256:${string}` {
-  return `sha256:${createHash("sha256").update(`astra.git-unstage-all-preview.v1\0${JSON.stringify(value)}`).digest("hex")}`
+  return `sha256:${createHash("sha256")
+    .update(`astra.git-unstage-all-preview.v1\0${JSON.stringify(value)}`)
+    .digest("hex")}`
 }

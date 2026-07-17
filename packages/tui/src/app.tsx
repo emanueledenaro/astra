@@ -89,6 +89,7 @@ import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 import { inspectAstraSessionAuthority } from "./astra/session-authority"
 import { registerAstraAppFeatures } from "./astra/features"
+import { dispatchRemoteTuiCommand } from "./astra/command-policy"
 
 registerOpencodeSpinner()
 
@@ -1013,8 +1014,13 @@ function App(props: {
   }))
 
   event.on("tui.command.execute", (evt, { workspace }) => {
-    if (workspace !== project.workspace.current()) return
-    keymap.dispatchCommand(evt.properties.command)
+    dispatchRemoteTuiCommand({
+      astraSafeStart: astraSession,
+      eventWorkspace: workspace,
+      currentWorkspace: project.workspace.current(),
+      command: evt.properties.command,
+      dispatch: (command) => keymap.dispatchCommand(command),
+    })
   })
 
   event.on("tui.toast.show", (evt, { workspace }) => {

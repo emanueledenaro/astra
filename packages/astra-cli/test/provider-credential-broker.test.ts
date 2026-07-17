@@ -40,7 +40,7 @@ describe("parent provider credential broker", () => {
     expect(result.grant.providerID).toBe("anthropic")
     expect(result.grant.headerName).toBe("x-api-key")
     expect(result.grant.credentialHandle).toMatch(/^cred_[a-f0-9]{64}$/)
-    expect(result.grant.accountFingerprint).toMatch(/^acct_[a-f0-9]{32}$/)
+    expect(result.grant.accountFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/)
   })
 
   test("rejects OAuth and does not leak auth fields through errors", async () => {

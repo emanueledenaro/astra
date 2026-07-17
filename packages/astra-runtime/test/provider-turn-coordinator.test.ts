@@ -15,9 +15,12 @@ import {
 import {
   executeProviderTurn,
   recoverProviderTurn,
+  trustedObservedProviderTurnAdapterDescriptor,
   untrustedProviderTurnAdapterDescriptor,
   type ExecuteProviderTurnInput,
   type ProviderTurnCoordinatorDependencies,
+  type TrustedObservedProviderTurnAdapter,
+  type TrustedObservedProviderTurnAdapterFinishEvent,
   type UntrustedProviderTurnAdapter,
   type UntrustedProviderTurnAdapterFinishEvent,
 } from "../src/provider-turn-coordinator"
@@ -166,6 +169,68 @@ describe("provider turn Operation coordinator", () => {
     expect(replayed).toEqual(result)
     expect(approvals).toBe(1)
     expect(providerCalls).toBe(1)
+  })
+
+  test("returns a trusted parsed response only after durable observed-completion acknowledgement", async () => {
+    const fixture = await operationInput()
+    const assistantText = "A bounded response"
+    const assistantTextDigest = rawDigest(new TextEncoder().encode(assistantText))
+    const responseBodyDigest = rawDigest(new TextEncoder().encode("private raw SSE"))
+    let adapterCalls = 0
+    const result = await executeProviderTurn(fixture.input, {
+      now: () => fixture.clock,
+      async requestApproval() {
+        return "approve"
+      },
+      trustedAdapter: trustedAdapter({
+        async execute(request) {
+          adapterCalls += 1
+          return trustedFinishEvent(request, {
+            assistantText,
+            assistantTextDigest,
+            responseBodyDigest,
+          })
+        },
+      }),
+    })
+
+    expect(adapterCalls).toBe(1)
+    expect(result).toMatchObject({
+      state: "completed",
+      status: "response_observed_not_verified",
+      response: {
+        assistantText,
+        assistantTextDigest,
+        finishReason: "stop",
+      },
+    })
+    expect(await eventNames(fixture.input)).toEqual([
+      "operation.admitted",
+      "policy.ask",
+      "approval.granted",
+      "dispatch.requested",
+      "executor.accepted",
+      "effect.completed",
+    ])
+    const receipt = (await dispatchSnapshot(fixture.input, makeProviderTurnOperationFacts(fixture.input).dispatchRequestID))
+      ?.receipt
+    expect(receipt).toMatchObject({
+      observation: { kind: "effect_completed", assurance: "observed_not_verified" },
+      verificationContext: { schemaVersion: 3, executionBoundary: "host_no_sandbox" },
+      output: {
+        digest: assistantTextDigest,
+        bytes: Buffer.byteLength(assistantText),
+        preview: "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED",
+      },
+    })
+    expect(JSON.stringify(receipt)).not.toContain(assistantText)
+
+    const recovered = await recoverProviderTurn(fixture.input, { now: () => fixture.clock })
+    expect(recovered).toMatchObject({
+      state: "completed",
+      status: "response_observed_not_verified",
+      response: null,
+    })
   })
 
   test("turns adapter errors and malformed events into durable uncertainty without secret leakage or retry", async () => {
@@ -907,6 +972,39 @@ function finishEvent(
   }
 }
 
+function trustedFinishEvent(
+  request: UntrustedProviderTurnAdapterRequest,
+  input: Readonly<{ assistantText: string; assistantTextDigest: string; responseBodyDigest: string }>,
+): TrustedObservedProviderTurnAdapterFinishEvent {
+  return {
+    type: "provider.observed-completion",
+    requestBinding: {
+      operationID: request.operationID,
+      attemptID: request.capability.attemptID,
+      capabilityGrantID: request.capability.capabilityGrantID,
+      capabilityDigest: request.capability.capabilityDigest,
+      expectedOrigin: request.expectedOrigin,
+      logicalPayloadDigest: request.logicalPayload.digest,
+      logicalPayloadBytes: request.logicalPayload.bytes,
+    },
+    finalOrigin: request.expectedOrigin,
+    networkEvidence: networkEvidence(request),
+    httpEvidence: { statusCode: 200, contentType: "text/event-stream", headerBytes: 64 },
+    completion: {
+      status: "observed_not_verified",
+      finishReason: "stop",
+      assistantText: input.assistantText,
+      evidence: {
+        responseBodyDigest: input.responseBodyDigest,
+        responseBodyBytes: 128,
+        assistantTextDigest: input.assistantTextDigest,
+        assistantTextBytes: Buffer.byteLength(input.assistantText),
+        eventCount: 7,
+      },
+    },
+  }
+}
+
 function networkEvidence(request: UntrustedProviderTurnAdapterRequest) {
   const loopback = request.provider.transportPolicy === "test_only_loopback_http"
   const address = loopback
@@ -929,6 +1027,12 @@ function networkEvidence(request: UntrustedProviderTurnAdapterRequest) {
 
 function untrustedAdapter(adapter: Omit<UntrustedProviderTurnAdapter, "descriptor">): UntrustedProviderTurnAdapter {
   return { descriptor: untrustedProviderTurnAdapterDescriptor, ...adapter }
+}
+
+function trustedAdapter(
+  adapter: Omit<TrustedObservedProviderTurnAdapter, "descriptor">,
+): TrustedObservedProviderTurnAdapter {
+  return { descriptor: trustedObservedProviderTurnAdapterDescriptor, ...adapter }
 }
 
 function malformedAdapter(value: unknown): UntrustedProviderTurnAdapter {

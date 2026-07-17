@@ -48,6 +48,13 @@ export const untrustedProviderTurnAdapterDescriptor = Object.freeze({
   terminalState: "effect_unknown_only",
 } as const)
 
+export const trustedObservedProviderTurnAdapterDescriptor = Object.freeze({
+  trust: "astra_trusted_transport_and_protocol",
+  productionCapable: true,
+  completionAuthority: "observed_not_verified",
+  terminalState: "completed_or_effect_unknown",
+} as const)
+
 export type UntrustedProviderTurnAdapterFinishEvent = Readonly<{
   type: "provider.finish"
   requestBinding: Readonly<{
@@ -64,6 +71,26 @@ export type UntrustedProviderTurnAdapterFinishEvent = Readonly<{
   httpEvidence: ProviderTurnHttpResponseEvidence
   finishReason: "stop" | "length" | "tool_calls" | "content_filter" | "other"
   response: Uint8Array
+}>
+
+export type TrustedObservedProviderTurnAdapterFinishEvent = Readonly<{
+  type: "provider.observed-completion"
+  requestBinding: UntrustedProviderTurnAdapterFinishEvent["requestBinding"]
+  finalOrigin: string
+  networkEvidence: ProviderTurnNetworkResolutionEvidence
+  httpEvidence: ProviderTurnHttpResponseEvidence
+  completion: Readonly<{
+    status: "observed_not_verified"
+    finishReason: "stop" | "length" | "content_filter"
+    assistantText: string
+    evidence: Readonly<{
+      responseBodyDigest: string
+      responseBodyBytes: number
+      assistantTextDigest: string
+      assistantTextBytes: number
+      eventCount: number
+    }>
+  }>
 }>
 
 export type ProviderTurnHttpResponseEvidence = Readonly<{
@@ -91,25 +118,46 @@ export interface UntrustedProviderTurnAdapter {
   ): Promise<UntrustedProviderTurnAdapterFinishEvent>
 }
 
+export interface TrustedObservedProviderTurnAdapter {
+  readonly descriptor: typeof trustedObservedProviderTurnAdapterDescriptor
+  execute(
+    request: UntrustedProviderTurnAdapterRequest,
+    authority: ProviderTurnAdapterExecutionAuthority,
+  ): Promise<TrustedObservedProviderTurnAdapterFinishEvent>
+}
+
 export type ExecuteProviderTurnInput = ProviderTurnOperationFactsInput &
   Readonly<{
     ledgerFilename: string
     spoolFilename: string
   }>
 
-export type ProviderTurnCoordinatorDependencies = Readonly<{
+type ProviderTurnCoordinatorBaseDependencies = Readonly<{
   requestApproval: (preview: ProviderTurnPreview) => Promise<"approve" | "reject">
-  untrustedAdapter: UntrustedProviderTurnAdapter
   now?: () => number
+}>
+
+export type ProviderTurnCoordinatorDependencies =
+  | (ProviderTurnCoordinatorBaseDependencies &
+      Readonly<{ untrustedAdapter: UntrustedProviderTurnAdapter; trustedAdapter?: never }>)
+  | (ProviderTurnCoordinatorBaseDependencies &
+      Readonly<{ trustedAdapter: TrustedObservedProviderTurnAdapter; untrustedAdapter?: never }>)
+
+export type ObservedProviderTurnResponse = Readonly<{
+  assistantText: string
+  assistantTextDigest: ContentDigest
+  assistantTextBytes: number
+  finishReason: "stop" | "length" | "content_filter"
 }>
 
 export type DurableProviderTurnResult = Readonly<{
   operationID: string
-  state: "denied" | "reconciliation_required"
-  status: "denied_without_effect" | "effect_unknown"
+  state: "denied" | "completed" | "reconciliation_required"
+  status: "denied_without_effect" | "response_observed_not_verified" | "effect_unknown"
   sequence: number
   lastCursor: number
   receiptID: string | null
+  response: ObservedProviderTurnResponse | null
   boundaryLabel: typeof providerTurnExecutionBoundaryLabel
 }>
 
@@ -243,9 +291,6 @@ export async function executeProviderTurn(
         () => new Date(now()).toISOString(),
       )
       if (!initialAuthority.allowed) throw new Error("provider turn authority rejected")
-      if (dependencies.untrustedAdapter.descriptor !== untrustedProviderTurnAdapterDescriptor) {
-        throw new Error("untrusted adapter descriptor mismatch")
-      }
       const transportStarted = now()
       const transportDeadline = Math.min(
         Date.parse(facts.authorizationExpiresAt),
@@ -267,8 +312,19 @@ export async function executeProviderTurn(
             now,
           ),
       })
-      const event: unknown = await dependencies.untrustedAdapter.execute(facts.adapterRequest, executionAuthority)
-      observation = normalizeAdapterEvent(event, facts.adapterRequest)
+      if ("trustedAdapter" in dependencies && dependencies.trustedAdapter) {
+        if (dependencies.trustedAdapter.descriptor !== trustedObservedProviderTurnAdapterDescriptor) {
+          throw new Error("trusted adapter descriptor mismatch")
+        }
+        const event: unknown = await dependencies.trustedAdapter.execute(facts.adapterRequest, executionAuthority)
+        observation = normalizeTrustedAdapterEvent(event, facts.adapterRequest)
+      } else {
+        if (dependencies.untrustedAdapter.descriptor !== untrustedProviderTurnAdapterDescriptor) {
+          throw new Error("untrusted adapter descriptor mismatch")
+        }
+        const event: unknown = await dependencies.untrustedAdapter.execute(facts.adapterRequest, executionAuthority)
+        observation = normalizeAdapterEvent(event, facts.adapterRequest)
+      }
     } catch {
       observation = unknownAdapterObservation("adapter_failed_or_malformed")
     }
@@ -287,7 +343,7 @@ export async function executeProviderTurn(
     )
     const ingested = await ingestReceipt(input, facts, receipt, endedAt)
     await acknowledgeReceipt(input.spoolFilename, receipt, ingested.event.eventID, ingested.event.digest)
-    return durableResult(ingested.operation, receipt)
+    return durableResult(ingested.operation, receipt, observedResponse(observation))
   } catch (cause) {
     if (cause instanceof ProviderTurnCoordinationError) throw cause
     throw new ProviderTurnCoordinationError(
@@ -415,6 +471,9 @@ function makeReceipt(
   endedAt: string,
   observation: AdapterObservation,
 ) {
+  if (observation.kind === "completion_observed_trusted") {
+    return makeObservedCompletionReceipt(input, facts, fencingToken, startedAt, endedAt, observation)
+  }
   const observationDigest = digest(
     canonicalJson({
       capabilityDigest: facts.capabilityDigest,
@@ -451,6 +510,63 @@ function makeReceipt(
               providerFinish: observation.finishReason,
             })}`
           : "EFFECT UNKNOWN — PROVIDER TURN REQUIRES RECONCILIATION",
+    },
+  })
+}
+
+function makeObservedCompletionReceipt(
+  input: ExecuteProviderTurnInput,
+  facts: ReturnType<typeof makeProviderTurnOperationFacts>,
+  fencingToken: number,
+  startedAt: string,
+  endedAt: string,
+  observation: Extract<AdapterObservation, { kind: "completion_observed_trusted" }>,
+) {
+  const completionDigest = digest(
+    canonicalJson({
+      capabilityDigest: facts.capabilityDigest,
+      executionBoundary: "network_egress_host_no_sandbox",
+      provider: facts.preview.provider,
+      network: observation.networkEvidence,
+      http: observation.httpEvidence,
+      finishReason: observation.finishReason,
+      responseBodyDigest: observation.responseBodyDigest,
+      responseBodyBytes: observation.responseBodyBytes,
+      assistantTextDigest: observation.assistantTextDigest,
+      assistantTextBytes: observation.assistantTextBytes,
+      eventCount: observation.eventCount,
+    }),
+  )
+  return requireReceipt({
+    receiptID: facts.receiptID,
+    operationID: facts.operationID,
+    attemptID: facts.attemptID,
+    dispatchRequestID: facts.dispatchRequestID,
+    executorClaimID: facts.executorClaimID,
+    capabilityGrantID: facts.capabilityGrantID,
+    capabilityDigest: facts.capabilityDigest,
+    fencingToken,
+    adapter: { identity: providerTurnExecutor, version: "1", digest: providerTurnAdapterDigest },
+    effectClass: "provider_turn",
+    resources: facts.resources,
+    startedAt,
+    endedAt,
+    observation: { kind: "effect_completed", completionDigest, assurance: "observed_not_verified" },
+    verificationContext: {
+      schemaVersion: 3,
+      admittedBaselineDigest: facts.baselineTrustDigest,
+      workspaceIdentity: input.report.identity!,
+      executionBoundary: "host_no_sandbox",
+      observationDigest: completionDigest,
+      limitations: [
+        "Provider response structure was observed but not independently verified.",
+        "Provider processing and semantic correctness were not independently audited.",
+      ],
+    },
+    output: {
+      digest: observation.assistantTextDigest,
+      bytes: observation.assistantTextBytes,
+      preview: "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED",
     },
   })
 }
@@ -630,6 +746,19 @@ async function revalidateBaseline(
 
 type AdapterObservation =
   | Readonly<{
+      kind: "completion_observed_trusted"
+      finishReason: "stop" | "length" | "content_filter"
+      finalOrigin: string
+      networkEvidence: ProviderTurnNetworkResolutionEvidence
+      httpEvidence: ProviderTurnHttpResponseEvidence
+      responseBodyDigest: ContentDigest
+      responseBodyBytes: number
+      assistantText: string
+      assistantTextDigest: ContentDigest
+      assistantTextBytes: number
+      eventCount: number
+    }>
+  | Readonly<{
       kind: "finish_observed_unenforced"
       finishReason: UntrustedProviderTurnAdapterFinishEvent["finishReason"]
       finalOrigin: string
@@ -639,6 +768,108 @@ type AdapterObservation =
       responseBytes: number
     }>
   | Readonly<{ kind: "unknown"; reasonDigest: ContentDigest }>
+
+function normalizeTrustedAdapterEvent(
+  input: unknown,
+  request: UntrustedProviderTurnAdapterRequest,
+): AdapterObservation {
+  try {
+    const event = exactRecord(input, [
+      "type",
+      "requestBinding",
+      "finalOrigin",
+      "networkEvidence",
+      "httpEvidence",
+      "completion",
+    ])
+    if (event.type !== "provider.observed-completion" || event.finalOrigin !== request.expectedOrigin) {
+      return unknownAdapterObservation("trusted_adapter_type_or_origin_mismatch")
+    }
+    requireMatchingRequestBinding(event.requestBinding, request)
+    const networkEvidence = validateProviderTurnResolutionEvidence(event.networkEvidence, request.networkPolicy)
+    const httpEvidence = validateProviderTurnHttpResponseEvidence(event.httpEvidence)
+    if (httpEvidence.statusCode !== 200 || httpEvidence.contentType !== "text/event-stream") {
+      return unknownAdapterObservation("trusted_adapter_http_evidence_rejected")
+    }
+    const completion = exactRecord(event.completion, ["status", "finishReason", "assistantText", "evidence"])
+    if (
+      completion.status !== "observed_not_verified" ||
+      (completion.finishReason !== "stop" &&
+        completion.finishReason !== "length" &&
+        completion.finishReason !== "content_filter") ||
+      typeof completion.assistantText !== "string" ||
+      completion.assistantText.length === 0
+    ) {
+      return unknownAdapterObservation("trusted_adapter_completion_rejected")
+    }
+    const evidence = exactRecord(completion.evidence, [
+      "responseBodyDigest",
+      "responseBodyBytes",
+      "assistantTextDigest",
+      "assistantTextBytes",
+      "eventCount",
+    ])
+    const responseBodyDigest = requireContentDigest(String(evidence.responseBodyDigest))
+    const assistantTextDigest = requireContentDigest(String(evidence.assistantTextDigest))
+    const assistantTextBytes = Buffer.byteLength(completion.assistantText, "utf8")
+    if (
+      typeof evidence.responseBodyBytes !== "number" ||
+      !Number.isSafeInteger(evidence.responseBodyBytes) ||
+      evidence.responseBodyBytes < 1 ||
+      evidence.responseBodyBytes > maximumProviderResponseBytes ||
+      typeof evidence.assistantTextBytes !== "number" ||
+      evidence.assistantTextBytes !== assistantTextBytes ||
+      assistantTextBytes < 1 ||
+      assistantTextBytes > maximumProviderResponseBytes ||
+      assistantTextDigest !==
+        requireContentDigest(`sha256:${createHash("sha256").update(completion.assistantText).digest("hex")}`) ||
+      typeof evidence.eventCount !== "number" ||
+      !Number.isSafeInteger(evidence.eventCount) ||
+      evidence.eventCount < 1 ||
+      evidence.eventCount > 8_192
+    ) {
+      return unknownAdapterObservation("trusted_adapter_completion_evidence_rejected")
+    }
+    return {
+      kind: "completion_observed_trusted",
+      finishReason: completion.finishReason,
+      finalOrigin: event.finalOrigin,
+      networkEvidence,
+      httpEvidence,
+      responseBodyDigest,
+      responseBodyBytes: evidence.responseBodyBytes,
+      assistantText: completion.assistantText,
+      assistantTextDigest,
+      assistantTextBytes,
+      eventCount: evidence.eventCount,
+    }
+  } catch {
+    return unknownAdapterObservation("trusted_adapter_failed_or_malformed")
+  }
+}
+
+function requireMatchingRequestBinding(input: unknown, request: UntrustedProviderTurnAdapterRequest) {
+  const binding = exactRecord(input, [
+    "operationID",
+    "attemptID",
+    "capabilityGrantID",
+    "capabilityDigest",
+    "expectedOrigin",
+    "logicalPayloadDigest",
+    "logicalPayloadBytes",
+  ])
+  if (
+    binding.operationID !== request.operationID ||
+    binding.attemptID !== request.capability.attemptID ||
+    binding.capabilityGrantID !== request.capability.capabilityGrantID ||
+    binding.capabilityDigest !== request.capability.capabilityDigest ||
+    binding.expectedOrigin !== request.expectedOrigin ||
+    binding.logicalPayloadDigest !== request.logicalPayload.digest ||
+    binding.logicalPayloadBytes !== request.logicalPayload.bytes
+  ) {
+    throw new TypeError("Trusted provider completion binding does not match the admitted request")
+  }
+}
 
 /**
  * The generic adapter seam remains untrusted. Even a valid terminal event is
@@ -739,6 +970,16 @@ function unknownAdapterObservation(reason: string): AdapterObservation {
   return { kind: "unknown", reasonDigest: digest(`astra-provider-turn:${reason}:v1`) }
 }
 
+function observedResponse(observation: AdapterObservation): ObservedProviderTurnResponse | null {
+  if (observation.kind !== "completion_observed_trusted") return null
+  return Object.freeze({
+    assistantText: observation.assistantText,
+    assistantTextDigest: observation.assistantTextDigest,
+    assistantTextBytes: observation.assistantTextBytes,
+    finishReason: observation.finishReason,
+  })
+}
+
 function exactRecord(input: unknown, fields: ReadonlyArray<string>): Record<string, unknown> {
   if (typeof input !== "object" || input === null || Array.isArray(input)) throw new TypeError("Expected record")
   const prototype = Object.getPrototypeOf(input)
@@ -754,8 +995,12 @@ function exactRecord(input: unknown, fields: ReadonlyArray<string>): Record<stri
   return Object.fromEntries(fields.map((field) => [field, Reflect.get(input, field)]))
 }
 
-function durableResult(operation: OperationRecord, receipt: OperationReceipt | null): DurableProviderTurnResult {
-  if (operation.state !== "denied" && operation.state !== "reconciliation_required") {
+function durableResult(
+  operation: OperationRecord,
+  receipt: OperationReceipt | null,
+  response: ObservedProviderTurnResponse | null = null,
+): DurableProviderTurnResult {
+  if (operation.state !== "denied" && operation.state !== "completed" && operation.state !== "reconciliation_required") {
     throw new ProviderTurnCoordinationError(
       "recovery_unavailable",
       "The provider turn has not reached a recoverable terminal state",
@@ -764,10 +1009,16 @@ function durableResult(operation: OperationRecord, receipt: OperationReceipt | n
   return {
     operationID: operation.operationID,
     state: operation.state,
-    status: operation.state === "denied" ? "denied_without_effect" : "effect_unknown",
+    status:
+      operation.state === "denied"
+        ? "denied_without_effect"
+        : operation.state === "completed"
+          ? "response_observed_not_verified"
+          : "effect_unknown",
     sequence: operation.sequence,
     lastCursor: operation.lastCursor,
     receiptID: receipt?.receiptID ?? null,
+    response: operation.state === "completed" ? response : null,
     boundaryLabel: providerTurnExecutionBoundaryLabel,
   }
 }

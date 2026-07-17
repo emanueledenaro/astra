@@ -1,25 +1,37 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { createHash } from "node:crypto"
-import { chmod, lstat, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises"
+import { chmod, lstat, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises"
 import { createServer } from "node:net"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import {
   buildGitUnstageAllInvocation,
   captureGitRepositoryBaseline,
   executeGitUnstageAll,
+  GitEphemeralCleanupError,
   inspectGitWorkspace,
   prepareGitUnstageAll,
-  revalidateGitRepositoryBaseline,
   verifyGitUnstageAll,
   type GitUnstageAllDependencies,
   type GitUnstageAllDurableClaim,
   type GitUnstageHostInvocation,
 } from "../src"
-import { defaultGitInspectionLimits, prepareTrustedBinaries, validatePreparedGit } from "../src/inspect"
+import {
+  captureGitRepositoryBaselineWithDependencies,
+  revalidateGitRepositoryBaselineWithDependencies,
+} from "../src/baseline"
+import {
+  defaultGitInspectionLimits,
+  inspectGitWorkspaceWithDependencies,
+  prepareTrustedBinaries,
+  runSandboxedGit,
+  validatePreparedGit,
+  type GitInspectorDependencies,
+} from "../src/inspect"
 
 const roots: Array<string> = []
 const realGit = "/Applications/Xcode.app/Contents/Developer/usr/bin/git"
+const testGitTimeoutMs = 10_000
 
 afterAll(async () => {
   await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })))
@@ -75,9 +87,84 @@ describe("bounded Git unstage adapter", () => {
     expect(Object.keys(invocation.environment).some((name) => name.toLowerCase().includes("proxy"))).toBeFalse()
   })
 
+  test("prepares only from approved facts without a process, filesystem write, or trusted Git preparation", async () => {
+    const fixture = await stagedRepository()
+    const calls = {
+      inspect: 0,
+      captureBaseline: 0,
+      revalidateBaseline: 0,
+      prepareTrustedGit: 0,
+      validateTrustedGit: 0,
+      runHostGit: 0,
+      indexLockAbsent: 0,
+      claimProposal: 0,
+    }
+    const crossed = (key: keyof typeof calls): never => {
+      calls[key]++
+      throw new Error(`Static preparation crossed ${key}`)
+    }
+    const dependencies: GitUnstageAllDependencies = {
+      platform: "darwin",
+      async inspect() {
+        return crossed("inspect")
+      },
+      async captureBaseline() {
+        return crossed("captureBaseline")
+      },
+      async revalidateBaseline() {
+        return crossed("revalidateBaseline")
+      },
+      async prepareTrustedGit() {
+        return crossed("prepareTrustedGit")
+      },
+      async validateTrustedGit() {
+        return crossed("validateTrustedGit")
+      },
+      async runHostGit() {
+        return crossed("runHostGit")
+      },
+      async indexLockAbsent() {
+        return crossed("indexLockAbsent")
+      },
+      async claimProposal() {
+        return crossed("claimProposal")
+      },
+    }
+    const before = await repositoryEffectDigest(fixture.root)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection, dependencies)
+
+    expect(prepared.status).toBe("ready")
+    if (prepared.status !== "ready") throw new Error(prepared.reason)
+    expect(calls).toEqual({
+      inspect: 0,
+      captureBaseline: 0,
+      revalidateBaseline: 0,
+      prepareTrustedGit: 0,
+      validateTrustedGit: 0,
+      runHostGit: 0,
+      indexLockAbsent: 0,
+      claimProposal: 0,
+    })
+    expect(prepared.preview.executableDigest).toBe(fixture.baseline.observer.gitBinaryDigest)
+    expect(prepared.preview.runtimeScratch.startsWith("/private/tmp/astra-git-unstage-")).toBeTrue()
+    expect(prepared.preview.splitIndex).toMatchObject({
+      config: "validated_after_claim",
+      sharedIndexFiles: "validated_after_claim",
+    })
+    expect(prepared.preview.sealedExecutableScratch).toEqual({
+      root: "/private/tmp",
+      directoryPrefix: "astra-git-exec-",
+      executableName: "git",
+      lifecycle: "created_after_claim_cleanup_required_before_return",
+      purposes: ["baseline_revalidation", "operation_execution", "post_state_observation", "independent_verification"],
+    })
+    expect(await exists(prepared.preview.runtimeScratch)).toBeFalse()
+    expect(await repositoryEffectDigest(fixture.root)).toBe(before)
+  }, 20_000)
+
   test("records rejection at the adapter boundary without reads or a process", async () => {
     const fixture = await stagedRepository()
-    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     expect(Object.isFrozen(prepared.preview)).toBeTrue()
     expect(Object.isFrozen(prepared.preview.baseline)).toBeTrue()
@@ -158,7 +245,7 @@ describe("bounded Git unstage adapter", () => {
 
   test("uses a durable claim to block an approved replay after adapter restart", async () => {
     const fixture = await stagedRepository()
-    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     const claimProposal = durableClaimStore()
     const first = await executeGitUnstageAll(
@@ -202,7 +289,7 @@ describe("bounded Git unstage adapter", () => {
 
   test("fails closed without an Operation Kernel durable claim", async () => {
     const fixture = await stagedRepository()
-    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     const before = await repositoryEffectDigest(fixture.root)
 
@@ -221,29 +308,151 @@ describe("bounded Git unstage adapter", () => {
     expect(await exists(prepared.preview.runtimeScratch)).toBeFalse()
   }, 20_000)
 
-  test("rejects configured or materialized split indexes before authorization", async () => {
+  test("reports reconciliation when sealed Git preparation cleanup cannot be proven", async () => {
+    const fixture = await stagedRepository()
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
+    if (prepared.status !== "ready") throw new Error(prepared.reason)
+    let processes = 0
+    const before = await repositoryEffectDigest(fixture.root)
+
+    expect(
+      await executeGitUnstageAll(
+        {
+          preview: prepared.preview,
+          expectedBaseline: fixture.baseline,
+          consent: decision(prepared.preview, "approved"),
+        },
+        productionLikeDependencies({
+          async prepareTrustedGit() {
+            throw new GitEphemeralCleanupError()
+          },
+          async runHostGit() {
+            processes++
+            throw new Error("Cleanup uncertainty must stop before Git execution")
+          },
+        }),
+      ),
+    ).toEqual({ status: "effect_unknown", verification: "not_verified", reason: "trusted_git_cleanup_failed" })
+    expect(processes).toBe(0)
+    expect(await repositoryEffectDigest(fixture.root)).toBe(before)
+    expect(await exists(prepared.preview.runtimeScratch)).toBeFalse()
+  }, 20_000)
+
+  test("reports reconciliation when post-claim baseline scratch cleanup is uncertain", async () => {
+    const fixture = await stagedRepository()
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
+    if (prepared.status !== "ready") throw new Error(prepared.reason)
+    let preparedGit = 0
+
+    expect(
+      await executeGitUnstageAll(
+        {
+          preview: prepared.preview,
+          expectedBaseline: fixture.baseline,
+          consent: decision(prepared.preview, "approved"),
+        },
+        productionLikeDependencies({
+          async revalidateBaseline() {
+            return {
+              status: "blocked",
+              expectedSnapshotDigest: fixture.baseline.snapshotDigest,
+              reason: "git_ephemeral_cleanup_failed",
+            }
+          },
+          async prepareTrustedGit() {
+            preparedGit++
+            throw new Error("Baseline cleanup uncertainty must stop later preparation")
+          },
+        }),
+      ),
+    ).toEqual({ status: "effect_unknown", verification: "not_verified", reason: "trusted_git_cleanup_failed" })
+    expect(preparedGit).toBe(0)
+  }, 20_000)
+
+  test("reports reconciliation when operation scratch cleanup cannot prove absence", async () => {
+    const fixture = await stagedRepository()
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
+    if (prepared.status !== "ready") throw new Error(prepared.reason)
+    const dependencies = productionLikeDependencies({
+      async runHostGit(invocation) {
+        const observation = await runInvocation(invocation)
+        const scratch = dirname(String(invocation.environment.GIT_INDEX_FILE))
+        await rm(scratch, { recursive: true, force: true })
+        await symlink("/private/tmp", scratch)
+        return observation
+      },
+    })
+
+    expect(
+      await executeGitUnstageAll(
+        {
+          preview: prepared.preview,
+          expectedBaseline: fixture.baseline,
+          consent: decision(prepared.preview, "approved"),
+        },
+        dependencies,
+      ),
+    ).toEqual({ status: "effect_unknown", verification: "not_verified", reason: "trusted_git_cleanup_failed" })
+    await rm(prepared.preview.runtimeScratch, { force: true })
+    expect(await exists(prepared.preview.runtimeScratch)).toBeFalse()
+  }, 20_000)
+
+  test("discloses and validates configured or materialized split indexes only after durable authorization", async () => {
     const configured = await stagedRepository()
     await git(configured.root, "config", "core.splitIndex", "false")
-    const configuredBaseline = await captureGitRepositoryBaseline(configured.root)
+    const configuredBaseline = await captureGitRepositoryBaseline(configured.root, { timeoutMs: testGitTimeoutMs })
+    const configuredInspection = await inspectGitWorkspace(configured.root, { timeoutMs: testGitTimeoutMs })
     if (configuredBaseline.status !== "complete") throw new Error(configuredBaseline.reason)
-    expect(await prepareGitUnstageAll(configured.root, configuredBaseline.snapshot)).toEqual({
-      status: "blocked",
-      reason: "split_index_unsupported",
+    if (configuredInspection.status !== "complete") throw new Error(configuredInspection.reason)
+    const configuredPrepared = await prepareGitUnstageAll(
+      configured.root,
+      configuredBaseline.snapshot,
+      configuredInspection,
+    )
+    expect(configuredPrepared.status).toBe("ready")
+    if (configuredPrepared.status !== "ready") throw new Error(configuredPrepared.reason)
+    expect(configuredPrepared.preview.splitIndex).toMatchObject({
+      config: "validated_after_claim",
+      sharedIndexFiles: "validated_after_claim",
     })
+    expect(
+      await executeGitUnstageAll(
+        {
+          preview: configuredPrepared.preview,
+          expectedBaseline: configuredBaseline.snapshot,
+          consent: decision(configuredPrepared.preview, "approved"),
+        },
+        productionLikeDependencies({ runHostGit: runInvocation }),
+      ),
+    ).toEqual({ status: "blocked_without_effect", verification: "not_verified", reason: "split_index_unsupported" })
 
     const materialized = await stagedRepository()
     await writeFile(join(materialized.root, ".git", `sharedindex.${"a".repeat(40)}`), "hostile\n")
-    const materializedBaseline = await captureGitRepositoryBaseline(materialized.root)
+    const materializedBaseline = await captureGitRepositoryBaseline(materialized.root, { timeoutMs: testGitTimeoutMs })
+    const materializedInspection = await inspectGitWorkspace(materialized.root, { timeoutMs: testGitTimeoutMs })
     if (materializedBaseline.status !== "complete") throw new Error(materializedBaseline.reason)
-    expect(await prepareGitUnstageAll(materialized.root, materializedBaseline.snapshot)).toEqual({
-      status: "blocked",
-      reason: "split_index_unsupported",
-    })
+    if (materializedInspection.status !== "complete") throw new Error(materializedInspection.reason)
+    const materializedPrepared = await prepareGitUnstageAll(
+      materialized.root,
+      materializedBaseline.snapshot,
+      materializedInspection,
+    )
+    if (materializedPrepared.status !== "ready") throw new Error(materializedPrepared.reason)
+    expect(
+      await executeGitUnstageAll(
+        {
+          preview: materializedPrepared.preview,
+          expectedBaseline: materializedBaseline.snapshot,
+          consent: decision(materializedPrepared.preview, "approved"),
+        },
+        productionLikeDependencies({ runHostGit: runInvocation }),
+      ),
+    ).toEqual({ status: "blocked_without_effect", verification: "not_verified", reason: "split_index_unsupported" })
   }, 30_000)
 
   test("does not infer an effect from exit zero when post-state observation fails", async () => {
     const fixture = await stagedRepository()
-    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     let processes = 0
     const dependencies = productionLikeDependencies({
@@ -286,7 +495,7 @@ describe("bounded Git unstage adapter", () => {
 
   test("preserves a newly staged change when the approved index changes before installation", async () => {
     const fixture = await stagedRepository()
-    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     const dependencies = productionLikeDependencies({
       async runHostGit(invocation) {
@@ -314,7 +523,7 @@ describe("bounded Git unstage adapter", () => {
 
   test("does not issue a coherent observation when the repository changes inside the observation sandwich", async () => {
     const fixture = await stagedRepository()
-    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     let raced = false
     const dependencies = productionLikeDependencies({
@@ -353,15 +562,21 @@ describe("bounded Git unstage adapter", () => {
     const address = listener.address()
     if (!address || typeof address === "string") throw new Error("The network sentinel did not bind")
     await git(fixture.root, "config", "remote.origin.url", `http://127.0.0.1:${address.port}/repository`)
-    const currentBaseline = await captureGitRepositoryBaseline(fixture.root)
+    const currentBaseline = await captureGitRepositoryBaseline(fixture.root, { timeoutMs: testGitTimeoutMs })
+    const currentInspection = await inspectGitWorkspace(fixture.root, { timeoutMs: testGitTimeoutMs })
     if (currentBaseline.status !== "complete") throw new Error(currentBaseline.reason)
-    const prepared = await prepareGitUnstageAll(fixture.root, currentBaseline.snapshot)
+    if (currentInspection.status !== "complete") throw new Error(currentInspection.reason)
+    const prepared = await prepareGitUnstageAll(fixture.root, currentBaseline.snapshot, currentInspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     const beforeWorktree = await worktreeDigest(fixture.root)
     const beforeHead = await gitText(fixture.root, "rev-parse", "HEAD")
     const beforeRefs = await gitText(fixture.root, "show-ref")
     const beforeReflog = await optionalFile(join(fixture.root, ".git", "logs", "HEAD"))
     const beforeObjects = await directoryDigest(join(fixture.root, ".git", "objects"))
+    const sealedGitPaths: string[] = []
+    const dependencies = productionLikeDependencies({ runHostGit: runInvocation }, (gitPath) =>
+      sealedGitPaths.push(gitPath),
+    )
 
     const execution = await executeGitUnstageAll(
       {
@@ -369,14 +584,16 @@ describe("bounded Git unstage adapter", () => {
         expectedBaseline: currentBaseline.snapshot,
         consent: decision(prepared.preview, "approved"),
       },
-      productionLikeDependencies({ runHostGit: runInvocation }),
+      dependencies,
     )
     expect(execution.status).toBe("effect_observed")
     if (execution.status !== "effect_observed") throw new Error(JSON.stringify(execution))
     expect(execution.verification).toBe("not_verified")
     expect(execution.observation.scratchCleanup).toBe("observed_absent_before_return")
     expect(await exists(prepared.preview.runtimeScratch)).toBeFalse()
-    expect(await verifyGitUnstageAll({ preview: prepared.preview, observation: execution.observation })).toMatchObject({
+    expect(
+      await verifyGitUnstageAll({ preview: prepared.preview, observation: execution.observation }, dependencies),
+    ).toMatchObject({
       status: "verified",
       verification: "independent_post_state",
       limitations: ["host_network_not_isolated", "object_store_not_observed"],
@@ -407,14 +624,21 @@ describe("bounded Git unstage adapter", () => {
     expect(await directoryDigest(join(fixture.root, ".git", "objects"))).toBe(beforeObjects)
     expect(await exists(join(fixture.root, ".git", "index.lock"))).toBeFalse()
     expect(await exists(fixture.sentinel)).toBeFalse()
+    expect(sealedGitPaths.length).toBeGreaterThanOrEqual(8)
+    expect(
+      sealedGitPaths.every((path) => path.startsWith("/private/tmp/astra-git-exec-") && path.endsWith("/git")),
+    ).toBeTrue()
+    expect(
+      (await Promise.all(sealedGitPaths.map((path) => exists(dirname(path))))).every((present) => !present),
+    ).toBeTrue()
     await Bun.sleep(20)
     expect(connections).toBe(0)
     await new Promise<void>((complete) => listener.close(() => complete()))
-  }, 20_000)
+  }, 60_000)
 
   test("marks verification stale when the repository changes inside its observation sandwich", async () => {
     const fixture = await stagedRepository()
-    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline)
+    const prepared = await prepareGitUnstageAll(fixture.root, fixture.baseline, fixture.inspection)
     if (prepared.status !== "ready") throw new Error(prepared.reason)
     const execution = await executeGitUnstageAll(
       {
@@ -445,13 +669,31 @@ describe("bounded Git unstage adapter", () => {
 
 function productionLikeDependencies(
   overrides: Partial<GitUnstageAllDependencies>,
+  onSealedGit?: (gitPath: string) => void,
 ): GitUnstageAllDependencies {
+  const observationDependencies: GitInspectorDependencies = {
+    platform: "darwin",
+    async prepareTrustedBinaries(root, limits, deadline) {
+      const binaries = await prepareTrustedBinaries(root, limits, deadline, "/private/tmp")
+      if (binaries) onSealedGit?.(binaries.gitPath)
+      return binaries
+    },
+    validatePreparedGit,
+    runSandboxedGit,
+  }
   return {
     platform: "darwin",
-    inspect: inspectGitWorkspace,
-    captureBaseline: captureGitRepositoryBaseline,
-    revalidateBaseline: revalidateGitRepositoryBaseline,
-    prepareTrustedGit: (root) => prepareTrustedBinaries(root, defaultGitInspectionLimits),
+    inspect: (root) =>
+      inspectGitWorkspaceWithDependencies(root, { timeoutMs: testGitTimeoutMs }, observationDependencies),
+    captureBaseline: (root) =>
+      captureGitRepositoryBaselineWithDependencies(root, { timeoutMs: testGitTimeoutMs }, observationDependencies),
+    revalidateBaseline: (root, baseline) =>
+      revalidateGitRepositoryBaselineWithDependencies(root, baseline, observationDependencies),
+    async prepareTrustedGit(root) {
+      const binaries = await prepareTrustedBinaries(root, defaultGitInspectionLimits, undefined, "/private/tmp")
+      if (binaries) onSealedGit?.(binaries.gitPath)
+      return binaries
+    },
     validateTrustedGit: (binaries) => validatePreparedGit(binaries, defaultGitInspectionLimits),
     async runHostGit() {
       throw new Error("A process dependency must be supplied by this test")
@@ -523,9 +765,11 @@ async function stagedRepository(withSentinels = false) {
   await writeFile(join(root, "untracked.txt"), "new file\n")
   await git(root, "add", "tracked.txt", "untracked.txt")
   await rm(sentinel, { force: true })
-  const captured = await captureGitRepositoryBaseline(root)
+  const captured = await captureGitRepositoryBaseline(root, { timeoutMs: testGitTimeoutMs })
+  const inspection = await inspectGitWorkspace(root, { timeoutMs: testGitTimeoutMs })
   if (captured.status !== "complete") throw new Error(captured.reason)
-  return { root, baseline: captured.snapshot, sentinel }
+  if (inspection.status !== "complete") throw new Error(inspection.reason)
+  return { root, baseline: captured.snapshot, inspection, sentinel }
 }
 
 async function installMaliciousConfig(root: string, sentinel: string) {

@@ -8,7 +8,7 @@ import { scanWorkspace } from "@astra/runtime/preflight"
 import { astraChildEnvironment, createAstraSessionAuthorityFile, makeAstraTuiLaunchSpec } from "../src/tui-launcher"
 
 test("builds a fail-closed read-only TUI launch", () => {
-  const spec = makeAstraTuiLaunchSpec("/workspace", "read-only", authority, control)
+  const spec = makeAstraTuiLaunchSpec("/workspace", "read-only", authority, control, provider)
   const config = JSON.parse(spec.env.OPENCODE_CONFIG_CONTENT!)
   const permission = JSON.parse(spec.env.OPENCODE_PERMISSION!)
 
@@ -28,6 +28,8 @@ test("builds a fail-closed read-only TUI launch", () => {
     ASTRA_SESSION_AUTHORITY_DIGEST: authority.digest,
     ASTRA_CONTROL_SOCKET: control.socketPath,
     ASTRA_CONTROL_TOKEN: control.token,
+    ASTRA_PROVIDER_SOCKET: provider.socketPath,
+    ASTRA_PROVIDER_TOKEN: provider.token,
   })
   expect(config).toMatchObject({ lsp: false, formatter: false })
   expect(permission).toEqual({ "*": "deny" })
@@ -170,4 +172,9 @@ const authority = {
 const control = {
   socketPath: "/tmp/astra-control.sock",
   token: "x".repeat(43),
+} as const
+
+const provider = {
+  socketPath: "/tmp/astra-provider.sock",
+  token: "y".repeat(43),
 } as const

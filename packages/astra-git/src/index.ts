@@ -1,4 +1,4 @@
-export { inspectGitWorkspace, defaultGitInspectionLimits } from "./inspect"
+export { inspectGitWorkspace, defaultGitInspectionLimits, GitEphemeralCleanupError } from "./inspect"
 export {
   captureGitRepositoryBaseline,
   defaultGitRepositoryBaselineLimits,
@@ -6,6 +6,7 @@ export {
 } from "./baseline"
 export {
   buildGitUnstageAllInvocation,
+  executeClaimedGitUnstageAll,
   executeGitUnstageAll,
   prepareGitUnstageAll,
   verifyGitUnstageAll,

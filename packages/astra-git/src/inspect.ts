@@ -41,6 +41,15 @@ export type ProcessResult =
   | Readonly<{ ok: true; stdout: Uint8Array }>
   | Readonly<{ ok: false; reason: GitInspectionBlockReason; stdout?: Uint8Array; stderr?: Uint8Array }>
 
+export class GitEphemeralCleanupError extends Error {
+  readonly _tag = "GitEphemeralCleanupError"
+
+  constructor() {
+    super("A sealed Git scratch directory could not be proven absent")
+    this.name = this._tag
+  }
+}
+
 export type GitInspectorDependencies = Readonly<{
   platform: string
   prepareTrustedBinaries: (
@@ -89,7 +98,12 @@ export async function inspectGitWorkspaceWithDependencies(
   const initial = await inspectRepositoryBoundary(workspaceRoot, limits, initialDeadline)
   if (!initial.ok) return blocked(root, initial.reason)
   if (performance.now() > initialDeadline) return blocked(root, "boundary_time_limit_exceeded")
-  const binaries = await dependencies.prepareTrustedBinaries(root, limits).catch(() => null)
+  const prepared = await dependencies.prepareTrustedBinaries(root, limits).then(
+    (binaries) => ({ binaries, cleanupUnknown: false }),
+    (error) => ({ binaries: null, cleanupUnknown: error instanceof GitEphemeralCleanupError }),
+  )
+  if (prepared.cleanupUnknown) return blocked(root, "git_ephemeral_cleanup_failed")
+  const binaries = prepared.binaries
   if (!binaries) return blocked(root, "git_binary_untrusted")
 
   let result: GitInspectionResult = blocked(root, "git_process_failed")
@@ -285,6 +299,7 @@ export async function prepareTrustedBinaries(
   workspaceRoot: string,
   limits: GitInspectionLimits,
   deadline?: number,
+  requiredEphemeralParent?: string,
 ): Promise<TrustedBinaries | null> {
   if (deadlinePassed(deadline)) return null
   const developerLink = "/var/db/xcode_select_link"
@@ -303,12 +318,28 @@ export async function prepareTrustedBinaries(
   if (!sandboxPath) return null
   const source = await openTrustedGitSource(sourcePath, limits.maxGitBinaryBytes)
   if (!source) return null
-  try {
-    if (deadlinePassed(deadline)) return null
-    return await sealOpenedGitSource(source.handle, source.size, workspaceRoot, sandboxPath, deadline)
-  } finally {
-    await source.handle.close()
+  const prepared = deadlinePassed(deadline)
+    ? { binaries: null, error: null }
+    : await sealOpenedGitSource(
+        source.handle,
+        source.size,
+        workspaceRoot,
+        sandboxPath,
+        deadline,
+        requiredEphemeralParent,
+      ).then(
+        (binaries) => ({ binaries, error: null }),
+        (error: unknown) => ({ binaries: null, error }),
+      )
+  const sourceClosed = await source.handle.close().then(
+    () => true,
+    () => false,
+  )
+  if (!sourceClosed && prepared.binaries && !(await prepared.binaries.cleanup().catch(() => false))) {
+    throw new GitEphemeralCleanupError()
   }
+  if (prepared.error) throw prepared.error
+  return sourceClosed ? prepared.binaries : null
 }
 
 async function openTrustedGitSource(path: string, maxBytes: number) {
@@ -335,10 +366,11 @@ async function sealOpenedGitSource(
   workspaceRoot: string,
   sandboxPath: string,
   deadline?: number,
+  requiredEphemeralParent?: string,
 ): Promise<TrustedBinaries | null> {
   const owner = process.getuid?.()
   if (owner === undefined) return null
-  const parent = await selectEphemeralParent(workspaceRoot)
+  const parent = await selectEphemeralParent(workspaceRoot, requiredEphemeralParent)
   if (!parent) return null
   const directory = await mkdtemp(join(parent, "astra-git-exec-"))
   const gitPath = join(directory, "git")
@@ -359,7 +391,7 @@ async function sealOpenedGitSource(
       !directoryFacts.isDirectory() ||
       directoryFacts.uid !== owner
     ) {
-      await cleanup()
+      if (!(await cleanup())) throw new GitEphemeralCleanupError()
       return null
     }
     await chmod(directory, 0o500)
@@ -377,7 +409,7 @@ async function sealOpenedGitSource(
       cleanup,
     }
   } catch {
-    await cleanup()
+    if (!(await cleanup())) throw new GitEphemeralCleanupError()
     return null
   }
 }
@@ -495,11 +527,17 @@ async function trustedSystemExecutable(candidate: string) {
   return path
 }
 
-async function selectEphemeralParent(workspaceRoot: string) {
-  for (const candidate of [tmpdir(), "/private/tmp", "/tmp"]) {
+async function selectEphemeralParent(workspaceRoot: string, requiredEphemeralParent?: string) {
+  for (const candidate of requiredEphemeralParent ? [requiredEphemeralParent] : [tmpdir(), "/private/tmp", "/tmp"]) {
     const path = await safeRealpath(candidate)
     const facts = path ? await safeLstat(path) : null
-    if (path && facts?.isDirectory() && !isWithin(workspaceRoot, path)) return path
+    if (
+      path &&
+      (!requiredEphemeralParent || path === resolve(requiredEphemeralParent)) &&
+      facts?.isDirectory() &&
+      !isWithin(workspaceRoot, path)
+    )
+      return path
   }
   return null
 }

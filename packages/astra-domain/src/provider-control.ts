@@ -1,0 +1,480 @@
+export const providerHostExecutionBoundaryLabel = "HOST EXECUTION — NO SANDBOX" as const
+export const providerNetworkExecutionBoundaryLabel =
+  "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX" as const
+export const providerObservedCompletionLabel = "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED" as const
+export const providerControlRequestWireLimitBytes = 6 * 65_536 + 16_384
+export const providerControlResponseWireLimitBytes = 6 * 1_048_576 + 262_144
+
+export type ProviderControlModel = Readonly<{
+  id: string
+  name: string
+  limits: Readonly<{ context: number; input?: number; output: number }>
+}>
+
+export type ProviderControlCatalog = Readonly<{
+  providerID: "anthropic"
+  providerName: string
+  models: ReadonlyArray<ProviderControlModel>
+}>
+
+type ProviderControlRequestBase = Readonly<{
+  schemaVersion: 1
+  requestId: string
+  sessionID: string
+  token: string
+}>
+
+export type ProviderCatalogRequest = ProviderControlRequestBase & Readonly<{ method: "provider.catalog" }>
+
+export type ProviderTurnPrepareRequest = ProviderControlRequestBase &
+  Readonly<{
+    method: "provider.turn.prepare"
+    modelID: string
+    userText: string
+  }>
+
+export type ProviderTurnDecisionRequest = ProviderControlRequestBase &
+  Readonly<{
+    method: "provider.turn.decide"
+    proposalID: string
+    decision: "approve" | "reject"
+  }>
+
+export type ProviderControlRequest = ProviderCatalogRequest | ProviderTurnPrepareRequest | ProviderTurnDecisionRequest
+
+export type ProviderCatalogResult =
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      status: "available"
+      catalog: ProviderControlCatalog
+    }>
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      status: "unavailable"
+      reason: "catalog_unavailable" | "control_unavailable"
+    }>
+
+export type ProviderTurnPreview = Readonly<{
+  proposalID: string
+  operationID: string
+  providerID: "anthropic"
+  modelID: string
+  destination: Readonly<{ method: "POST"; origin: "https://api.anthropic.com"; path: "/v1/messages" }>
+  logicalPayload: Readonly<{ digest: string; bytes: number }>
+  headerNames: ReadonlyArray<string>
+  credential: Readonly<{ accountFingerprint: string; headerName: "x-api-key" }>
+  expiresAt: string
+  hostBoundaryLabel: typeof providerHostExecutionBoundaryLabel
+  networkBoundaryLabel: typeof providerNetworkExecutionBoundaryLabel
+  assurance: "NOT VERIFIED"
+}>
+
+export type ProviderTurnPrepareResult =
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      status: "prepared"
+      preview: ProviderTurnPreview
+    }>
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      status: "blocked"
+      reason:
+        | "read_only"
+        | "catalog_unavailable"
+        | "credential_unavailable"
+        | "model_rejected"
+        | "input_rejected"
+        | "control_busy"
+        | "control_limit_reached"
+        | "workspace_stale"
+        | "control_unavailable"
+    }>
+
+export type ProviderTurnProgress = Readonly<{
+  schemaVersion: 1
+  requestId: string
+  proposalID: string
+  operationID: string
+  status:
+    | "recording_authority"
+    | "authority_claimed"
+    | "network_dispatch"
+    | "response_observed_not_verified"
+    | "receipt_acknowledged"
+}>
+
+export type ProviderTurnDecisionResult =
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      proposalID: string
+      operationID: string
+      status: "denied_without_effect"
+      receiptID: null
+    }>
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      proposalID: string
+      operationID: string
+      status: "response_observed_not_verified"
+      receiptID: string
+      completionLabel: typeof providerObservedCompletionLabel
+      response: Readonly<{
+        assistantText: string
+        assistantTextDigest: string
+        assistantTextBytes: number
+        finishReason: "stop" | "length" | "content_filter"
+      }>
+    }>
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      proposalID: string
+      operationID: string
+      status: "reconciliation_required"
+      receiptID: string | null
+      reason: "effect_unknown" | "client_disconnected_after_approval"
+    }>
+  | Readonly<{
+      schemaVersion: 1
+      requestId: string
+      proposalID: string
+      status: "blocked"
+      reason:
+        | "proposal_unknown"
+        | "proposal_expired"
+        | "proposal_replayed"
+        | "credential_unavailable"
+        | "control_busy"
+        | "control_failed"
+    }>
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+const tokenPattern = /^[A-Za-z0-9_-]{43}$/u
+const digestPattern = /^sha256:[0-9a-f]{64}$/u
+const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
+
+export function parseProviderControlRequest(input: unknown): ProviderControlRequest | null {
+  const base = plainRecord(input)
+  if (!base || base.schemaVersion !== 1 || !uuid(base.requestId) || !uuid(base.sessionID) || !token(base.token)) {
+    return null
+  }
+  if (base.method === "provider.catalog") {
+    if (!exactKeys(base, ["schemaVersion", "method", "requestId", "sessionID", "token"])) return null
+    return base as ProviderCatalogRequest
+  }
+  if (base.method === "provider.turn.prepare") {
+    if (
+      !exactKeys(base, ["schemaVersion", "method", "requestId", "sessionID", "token", "modelID", "userText"]) ||
+      typeof base.modelID !== "string" ||
+      !modelPattern.test(base.modelID) ||
+      typeof base.userText !== "string" ||
+      base.userText.trim().length === 0 ||
+      Buffer.byteLength(base.userText, "utf8") > 65_536
+    ) {
+      return null
+    }
+    return base as ProviderTurnPrepareRequest
+  }
+  if (base.method !== "provider.turn.decide") return null
+  if (
+    !exactKeys(base, ["schemaVersion", "method", "requestId", "sessionID", "token", "proposalID", "decision"]) ||
+    !uuid(base.proposalID) ||
+    (base.decision !== "approve" && base.decision !== "reject")
+  ) {
+    return null
+  }
+  return base as ProviderTurnDecisionRequest
+}
+
+export function parseProviderCatalogResult(input: unknown): ProviderCatalogResult | null {
+  const record = plainRecord(input)
+  if (!record || record.schemaVersion !== 1 || !uuid(record.requestId)) return null
+  if (record.status === "unavailable") {
+    if (!exactKeys(record, ["schemaVersion", "requestId", "status", "reason"])) return null
+    if (record.reason !== "catalog_unavailable" && record.reason !== "control_unavailable") return null
+    return record as ProviderCatalogResult
+  }
+  if (
+    record.status !== "available" ||
+    !exactKeys(record, ["schemaVersion", "requestId", "status", "catalog"])
+  ) {
+    return null
+  }
+  const catalog = parseCatalog(record.catalog)
+  return catalog ? ({ ...record, catalog } as ProviderCatalogResult) : null
+}
+
+export function parseProviderTurnPrepareResult(input: unknown): ProviderTurnPrepareResult | null {
+  const record = plainRecord(input)
+  if (!record || record.schemaVersion !== 1 || !uuid(record.requestId)) return null
+  if (record.status === "blocked") {
+    if (!exactKeys(record, ["schemaVersion", "requestId", "status", "reason"])) return null
+    return prepareBlockReasons.has(String(record.reason)) ? (record as ProviderTurnPrepareResult) : null
+  }
+  if (record.status !== "prepared" || !exactKeys(record, ["schemaVersion", "requestId", "status", "preview"])) {
+    return null
+  }
+  const preview = parsePreview(record.preview)
+  return preview ? ({ ...record, preview } as ProviderTurnPrepareResult) : null
+}
+
+export function parseProviderTurnProgress(input: unknown): ProviderTurnProgress | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, ["schemaVersion", "requestId", "proposalID", "operationID", "status"]) ||
+    record.schemaVersion !== 1 ||
+    !uuid(record.requestId) ||
+    !uuid(record.proposalID) ||
+    !uuid(record.operationID) ||
+    !progressStatuses.has(String(record.status))
+  ) {
+    return null
+  }
+  return record as ProviderTurnProgress
+}
+
+export function parseProviderTurnDecisionResult(input: unknown): ProviderTurnDecisionResult | null {
+  const record = plainRecord(input)
+  if (!record || record.schemaVersion !== 1 || !uuid(record.requestId) || !uuid(record.proposalID)) return null
+  if (record.status === "blocked") {
+    if (!exactKeys(record, ["schemaVersion", "requestId", "proposalID", "status", "reason"])) return null
+    return decisionBlockReasons.has(String(record.reason)) ? (record as ProviderTurnDecisionResult) : null
+  }
+  if (!uuid(record.operationID)) return null
+  if (record.status === "denied_without_effect") {
+    if (!exactKeys(record, ["schemaVersion", "requestId", "proposalID", "operationID", "status", "receiptID"])) {
+      return null
+    }
+    return record.receiptID === null ? (record as ProviderTurnDecisionResult) : null
+  }
+  if (record.status === "reconciliation_required") {
+    if (
+      !exactKeys(record, [
+        "schemaVersion",
+        "requestId",
+        "proposalID",
+        "operationID",
+        "status",
+        "receiptID",
+        "reason",
+      ]) ||
+      (record.receiptID !== null && !uuid(record.receiptID)) ||
+      (record.reason !== "effect_unknown" && record.reason !== "client_disconnected_after_approval")
+    ) {
+      return null
+    }
+    return record as ProviderTurnDecisionResult
+  }
+  if (
+    record.status !== "response_observed_not_verified" ||
+    !exactKeys(record, [
+      "schemaVersion",
+      "requestId",
+      "proposalID",
+      "operationID",
+      "status",
+      "receiptID",
+      "completionLabel",
+      "response",
+    ]) ||
+    !uuid(record.receiptID) ||
+    record.completionLabel !== providerObservedCompletionLabel
+  ) {
+    return null
+  }
+  const response = parseResponse(record.response)
+  return response ? ({ ...record, response } as ProviderTurnDecisionResult) : null
+}
+
+function parseCatalog(input: unknown): ProviderControlCatalog | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, ["providerID", "providerName", "models"]) ||
+    record.providerID !== "anthropic" ||
+    !display(record.providerName) ||
+    !Array.isArray(record.models) ||
+    record.models.length < 1 ||
+    record.models.length > 256
+  ) {
+    return null
+  }
+  const models = record.models.map(parseModel)
+  if (models.some((model) => model === null)) return null
+  const typed = models as ProviderControlModel[]
+  if (typed.some((model, index) => index > 0 && model.id <= typed[index - 1]!.id)) return null
+  return { providerID: "anthropic", providerName: record.providerName, models: typed }
+}
+
+function parseModel(input: unknown): ProviderControlModel | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, ["id", "name", "limits"]) ||
+    typeof record.id !== "string" ||
+    !modelPattern.test(record.id) ||
+    !display(record.name)
+  ) {
+    return null
+  }
+  const limits = plainRecord(record.limits)
+  if (!limits || !exactOptionalInputLimitKeys(limits) || !positive(limits.context) || !positive(limits.output)) {
+    return null
+  }
+  const inputLimit = limits.input
+  if (inputLimit !== undefined && !positive(inputLimit)) return null
+  return {
+    id: record.id,
+    name: record.name,
+    limits: { context: limits.context, ...(inputLimit === undefined ? {} : { input: inputLimit }), output: limits.output },
+  }
+}
+
+function parsePreview(input: unknown): ProviderTurnPreview | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, [
+      "proposalID",
+      "operationID",
+      "providerID",
+      "modelID",
+      "destination",
+      "logicalPayload",
+      "headerNames",
+      "credential",
+      "expiresAt",
+      "hostBoundaryLabel",
+      "networkBoundaryLabel",
+      "assurance",
+    ]) ||
+    !uuid(record.proposalID) ||
+    !uuid(record.operationID) ||
+    record.providerID !== "anthropic" ||
+    typeof record.modelID !== "string" ||
+    !modelPattern.test(record.modelID) ||
+    record.hostBoundaryLabel !== providerHostExecutionBoundaryLabel ||
+    record.networkBoundaryLabel !== providerNetworkExecutionBoundaryLabel ||
+    record.assurance !== "NOT VERIFIED" ||
+    !timestamp(record.expiresAt)
+  ) {
+    return null
+  }
+  const destination = plainRecord(record.destination)
+  const payload = plainRecord(record.logicalPayload)
+  const credential = plainRecord(record.credential)
+  if (
+    !destination ||
+    !exactKeys(destination, ["method", "origin", "path"]) ||
+    destination.method !== "POST" ||
+    destination.origin !== "https://api.anthropic.com" ||
+    destination.path !== "/v1/messages" ||
+    !payload ||
+    !exactKeys(payload, ["digest", "bytes"]) ||
+    !digest(payload.digest) ||
+    !positive(payload.bytes) ||
+    !Array.isArray(record.headerNames) ||
+    record.headerNames.length !== 3 ||
+    record.headerNames.some((name) => typeof name !== "string") ||
+    record.headerNames.join("\0") !== "anthropic-version\0content-type\0x-api-key" ||
+    !credential ||
+    !exactKeys(credential, ["accountFingerprint", "headerName"]) ||
+    typeof credential.accountFingerprint !== "string" ||
+    !digestPattern.test(credential.accountFingerprint) ||
+    credential.headerName !== "x-api-key"
+  ) {
+    return null
+  }
+  return record as ProviderTurnPreview
+}
+
+function parseResponse(input: unknown) {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, ["assistantText", "assistantTextDigest", "assistantTextBytes", "finishReason"]) ||
+    typeof record.assistantText !== "string" ||
+    record.assistantText.length === 0 ||
+    Buffer.byteLength(record.assistantText, "utf8") !== record.assistantTextBytes ||
+    !positive(record.assistantTextBytes) ||
+    record.assistantTextBytes > 1_048_576 ||
+    !digest(record.assistantTextDigest) ||
+    (record.finishReason !== "stop" && record.finishReason !== "length" && record.finishReason !== "content_filter")
+  ) {
+    return null
+  }
+  return record as Extract<ProviderTurnDecisionResult, { status: "response_observed_not_verified" }>["response"]
+}
+
+const prepareBlockReasons = new Set([
+  "read_only",
+  "catalog_unavailable",
+  "credential_unavailable",
+  "model_rejected",
+  "input_rejected",
+  "control_busy",
+  "control_limit_reached",
+  "workspace_stale",
+  "control_unavailable",
+])
+const decisionBlockReasons = new Set([
+  "proposal_unknown",
+  "proposal_expired",
+  "proposal_replayed",
+  "credential_unavailable",
+  "control_busy",
+  "control_failed",
+])
+const progressStatuses = new Set([
+  "recording_authority",
+  "authority_claimed",
+  "network_dispatch",
+  "response_observed_not_verified",
+  "receipt_acknowledged",
+])
+
+function plainRecord(input: unknown): Record<string, unknown> | null {
+  if (typeof input !== "object" || input === null || Array.isArray(input)) return null
+  const prototype = Object.getPrototypeOf(input)
+  return prototype === Object.prototype || prototype === null ? (input as Record<string, unknown>) : null
+}
+
+function exactKeys(input: Record<string, unknown>, keys: ReadonlyArray<string>) {
+  const actual = Reflect.ownKeys(input)
+  return actual.length === keys.length && actual.every((key) => typeof key === "string" && keys.includes(key))
+}
+
+function exactOptionalInputLimitKeys(input: Record<string, unknown>) {
+  return exactKeys(input, ["context", "output"]) || exactKeys(input, ["context", "input", "output"])
+}
+
+function uuid(input: unknown): input is string {
+  return typeof input === "string" && uuidPattern.test(input)
+}
+
+function token(input: unknown): input is string {
+  return typeof input === "string" && tokenPattern.test(input)
+}
+
+function digest(input: unknown): input is string {
+  return typeof input === "string" && digestPattern.test(input)
+}
+
+function timestamp(input: unknown): input is string {
+  return typeof input === "string" && Number.isFinite(Date.parse(input)) && new Date(input).toISOString() === input
+}
+
+function positive(input: unknown): input is number {
+  return typeof input === "number" && Number.isSafeInteger(input) && input > 0
+}
+
+function display(input: unknown): input is string {
+  return typeof input === "string" && input.length > 0 && input.length <= 160 && !/[\u0000-\u001f\u007f]/u.test(input)
+}

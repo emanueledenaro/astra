@@ -226,7 +226,12 @@ async function scanDirectory(state: ScanState, relativeDirectory: string) {
 
   for (const entry of entries) {
     checkDuration(state)
-    if (entry.name.includes("/") || entry.name.includes("\0") || entry.name === "." || entry.name === "..") {
+    if (
+      entry.name.includes("/") ||
+      /[\p{Cc}\p{Cf}]/u.test(entry.name) ||
+      entry.name === "." ||
+      entry.name === ".."
+    ) {
       throw new SkillInventoryBlocked("skill_inventory_unreadable")
     }
     const childRelative = `${relativeDirectory}/${entry.name}`

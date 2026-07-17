@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -10,6 +10,13 @@ import { startAstraTuiControlServer, type AstraTuiControlServer } from "./tui-co
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
 import { createAstraControlledWriteControl } from "./controlled-write-control"
 import { operationLedgerPath, receiptSpoolPath } from "./app-state"
+import { loadParentAnthropicAuthReader, type ParentAnthropicAuthReaderHandle } from "./provider-auth-reader"
+import { readAstraProviderCatalog } from "./provider-catalog"
+import { createAstraProviderControl } from "./provider-control"
+import { startAstraProviderControlServer, type AstraProviderControlServer } from "./provider-control-server"
+import { createParentProviderCredentialBroker } from "./provider-credential-broker"
+import { createAstraSkillActivationControl } from "./skill-activation-control"
+import { createAstraGitUnstageControl } from "./git-unstage-control"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -27,6 +34,7 @@ export type AstraAuthorityFile = Readonly<{
 }>
 
 export type AstraTuiControlReference = Pick<AstraTuiControlServer, "socketPath" | "token">
+export type AstraProviderControlReference = Pick<AstraProviderControlServer, "socketPath" | "token">
 
 type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }>
 
@@ -35,6 +43,7 @@ export function makeAstraTuiLaunchSpec(
   mode: AstraTuiMode,
   authority: Pick<AstraAuthorityFile, "path" | "digest">,
   control: AstraTuiControlReference,
+  provider?: AstraProviderControlReference,
 ): AstraTuiLaunchSpec {
   const opencodePackage = fileURLToPath(new URL("../../opencode", import.meta.url))
   const opencodeEntrypoint = fileURLToPath(new URL("../../opencode/src/index.ts", import.meta.url))
@@ -58,6 +67,9 @@ export function makeAstraTuiLaunchSpec(
       ASTRA_SESSION_AUTHORITY_DIGEST: authority.digest,
       ASTRA_CONTROL_SOCKET: control.socketPath,
       ASTRA_CONTROL_TOKEN: control.token,
+      ...(provider
+        ? { ASTRA_PROVIDER_SOCKET: provider.socketPath, ASTRA_PROVIDER_TOKEN: provider.token }
+        : {}),
       OPENCODE_CLIENT: "astra",
       OPENCODE_CONFIG_CONTENT: config,
       OPENCODE_PERMISSION: JSON.stringify(permission),
@@ -105,6 +117,8 @@ export function astraChildEnvironment(
 export async function launchAstraTui(session: OpenedWorkspace) {
   const authority = await createAstraSessionAuthorityFile(session)
   let control: AstraTuiControlServer | undefined
+  let provider: AstraProviderControlServer | undefined
+  let authReader: ParentAnthropicAuthReaderHandle | undefined
   let child: ReturnType<typeof Bun.spawn> | undefined
   const terminate = (signal: NodeJS.Signals) => {
     if (child && child.exitCode === null) child.kill(signal)
@@ -114,6 +128,15 @@ export async function launchAstraTui(session: OpenedWorkspace) {
   process.once("SIGHUP", onHangup)
   process.once("SIGTERM", onTerminate)
   try {
+    const skillActivationControl = createAstraSkillActivationControl(
+      session,
+      { sessionID: authority.authority.sessionID },
+      {
+        ledgerFilename: operationLedgerPath(),
+        spoolFilename: receiptSpoolPath(),
+        privateRuntimeDirectory: authority.directory,
+      },
+    )
     control = await startAstraTuiControlServer({
       directory: authority.directory,
       workspaceRoot: authority.authority.workspace.root,
@@ -122,8 +145,25 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),
       }),
+      gitUnstageControl: createAstraGitUnstageControl(session, {
+        ledgerFilename: operationLedgerPath(),
+        spoolFilename: receiptSpoolPath(),
+      }),
+      skillActivationControl,
     })
-    const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control)
+    authReader = await loadParentAnthropicAuthReader()
+    const credentialBroker = createParentProviderCredentialBroker({ auth: authReader })
+    provider = await startAstraProviderControlServer({
+      directory: authority.directory,
+      sessionID: authority.authority.sessionID,
+      control: createAstraProviderControl(
+        session,
+        authority.authority.sessionID,
+        { ledgerFilename: operationLedgerPath(), spoolFilename: receiptSpoolPath() },
+        { readCatalog: readAstraProviderCatalog, credentialBroker },
+      ),
+    })
+    const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control, provider)
     child = Bun.spawn([...spec.command], {
       cwd: spec.cwd,
       env: spec.env,
@@ -136,7 +176,15 @@ export async function launchAstraTui(session: OpenedWorkspace) {
     process.off("SIGHUP", onHangup)
     process.off("SIGTERM", onTerminate)
     try {
-      await control?.close()
+      try {
+        try {
+          await provider?.close()
+        } finally {
+          await authReader?.close()
+        }
+      } finally {
+        await control?.close()
+      }
     } finally {
       await rm(authority.directory, { recursive: true, force: true })
     }
@@ -198,7 +246,7 @@ export async function createAstraSessionAuthorityFile(
   const content = JSON.stringify(value)
   const directory = dependencies.createAuthorityDirectory
     ? await dependencies.createAuthorityDirectory()
-    : await mkdtemp(join(tmpdir(), "astra-session-"))
+    : await realpath(await mkdtemp(join(tmpdir(), "astra-session-")))
   const path = join(directory, "authority.json")
   try {
     if (dependencies.writeAuthorityFile) await dependencies.writeAuthorityFile(path, content)

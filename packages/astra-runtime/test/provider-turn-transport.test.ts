@@ -17,6 +17,7 @@ import {
 } from "../src/provider-turn-network-policy"
 import { runWithLedger } from "../src/operation-storage"
 import {
+  executeProviderTurnWithTrustedObservedTransport,
   executeProviderTurnWithTrustedTransport,
   providerTurnTransportTestOnly,
   trustedProviderTurnTransportDescriptor,
@@ -32,6 +33,66 @@ afterAll(async () => {
 })
 
 describe("trusted provider turn transport boundary", () => {
+  test("takes the parent credential only after consent and claim, then durably returns parsed text", async () => {
+    const secret = "parent-only-secret"
+    const body = new TextEncoder().encode('{"input":"private"}')
+    let calls = 0
+    let credentialTakes = 0
+    const server = startServer(() => {
+      calls += 1
+      return new Response("data: terminal\n\n", { headers: { "content-type": "text/event-stream" } })
+    })
+    const input = await operationInput(server.url.origin, body)
+    const result = await executeProviderTurnWithTrustedObservedTransport(
+      input,
+      async () => {
+        credentialTakes += 1
+        expect(await eventNames(input)).toEqual([
+          "operation.admitted",
+          "policy.ask",
+          "approval.granted",
+          "dispatch.requested",
+          "executor.accepted",
+        ])
+        return {
+          body,
+          credential: { ...credentialBinding(), value: secret },
+          headers: [["content-type", "application/json"]],
+        }
+      },
+      (response) => ({
+        status: "observed_not_verified",
+        assistantText: "Hello from Astra",
+        finishReason: "stop",
+        evidence: {
+          responseBodyDigest: rawDigest(response.body),
+          responseBodyBytes: response.body.byteLength,
+          assistantTextDigest: rawDigest(new TextEncoder().encode("Hello from Astra")),
+          assistantTextBytes: Buffer.byteLength("Hello from Astra"),
+          eventCount: 1,
+        },
+      }),
+      {
+        mode: "test_only_loopback",
+        now: () => Date.parse(input.policyAskedAt) + 100,
+        async requestApproval() {
+          expect(credentialTakes).toBe(0)
+          expect(calls).toBe(0)
+          return "approve"
+        },
+      },
+    )
+
+    expect(credentialTakes).toBe(1)
+    expect(calls).toBe(1)
+    expect(result).toMatchObject({
+      state: "completed",
+      status: "response_observed_not_verified",
+      response: { assistantText: "Hello from Astra", finishReason: "stop" },
+    })
+    expect(await eventNames(input)).toContain("effect.completed")
+  })
+
   test("sends exact bytes once and only after durable consent and claim", async () => {
     const secret = "Bearer provider-secret-that-must-not-be-persisted"
     const prompt = "private prompt that must remain outside durable facts"

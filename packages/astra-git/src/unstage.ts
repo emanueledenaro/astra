@@ -1,8 +1,7 @@
 import { createHash, randomUUID } from "node:crypto"
 import { constants } from "node:fs"
 import { chmod, lstat, mkdir, open, opendir, realpath, rename, rm, type FileHandle } from "node:fs/promises"
-import { tmpdir } from "node:os"
-import { join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 import {
   computeGitUnstageAllProposalDigest,
   gitUnstageAllBoundaryLabel,
@@ -19,11 +18,18 @@ import {
   parseGitRepositoryBaselineSnapshot,
   type GitRepositoryBaselineSnapshot,
 } from "@astra/domain/git-repository-baseline"
-import { captureGitRepositoryBaseline, revalidateGitRepositoryBaseline } from "./baseline"
+import {
+  captureGitRepositoryBaseline,
+  captureGitRepositoryBaselineWithDependencies,
+  revalidateGitRepositoryBaseline,
+  revalidateGitRepositoryBaselineWithDependencies,
+} from "./baseline"
 import {
   defaultGitInspectionLimits,
-  inspectGitWorkspace,
+  GitEphemeralCleanupError,
+  inspectGitWorkspaceWithDependencies,
   prepareTrustedBinaries,
+  runSandboxedGit,
   validatePreparedGit,
   type TrustedBinaries,
 } from "./inspect"
@@ -35,6 +41,17 @@ const executionLimits = {
   maxStderrBytes: 16 * 1024,
 } as const
 const authorizationLifetimeMs = 5 * 60 * 1000
+const gitUnstageRuntimeBase = "/private/tmp"
+const unstageObservationDependencies = {
+  platform: process.platform,
+  prepareTrustedBinaries: (
+    workspaceRoot: string,
+    limits: Parameters<typeof prepareTrustedBinaries>[1],
+    deadline?: number,
+  ) => prepareTrustedBinaries(workspaceRoot, limits, deadline, gitUnstageRuntimeBase),
+  validatePreparedGit,
+  runSandboxedGit,
+}
 
 export type GitUnstageAllBlockReason =
   | "unsupported_platform"
@@ -153,10 +170,13 @@ export type GitUnstageAllDurableClaimResult = "claimed" | "already_claimed" | "u
 
 const productionDependencies: GitUnstageAllDependencies = {
   platform: process.platform,
-  inspect: inspectGitWorkspace,
-  captureBaseline: captureGitRepositoryBaseline,
-  revalidateBaseline: revalidateGitRepositoryBaseline,
-  prepareTrustedGit: (workspaceRoot) => prepareTrustedBinaries(workspaceRoot, defaultGitInspectionLimits),
+  inspect: (workspaceRoot) => inspectGitWorkspaceWithDependencies(workspaceRoot, {}, unstageObservationDependencies),
+  captureBaseline: (workspaceRoot) =>
+    captureGitRepositoryBaselineWithDependencies(workspaceRoot, {}, unstageObservationDependencies),
+  revalidateBaseline: (workspaceRoot, baseline) =>
+    revalidateGitRepositoryBaselineWithDependencies(workspaceRoot, baseline, unstageObservationDependencies),
+  prepareTrustedGit: (workspaceRoot) =>
+    prepareTrustedBinaries(workspaceRoot, defaultGitInspectionLimits, undefined, gitUnstageRuntimeBase),
   validateTrustedGit: (binaries) => validatePreparedGit(binaries, defaultGitInspectionLimits),
   runHostGit,
   indexLockAbsent,
@@ -165,37 +185,44 @@ const productionDependencies: GitUnstageAllDependencies = {
   },
 }
 
-/** Prepares an exact index-only operation. This function never executes Git. */
+/** Prepares an exact index-only operation from the already observed Workspace
+ * Gate facts. Preparation is static: it performs no filesystem access, starts
+ * no process, and writes nothing before explicit consent. */
 export async function prepareGitUnstageAll(
   workspaceRoot: string,
   expectedBaseline: GitRepositoryBaselineSnapshot,
+  approvedInspection: Extract<GitInspectionResult, { status: "complete" }>,
   dependencies: GitUnstageAllDependencies = productionDependencies,
 ): Promise<GitUnstageAllPreparationResult> {
   if (dependencies.platform !== "darwin") return blocked("unsupported_platform")
   const baseline = parseExpectedBaseline(workspaceRoot, expectedBaseline)
   if (!baseline.ok) return blocked(baseline.reason)
   if (baseline.value.head.kind === "unborn") return blocked("unborn_head")
-  const current = await dependencies.revalidateBaseline(baseline.value.root.canonicalPath, baseline.value).catch(() => null)
-  if (!current || current.status === "blocked") return blocked("baseline_unavailable")
-  if (current.status !== "current") return blocked("baseline_stale")
-  const inspection = await dependencies.inspect(baseline.value.root.canonicalPath).catch(() => null)
-  if (!inspection || inspection.status !== "complete") return blocked("inspection_unavailable")
+  const inspection = requireApprovedInspection(baseline.value, approvedInspection)
+  if (!inspection) return blocked("inspection_unavailable")
   if (inspection.conflicts.length > 0) return blocked("conflicts_present")
   if (inspection.staged.length < 1) return blocked("nothing_staged")
-  if (!(await dependencies.indexLockAbsent(baseline.value.root.canonicalPath))) return blocked("index_lock_present")
-  const approvedIndex = await inspectIndexFile(baseline.value.root.canonicalPath, baseline.value).catch(() => null)
-  if (!approvedIndex) return blocked("approved_index_changed")
-
-  const binaries = await dependencies.prepareTrustedGit(baseline.value.root.canonicalPath).catch(() => null)
-  if (!binaries) return blocked("trusted_git_unavailable")
-  const prepared = await prepareWithTrustedGit(
+  const nonce = randomUUID()
+  const createdAt = new Date().toISOString()
+  const runtimeScratch = join(gitUnstageRuntimeBase, `astra-git-unstage-${nonce}`)
+  const invocation = buildGitUnstageAllInvocation(
+    "/post-claim/sealed-git",
+    baseline.value.root.canonicalPath,
+    headOID(baseline.value),
+    join(runtimeScratch, "index"),
+  )
+  const authority = makePreviewAuthority(
     baseline.value,
     inspection,
-    approvedIndex,
-    binaries,
-    dependencies,
-  ).catch(() => blocked("trusted_git_changed"))
-  return (await binaries.cleanup().catch(() => false)) ? prepared : blocked("trusted_git_cleanup_failed")
+    baseline.value.observer.gitBinaryDigest,
+    invocation,
+    nonce,
+    createdAt,
+    new Date(Date.parse(createdAt) + authorizationLifetimeMs).toISOString(),
+    runtimeScratch,
+  )
+  const preview = { ...authority, proposalDigest: computeGitUnstageAllProposalDigest(authority) }
+  return { status: "ready", preview: freezePreview(preview) }
 }
 
 /** Executes one exact approved operation. A rejected decision never reaches the process seam. */
@@ -224,7 +251,6 @@ export async function executeGitUnstageAll(
   ) {
     return blockedWithoutEffect("proposal_expired")
   }
-  if (!(await matchesRuntimeScratch(parsed.value))) return blockedWithoutEffect("invalid_input")
   const baseline = parseExpectedBaseline(parsed.value.workspaceRoot, input.expectedBaseline)
   if (!baseline.ok || !previewMatchesBaseline(parsed.value, baseline.value)) {
     return blockedWithoutEffect("invalid_input")
@@ -243,19 +269,41 @@ export async function executeGitUnstageAll(
     .catch(() => "unavailable" as const)
   if (claim === "already_claimed") return blockedWithoutEffect("proposal_consumed")
   if (claim !== "claimed") return blockedWithoutEffect("durable_claim_unavailable")
+  if (!(await matchesRuntimeScratch(parsed.value))) return blockedWithoutEffect("invalid_input")
   const current = await dependencies.revalidateBaseline(parsed.value.workspaceRoot, baseline.value).catch(() => null)
+  if (current?.status === "blocked" && current.reason === "git_ephemeral_cleanup_failed") {
+    return unknown("trusted_git_cleanup_failed")
+  }
   if (!current || current.status === "blocked") return blockedWithoutEffect("baseline_unavailable")
   if (current.status !== "current") return blockedWithoutEffect("baseline_stale")
   if (!(await dependencies.indexLockAbsent(parsed.value.workspaceRoot))) {
     return blockedWithoutEffect("index_lock_present")
   }
 
-  const binaries = await dependencies.prepareTrustedGit(parsed.value.workspaceRoot).catch(() => null)
+  const prepared = await dependencies.prepareTrustedGit(parsed.value.workspaceRoot).then(
+    (binaries) => ({ binaries, cleanupUnknown: false }),
+    (error) => ({ binaries: null, cleanupUnknown: error instanceof GitEphemeralCleanupError }),
+  )
+  if (prepared.cleanupUnknown) return unknown("trusted_git_cleanup_failed")
+  const binaries = prepared.binaries
   if (!binaries) return blockedWithoutEffect("trusted_git_unavailable")
   const result = await executeWithTrustedGit(parsed.value, baseline.value, binaries, dependencies).catch(() =>
     unknown("process_failed"),
   )
   return (await binaries.cleanup().catch(() => false)) ? result : unknown("trusted_git_cleanup_failed")
+}
+
+/** Executes through the production host adapter while delegating the one-shot
+ * authority claim to the durable Operation coordinator. */
+export async function executeClaimedGitUnstageAll(
+  input: Readonly<{
+    preview: GitUnstageAllPreview
+    expectedBaseline: GitRepositoryBaselineSnapshot
+    consent: GitUnstageAllConsent
+  }>,
+  claimProposal: GitUnstageAllDependencies["claimProposal"],
+): Promise<GitUnstageAllExecutionResult> {
+  return executeGitUnstageAll(input, { ...productionDependencies, claimProposal })
 }
 
 async function executeWithTrustedGit(
@@ -266,6 +314,7 @@ async function executeWithTrustedGit(
 ): Promise<GitUnstageAllExecutionResult> {
   if (
     binaries.gitIdentity.digest !== preview.executableDigest ||
+    !matchesSealedExecutableScratch(preview, binaries) ||
     !(await dependencies.validateTrustedGit(binaries))
   ) {
     return blockedWithoutEffect("trusted_git_changed")
@@ -281,6 +330,9 @@ async function executeWithTrustedGit(
   )
   if (!previewMatchesInvocation(preview, invocation)) return blockedWithoutEffect("invalid_input")
   const finalAuthority = await dependencies.revalidateBaseline(preview.workspaceRoot, baseline).catch(() => null)
+  if (finalAuthority?.status === "blocked" && finalAuthority.reason === "git_ephemeral_cleanup_failed") {
+    return unknown("trusted_git_cleanup_failed")
+  }
   if (!finalAuthority || finalAuthority.status === "blocked") return blockedWithoutEffect("baseline_unavailable")
   if (finalAuthority.status !== "current") return blockedWithoutEffect("baseline_stale")
   if (!(await dependencies.validateTrustedGit(binaries))) return blockedWithoutEffect("trusted_git_changed")
@@ -288,11 +340,14 @@ async function executeWithTrustedGit(
     return blockedWithoutEffect("split_index_unsupported")
   }
   const approvedIndex = await inspectIndexFile(preview.workspaceRoot, baseline).catch(() => null)
-  if (!approvedIndex || !sameIndexAuthority(approvedIndex, preview.baseline.indexIdentity)) {
-    return blockedWithoutEffect("approved_index_changed")
-  }
+  if (!approvedIndex) return blockedWithoutEffect("approved_index_changed")
 
-  const scratch = await prepareIsolatedIndex(preview, approvedIndex).catch(() => null)
+  const preparedScratch = await prepareIsolatedIndex(preview, approvedIndex).then(
+    (scratch) => ({ scratch, cleanupUnknown: false }),
+    (error) => ({ scratch: null, cleanupUnknown: error instanceof GitEphemeralCleanupError }),
+  )
+  if (preparedScratch.cleanupUnknown) return unknown("trusted_git_cleanup_failed")
+  const scratch = preparedScratch.scratch
   if (!scratch) return blockedWithoutEffect("runtime_scratch_unavailable")
   let result: GitUnstageAllExecutionResult
   try {
@@ -350,57 +405,6 @@ async function completePreparedExecution(
   }
 }
 
-async function prepareWithTrustedGit(
-  baseline: GitRepositoryBaselineSnapshot,
-  inspection: Extract<GitInspectionResult, { status: "complete" }>,
-  approvedIndex: IndexAuthority,
-  binaries: TrustedBinaries,
-  dependencies: GitUnstageAllDependencies,
-): Promise<GitUnstageAllPreparationResult> {
-  if (!(await dependencies.validateTrustedGit(binaries))) return blocked("trusted_git_changed")
-  if (!(await inspectSplitIndexPolicy(baseline.root.canonicalPath, binaries))) {
-    return blocked("split_index_unsupported")
-  }
-  const finalAuthority = await dependencies
-    .revalidateBaseline(baseline.root.canonicalPath, baseline)
-    .catch(() => null)
-  if (!finalAuthority || finalAuthority.status === "blocked") return blocked("baseline_unavailable")
-  if (finalAuthority.status !== "current") return blocked("baseline_stale")
-  if (!(await dependencies.validateTrustedGit(binaries))) return blocked("trusted_git_changed")
-  if (!(await inspectSplitIndexPolicy(baseline.root.canonicalPath, binaries))) {
-    return blocked("split_index_unsupported")
-  }
-  const finalIndex = await inspectIndexFile(baseline.root.canonicalPath, baseline).catch(() => null)
-  if (!finalIndex || !sameIndexAuthority(approvedIndex, finalIndex)) return blocked("approved_index_changed")
-  const nonce = randomUUID()
-  const createdAt = new Date().toISOString()
-  const runtimeBase = await realpath(tmpdir()).catch(() => null)
-  if (!runtimeBase) return blocked("runtime_scratch_unavailable")
-  const runtimeScratch = join(runtimeBase, `astra-git-unstage-${nonce}`)
-  const invocation = buildGitUnstageAllInvocation(
-    binaries.gitPath,
-    baseline.root.canonicalPath,
-    headOID(baseline),
-    join(runtimeScratch, "index"),
-  )
-  const authority = makePreviewAuthority(
-    baseline,
-    inspection,
-    approvedIndex,
-    binaries.gitIdentity.digest,
-    invocation,
-    nonce,
-    createdAt,
-    new Date(Date.parse(createdAt) + authorizationLifetimeMs).toISOString(),
-    runtimeScratch,
-  )
-  const preview = { ...authority, proposalDigest: computeGitUnstageAllProposalDigest(authority) }
-  return {
-    status: "ready",
-    preview: freezePreview(preview),
-  }
-}
-
 /** Independently recaptures the repository; it never trusts the process exit code. */
 export async function verifyGitUnstageAll(
   input: Readonly<{ preview: GitUnstageAllPreview; observation: GitUnstageAllObservation }>,
@@ -421,10 +425,16 @@ export async function verifyGitUnstageAll(
   if (await pathExists(preview.value.runtimeScratch).catch(() => true)) {
     return verificationBlocked("post_state_mismatch")
   }
-  const binaries = await dependencies.prepareTrustedGit(preview.value.workspaceRoot).catch(() => null)
+  const prepared = await dependencies.prepareTrustedGit(preview.value.workspaceRoot).then(
+    (binaries) => ({ binaries, cleanupUnknown: false }),
+    (error) => ({ binaries: null, cleanupUnknown: error instanceof GitEphemeralCleanupError }),
+  )
+  if (prepared.cleanupUnknown) return verificationBlocked("post_state_unavailable")
+  const binaries = prepared.binaries
   if (!binaries) return verificationBlocked("post_state_unavailable")
   if (
     binaries.gitIdentity.digest !== preview.value.executableDigest ||
+    !matchesSealedExecutableScratch(preview.value, binaries) ||
     !(await dependencies.validateTrustedGit(binaries).catch(() => false))
   ) {
     await binaries.cleanup().catch(() => false)
@@ -607,12 +617,7 @@ async function inspectRegularFile(path: string, maximumBytes: number): Promise<I
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
     const before = await handle.stat({ bigint: true })
     const size = Number(before.size)
-    if (
-      !before.isFile() ||
-      !Number.isSafeInteger(size) ||
-      size < 1 ||
-      size > maximumBytes
-    ) {
+    if (!before.isFile() || !Number.isSafeInteger(size) || size < 1 || size > maximumBytes) {
       return null
     }
     const bytes = await readExact(handle, size)
@@ -673,8 +678,16 @@ function sameIndexAuthority(
 
 async function prepareIsolatedIndex(preview: GitUnstageAllPreview, approvedIndex: IndexAuthority) {
   if (!(await matchesRuntimeScratch(preview)) || (await pathExists(preview.runtimeScratch))) return null
+  const attempt = await createIsolatedIndex(preview, approvedIndex)
+  if (attempt.scratch) return attempt.scratch
+  if (attempt.created && !(await cleanupRuntimeScratch(preview.runtimeScratch))) {
+    throw new GitEphemeralCleanupError()
+  }
+  return null
+}
+
+async function createIsolatedIndex(preview: GitUnstageAllPreview, approvedIndex: IndexAuthority) {
   let created = false
-  let preparedSuccessfully = false
   try {
     await mkdir(preview.runtimeScratch, { mode: 0o700 })
     created = true
@@ -689,7 +702,7 @@ async function prepareIsolatedIndex(preview: GitUnstageAllPreview, approvedIndex
       (directory.mode & 0o777) !== 0o700 ||
       (await realpath(preview.runtimeScratch)) !== preview.runtimeScratch
     ) {
-      return null
+      return { created, scratch: null }
     }
     const indexPath = join(preview.runtimeScratch, "index")
     const handle = await open(
@@ -704,15 +717,12 @@ async function prepareIsolatedIndex(preview: GitUnstageAllPreview, approvedIndex
       await handle.close()
     }
     const prepared = await inspectRegularFile(indexPath, approvedIndex.size)
-    if (!prepared || prepared.digest !== approvedIndex.digest || prepared.size !== approvedIndex.size) return null
-    preparedSuccessfully = true
-    return { indexPath } as const
-  } catch {
-    return null
-  } finally {
-    if (created && !preparedSuccessfully) {
-      await rm(preview.runtimeScratch, { recursive: true, force: true }).catch(() => undefined)
+    if (!prepared || prepared.digest !== approvedIndex.digest || prepared.size !== approvedIndex.size) {
+      return { created, scratch: null }
     }
+    return { created, scratch: { indexPath } as const }
+  } catch {
+    return { created, scratch: null }
   }
 }
 
@@ -731,11 +741,7 @@ async function installPreparedIndex(
   let ownsLock = false
   let installed = false
   try {
-    lock = await open(
-      lockPath,
-      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
-      0o600,
-    )
+    lock = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
     ownsLock = true
     const current = await inspectRegularFile(indexPath, approvedIndex.size)
     if (!current || !sameIndexAuthority(current, approvedIndex)) return false
@@ -807,8 +813,8 @@ async function cleanupRuntimeScratch(runtimeScratch: string) {
 }
 
 async function matchesRuntimeScratch(preview: Pick<GitUnstageAllPreview, "nonce" | "runtimeScratch">) {
-  const base = await realpath(tmpdir()).catch(() => null)
-  return base !== null && preview.runtimeScratch === join(base, `astra-git-unstage-${preview.nonce}`)
+  const base = await realpath(gitUnstageRuntimeBase).catch(() => null)
+  return base === gitUnstageRuntimeBase && preview.runtimeScratch === join(base, `astra-git-unstage-${preview.nonce}`)
 }
 
 async function inspectSplitIndexPolicy(workspaceRoot: string, binaries: TrustedBinaries) {
@@ -989,7 +995,6 @@ function validPostState(
 function makePreviewAuthority(
   baseline: GitRepositoryBaselineSnapshot,
   inspection: Extract<GitInspectionResult, { status: "complete" }>,
-  approvedIndex: IndexAuthority,
   executableDigest: `sha256:${string}`,
   invocation: GitUnstageHostInvocation,
   nonce: string,
@@ -1016,11 +1021,6 @@ function makePreviewAuthority(
       gitIdentity: { device: baseline.gitDirectory.device, inode: baseline.gitDirectory.inode },
       indexDigest: baseline.index.digest,
       indexMetadataDigest: baseline.index.metadataDigest,
-      indexIdentity: {
-        device: approvedIndex.device,
-        inode: approvedIndex.inode,
-        size: approvedIndex.size,
-      },
       head: baseline.head,
       refsDigest: baseline.refs.digest,
       worktreeDigest: baseline.worktree.digest,
@@ -1034,13 +1034,20 @@ function makePreviewAuthority(
     },
     repositoryWrites: [".git/index", ".git/index.lock"],
     scratchWrites: [runtimeScratch, join(runtimeScratch, "index"), join(runtimeScratch, "index.lock")],
+    sealedExecutableScratch: {
+      root: gitUnstageRuntimeBase,
+      directoryPrefix: "astra-git-exec-",
+      executableName: "git",
+      lifecycle: "created_after_claim_cleanup_required_before_return",
+      purposes: ["baseline_revalidation", "operation_execution", "post_state_observation", "independent_verification"],
+    },
     scratchCleanup: "required_before_return",
     authorizationConsumption: "durable_operation_kernel_claim_required",
     preserves: { worktree: "required", head: "required", refs: "required", objectStore: "not_observed" },
     network: "not_requested_host_unrestricted",
     splitIndex: {
-      config: "absent",
-      sharedIndexFiles: "absent",
+      config: "validated_after_claim",
+      sharedIndexFiles: "validated_after_claim",
       indexExtension: "rejected_by_baseline",
       invocation: "forced_disabled",
     },
@@ -1075,12 +1082,22 @@ function previewMatchesInvocation(preview: GitUnstageAllPreview, invocation: Git
   )
 }
 
+function matchesSealedExecutableScratch(preview: GitUnstageAllPreview, binaries: TrustedBinaries) {
+  const directory = dirname(binaries.gitPath)
+  const directoryName = basename(directory)
+  return (
+    dirname(directory) === preview.sealedExecutableScratch.root &&
+    directoryName.startsWith(preview.sealedExecutableScratch.directoryPrefix) &&
+    directoryName.length > preview.sealedExecutableScratch.directoryPrefix.length &&
+    directoryName.length <= preview.sealedExecutableScratch.directoryPrefix.length + 64 &&
+    basename(binaries.gitPath) === preview.sealedExecutableScratch.executableName
+  )
+}
+
 function parseExpectedBaseline(
   workspaceRoot: string,
   input: GitRepositoryBaselineSnapshot,
-):
-  | Readonly<{ ok: true; value: GitRepositoryBaselineSnapshot }>
-  | Readonly<{ ok: false; reason: "invalid_input" }> {
+): Readonly<{ ok: true; value: GitRepositoryBaselineSnapshot }> | Readonly<{ ok: false; reason: "invalid_input" }> {
   const parsed = parseGitRepositoryBaselineSnapshot(input)
   if (!parsed.ok) return { ok: false, reason: "invalid_input" as const }
   if (resolve(workspaceRoot) !== parsed.value.root.canonicalPath) {
@@ -1089,15 +1106,49 @@ function parseExpectedBaseline(
   return { ok: true, value: parsed.value } as const
 }
 
+function requireApprovedInspection(
+  baseline: GitRepositoryBaselineSnapshot,
+  inspection: Extract<GitInspectionResult, { status: "complete" }>,
+) {
+  if (
+    inspection.status !== "complete" ||
+    inspection.mode !== "bounded_read_only" ||
+    inspection.baseline !== "not_captured" ||
+    !Object.is(Reflect.get(inspection, "activationAllowed"), false) ||
+    inspection.verification !== "not_verified" ||
+    inspection.submodules !== "not_inspected" ||
+    inspection.workspaceRoot !== baseline.root.canonicalPath ||
+    !Array.isArray(inspection.staged) ||
+    !Array.isArray(inspection.unstaged) ||
+    !Array.isArray(inspection.untracked) ||
+    !Array.isArray(inspection.conflicts) ||
+    typeof inspection.diff !== "object" ||
+    inspection.diff === null ||
+    !Number.isSafeInteger(inspection.entryCount) ||
+    inspection.entryCount < 0 ||
+    inspection.entryCount > baseline.limits.maxEntries ||
+    !digestValue(inspection.outputDigest) ||
+    !digestValue(inspection.reportDigest) ||
+    inspection.diff.source !== "status_porcelain_v2" ||
+    inspection.diff.format !== "metadata_only" ||
+    inspection.diff.renames !== "disabled" ||
+    inspection.diff.durability !== "ephemeral" ||
+    inspection.diff.verification !== "not_verified" ||
+    inspection.diff.untrackedContent !== "not_inspected" ||
+    inspection.diff.conflictContent !== "not_inspected" ||
+    inspection.diff.observationDigest !== inspection.outputDigest
+  ) {
+    return null
+  }
+  return inspection
+}
+
 function headOID(baseline: GitRepositoryBaselineSnapshot) {
   if (baseline.head.kind === "unborn") throw new TypeError("An unborn HEAD cannot be an unstage source")
   return baseline.head.oid
 }
 
-function sameHead(
-  left: GitRepositoryBaselineSnapshot["head"],
-  right: GitRepositoryBaselineSnapshot["head"],
-) {
+function sameHead(left: GitRepositoryBaselineSnapshot["head"], right: GitRepositoryBaselineSnapshot["head"]) {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
@@ -1130,10 +1181,11 @@ function digest(input: string): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(input).digest("hex")}`
 }
 
-function computeProcessObservationDigest(
-  preview: GitUnstageAllPreview,
-  afterSnapshotDigest: `sha256:${string}`,
-) {
+function digestValue(input: unknown): input is `sha256:${string}` {
+  return typeof input === "string" && /^sha256:[0-9a-f]{64}$/u.test(input)
+}
+
+function computeProcessObservationDigest(preview: GitUnstageAllPreview, afterSnapshotDigest: `sha256:${string}`) {
   return digest(
     `astra.git-unstage-process-observation.v1\0${preview.proposalDigest}\0${afterSnapshotDigest}\0prepared-index-installed\0stdout:0\0stderr:0`,
   )
@@ -1142,13 +1194,14 @@ function computeProcessObservationDigest(
 function freezePreview(preview: GitUnstageAllPreview): GitUnstageAllPreview {
   Object.freeze(preview.baseline.rootIdentity)
   Object.freeze(preview.baseline.gitIdentity)
-  Object.freeze(preview.baseline.indexIdentity)
   Object.freeze(preview.baseline.head)
   Object.freeze(preview.baseline)
   Object.freeze(preview.inspection)
   Object.freeze(preview.invocation)
   Object.freeze(preview.repositoryWrites)
   Object.freeze(preview.scratchWrites)
+  Object.freeze(preview.sealedExecutableScratch.purposes)
+  Object.freeze(preview.sealedExecutableScratch)
   Object.freeze(preview.preserves)
   Object.freeze(preview.splitIndex)
   Object.freeze(preview.limitations)
@@ -1163,7 +1216,9 @@ function blockedWithoutEffect(reason: GitUnstageAllBlockReason): GitUnstageAllEx
   return { status: "blocked_without_effect", verification: "not_verified", reason }
 }
 
-function unknown(reason: Extract<GitUnstageAllExecutionResult, { status: "effect_unknown" }>["reason"]): GitUnstageAllExecutionResult {
+function unknown(
+  reason: Extract<GitUnstageAllExecutionResult, { status: "effect_unknown" }>["reason"],
+): GitUnstageAllExecutionResult {
   return { status: "effect_unknown", verification: "not_verified", reason }
 }
 

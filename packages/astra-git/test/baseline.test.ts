@@ -23,7 +23,11 @@ import {
   defaultGitRepositoryBaselineLimits,
   revalidateGitRepositoryBaseline,
 } from "../src"
-import { captureGitRepositoryBaselineWithHooks } from "../src/baseline"
+import {
+  captureGitRepositoryBaselineWithDependencies,
+  captureGitRepositoryBaselineWithHooks,
+} from "../src/baseline"
+import type { GitInspectorDependencies } from "../src/inspect"
 
 const roots: Array<string> = []
 const realGit = "/Applications/Xcode.app/Contents/Developer/usr/bin/git"
@@ -43,6 +47,44 @@ describe("bounded Git repository baseline", () => {
       maxDurationMs: 60_000,
     })
   })
+
+  test("cleans a sealed Git scratch when the deadline expires immediately after preparation", async () => {
+    const root = await repository()
+    let cleanups = 0
+    const dependencies: GitInspectorDependencies = {
+      platform: "darwin",
+      async prepareTrustedBinaries() {
+        await Bun.sleep(600)
+        return {
+          gitPath: "/private/tmp/astra-git-exec-deadline/git",
+          sandboxPath: "/usr/bin/sandbox-exec",
+          gitIdentity: {
+            device: "1",
+            inode: "2",
+            size: 1,
+            digest: `sha256:${"a".repeat(64)}`,
+            directoryDevice: "1",
+            directoryInode: "3",
+          },
+          async cleanup() {
+            cleanups++
+            return true
+          },
+        }
+      },
+      async validatePreparedGit() {
+        throw new Error("Expired preparation must not be validated")
+      },
+      async runSandboxedGit() {
+        throw new Error("Expired preparation must not execute Git")
+      },
+    }
+
+    expect(
+      await captureGitRepositoryBaselineWithDependencies(root, { maxDurationMs: 500 }, dependencies),
+    ).toMatchObject({ status: "blocked", reason: "content_time_limit_exceeded" })
+    expect(cleanups).toBe(1)
+  }, 5_000)
 
   test("captures deterministically and leaves Git plus worktree bytes unchanged", async () => {
     const root = await repository()

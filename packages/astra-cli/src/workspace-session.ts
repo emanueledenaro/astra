@@ -18,6 +18,7 @@ export type AstraWorkspaceSessionResult =
       mode: "read-only" | "activate-once"
       report: WorkspaceTrustReport
       repositoryBaseline?: GitRepositoryBaselineSnapshot
+      repositoryInspection?: Extract<GitInspectionResult, { status: "complete" }>
     }>
   | Readonly<{ status: "exited"; report: WorkspaceTrustReport }>
 
@@ -43,6 +44,7 @@ export async function openAstraWorkspaceSession(
 ): Promise<AstraWorkspaceSessionResult> {
   let report = await scanWorkspace(await canonicalWorkspacePath(workspace))
   let repositoryBaseline: GitRepositoryBaselineSnapshot | undefined
+  let repositoryInspection: Extract<GitInspectionResult, { status: "complete" }> | undefined
   let git: AstraWorkspaceGateView["git"] = hasGitMetadata(report) ? "not-inspected" : "not-required"
   let state: AstraWorkspaceGateView["state"] = report.completeness === "complete" ? "awaiting-decision" : "blocked"
   let detail: string | undefined
@@ -60,6 +62,7 @@ export async function openAstraWorkspaceSession(
         () => inspectGitBoundary(report, dependencies),
       )
       repositoryBaseline = inspected.baseline
+      repositoryInspection = inspected.inspection
       git = inspected.git
       state = inspected.state
       detail = inspected.detail
@@ -71,6 +74,7 @@ export async function openAstraWorkspaceSession(
       if (!current.matched) {
         report = current.report
         repositoryBaseline = undefined
+        repositoryInspection = undefined
         git = hasGitMetadata(report) ? "stale" : "not-required"
         state = "stale"
         detail = `Workspace changed: ${current.reason.replaceAll("_", " ")}`
@@ -102,6 +106,7 @@ export async function openAstraWorkspaceSession(
     if (!current.matched) {
       report = current.report
       repositoryBaseline = undefined
+      repositoryInspection = undefined
       git = hasGitMetadata(report) ? "stale" : "not-required"
       state = "stale"
       detail = `Workspace changed: ${current.reason.replaceAll("_", " ")}`
@@ -112,17 +117,19 @@ export async function openAstraWorkspaceSession(
     if (!hasGitMetadata(report) && checkWorkspaceActivation(report).allowed) {
       return { status: "opened", mode: "activate-once", report }
     }
-    if (!repositoryBaseline) {
+    if (!repositoryBaseline || !repositoryInspection) {
       state = "blocked"
       git = "not-inspected"
       detail = "Inspect Git before activating this workspace."
       continue
     }
     const inspectedBaseline = repositoryBaseline
+    const inspectedRepository = repositoryInspection
 
     const revalidation = parseGitRepositoryBaselineRevalidationResult(activation.git)
     if (!revalidation.ok) {
       repositoryBaseline = undefined
+      repositoryInspection = undefined
       git = "blocked"
       state = "blocked"
       detail = "Git revalidation failed closed. Inspect Git again."
@@ -130,6 +137,7 @@ export async function openAstraWorkspaceSession(
     }
     if (revalidation.value.status === "blocked") {
       repositoryBaseline = undefined
+      repositoryInspection = undefined
       git = "blocked"
       state = "blocked"
       detail = `Git revalidation was blocked: ${readableReason(revalidation.value.reason)}.`
@@ -141,12 +149,19 @@ export async function openAstraWorkspaceSession(
       revalidation.value.currentSnapshotDigest !== inspectedBaseline.snapshotDigest
     ) {
       repositoryBaseline = undefined
+      repositoryInspection = undefined
       git = "stale"
       state = "stale"
       detail = "Git changed after inspection. Inspect it again before activation."
       continue
     }
-    return { status: "opened", mode: "activate-once", report, repositoryBaseline: inspectedBaseline }
+    return {
+      status: "opened",
+      mode: "activate-once",
+      report,
+      repositoryBaseline: inspectedBaseline,
+      repositoryInspection: inspectedRepository,
+    }
   }
 }
 
@@ -178,6 +193,7 @@ async function inspectGitBoundary(
   dependencies: AstraWorkspaceSessionDependencies,
 ): Promise<{
   baseline?: GitRepositoryBaselineSnapshot
+  inspection?: Extract<GitInspectionResult, { status: "complete" }>
   git: AstraWorkspaceGateView["git"]
   state: AstraWorkspaceGateView["state"]
   detail: string
@@ -229,6 +245,7 @@ async function inspectGitBoundary(
   const changes = inspection.entryCount === 1 ? "1 changed path" : `${inspection.entryCount} changed paths`
   return {
     baseline: captured.value.snapshot,
+    inspection,
     git: "current",
     state: "awaiting-decision",
     detail: `${branch} · ${changes} · metadata only · not verified`,

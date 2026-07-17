@@ -1,7 +1,27 @@
 import { describe, expect, test } from "bun:test"
-import { isAstraSafeStartCommand } from "../../src/astra/command-policy"
+import {
+  allowRemoteTuiCommandDispatch,
+  dispatchRemoteTuiCommand,
+  isAstraSafeStartCommand,
+} from "../../src/astra/command-policy"
 
 describe("Astra Safe Start command policy", () => {
+  test("rejects every remote command dispatch while Safe Start is active", () => {
+    const dispatched: string[] = []
+    expect(allowRemoteTuiCommandDispatch(true)).toBe(false)
+    expect(allowRemoteTuiCommandDispatch(false)).toBe(true)
+    expect(
+      dispatchRemoteTuiCommand({
+        astraSafeStart: true,
+        eventWorkspace: "/workspace",
+        currentWorkspace: "/workspace",
+        command: "astra.write.approve",
+        dispatch: (command) => dispatched.push(command),
+      }),
+    ).toBe(false)
+    expect(dispatched).toEqual([])
+  })
+
   test("keeps the explicitly governed Astra surface available", () => {
     expect(
       [
@@ -15,6 +35,10 @@ describe("Astra Safe Start command policy", () => {
         "astra.write.approve",
         "astra.write.reject",
         "astra.write.close",
+        "astra.skill.open",
+        "astra.skill.inventory",
+        "astra.skill.prepare",
+        "astra.skill.close",
         "app.exit",
         "command.palette.show",
       ].every(isAstraSafeStartCommand),
@@ -38,5 +62,7 @@ describe("Astra Safe Start command policy", () => {
 
   test("does not trust an unreviewed command merely because it uses the Astra prefix", () => {
     expect(isAstraSafeStartCommand("astra.plugin.unreviewed")).toBe(false)
+    expect(isAstraSafeStartCommand("astra.skill.approve")).toBe(false)
+    expect(isAstraSafeStartCommand("astra.skill.reject")).toBe(false)
   })
 })

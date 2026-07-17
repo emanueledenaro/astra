@@ -16,6 +16,7 @@ import { lstat, open, opendir, readlink, realpath } from "node:fs/promises"
 import { join, relative, resolve, sep } from "node:path"
 import {
   inspectRepositoryBoundary,
+  GitEphemeralCleanupError,
   observeGit,
   observeGitRefs,
   prepareTrustedBinaries,
@@ -98,11 +99,12 @@ export async function captureGitRepositoryBaselineWithHooks(
   workspaceRoot: string,
   overrides: Partial<GitRepositoryBaselineLimits>,
   hooks: BaselineHooks,
+  dependencies: GitInspectorDependencies = productionDependencies,
 ): Promise<GitRepositoryBaselineCaptureResult> {
   const root = resolve(workspaceRoot)
   const parsedLimits = parseGitRepositoryBaselineLimits({ ...defaultGitRepositoryBaselineLimits, ...overrides })
   if (!parsedLimits.ok) return blocked(root, "invalid_limits")
-  if (productionDependencies.platform !== "darwin") return blocked(root, "unsupported_platform")
+  if (dependencies.platform !== "darwin") return blocked(root, "unsupported_platform")
 
   const deadline = performance.now() + parsedLimits.value.maxDurationMs
   const initial = await inspectRepositoryBoundary(
@@ -112,18 +114,32 @@ export async function captureGitRepositoryBaselineWithHooks(
   )
   if (!initial.ok) return blocked(root, initial.reason)
   if (performance.now() > deadline) return blocked(root, "content_time_limit_exceeded")
-  const binaries = await productionDependencies
-    .prepareTrustedBinaries(root, parsedLimits.value, deadline)
-    .catch(() => null)
-  if (performance.now() > deadline) return blocked(root, "content_time_limit_exceeded")
+  const prepared = await dependencies.prepareTrustedBinaries(root, parsedLimits.value, deadline).then(
+    (binaries) => ({ binaries, cleanupUnknown: false }),
+    (error) => ({ binaries: null, cleanupUnknown: error instanceof GitEphemeralCleanupError }),
+  )
+  if (prepared.cleanupUnknown) return blocked(root, "git_ephemeral_cleanup_failed")
+  const binaries = prepared.binaries
+  if (performance.now() > deadline) {
+    if (!binaries) return blocked(root, "content_time_limit_exceeded")
+    return (await binaries.cleanup().catch(() => false))
+      ? blocked(root, "content_time_limit_exceeded")
+      : blocked(root, "git_ephemeral_cleanup_failed")
+  }
   if (!binaries) return blocked(root, "git_binary_untrusted")
 
   let result: GitRepositoryBaselineCaptureResult = blocked(root, "git_process_failed")
   let cleanupSucceeded = false
   try {
-    result = await captureWithPreparedGit(root, parsedLimits.value, deadline, initial.identity, binaries, hooks).catch(
-      () => blocked(root, "git_process_failed"),
-    )
+    result = await captureWithPreparedGit(
+      root,
+      parsedLimits.value,
+      deadline,
+      initial.identity,
+      binaries,
+      hooks,
+      dependencies,
+    ).catch(() => blocked(root, "git_process_failed"))
   } finally {
     cleanupSucceeded = await binaries.cleanup().catch(() => false)
   }
@@ -131,9 +147,25 @@ export async function captureGitRepositoryBaselineWithHooks(
   return performance.now() > deadline ? blocked(root, "content_time_limit_exceeded") : result
 }
 
+export async function captureGitRepositoryBaselineWithDependencies(
+  workspaceRoot: string,
+  overrides: Partial<GitRepositoryBaselineLimits>,
+  dependencies: GitInspectorDependencies,
+) {
+  return captureGitRepositoryBaselineWithHooks(workspaceRoot, overrides, {}, dependencies)
+}
+
 export async function revalidateGitRepositoryBaseline(
   workspaceRoot: string,
   expected: GitRepositoryBaselineSnapshot,
+): Promise<GitRepositoryBaselineRevalidationResult> {
+  return revalidateGitRepositoryBaselineWithDependencies(workspaceRoot, expected, productionDependencies)
+}
+
+export async function revalidateGitRepositoryBaselineWithDependencies(
+  workspaceRoot: string,
+  expected: GitRepositoryBaselineSnapshot,
+  dependencies: GitInspectorDependencies,
 ): Promise<GitRepositoryBaselineRevalidationResult> {
   const expectedDigest = digestValue(expected?.snapshotDigest) ? expected.snapshotDigest : null
   if ((expected as { schemaVersion?: unknown })?.schemaVersion !== 1) {
@@ -148,8 +180,7 @@ export async function revalidateGitRepositoryBaseline(
       reason: "adapter_policy_changed",
     }
   }
-
-  const current = await captureGitRepositoryBaseline(workspaceRoot, parsed.value.limits)
+  const current = await captureGitRepositoryBaselineWithDependencies(workspaceRoot, parsed.value.limits, dependencies)
   if (current.status === "blocked") {
     return { status: "blocked", expectedSnapshotDigest: parsed.value.snapshotDigest, reason: current.reason }
   }
@@ -167,13 +198,14 @@ async function captureWithPreparedGit(
   initialIdentity: RepositoryIdentity,
   binaries: TrustedBinaries,
   hooks: BaselineHooks,
+  dependencies: GitInspectorDependencies,
 ): Promise<GitRepositoryBaselineCaptureResult> {
   await hooks.afterInitialBoundary?.()
   const firstConfig = await inspectLocalGitConfig(root, limits, deadline, hooks)
   if (!firstConfig.ok) return blocked(root, firstConfig.reason)
   await hooks.afterConfigPreflight?.()
   if (performance.now() > deadline) return blocked(root, "content_time_limit_exceeded")
-  const firstGit = await observeAllGit(root, limits, binaries, deadline)
+  const firstGit = await observeAllGit(root, limits, binaries, deadline, dependencies)
   if (!firstGit.ok) return blocked(root, firstGit.reason)
   const firstParsed = parseObservation(firstGit, limits.maxEntries)
   if (!firstParsed.ok) return blocked(root, firstParsed.reason)
@@ -192,7 +224,7 @@ async function captureWithPreparedGit(
   if (!secondConfig.ok) return blocked(root, secondConfig.reason)
   await hooks.afterConfigPreflight?.()
   if (performance.now() > deadline) return blocked(root, "content_time_limit_exceeded")
-  const secondGit = await observeAllGit(root, limits, binaries, deadline)
+  const secondGit = await observeAllGit(root, limits, binaries, deadline, dependencies)
   if (!secondGit.ok) return blocked(root, secondGit.reason)
   const secondParsed = parseObservation(secondGit, limits.maxEntries)
   if (!secondParsed.ok) return blocked(root, secondParsed.reason)
@@ -290,13 +322,19 @@ async function captureWithPreparedGit(
   return { status: "complete", snapshot }
 }
 
-async function observeAllGit(root: string, limits: GitInspectionLimits, binaries: TrustedBinaries, deadline: number) {
-  const observation = await observeGit(productionDependencies, binaries, root, limits, deadline).catch(
+async function observeAllGit(
+  root: string,
+  limits: GitInspectionLimits,
+  binaries: TrustedBinaries,
+  deadline: number,
+  dependencies: GitInspectorDependencies,
+) {
+  const observation = await observeGit(dependencies, binaries, root, limits, deadline).catch(
     () => ({ ok: false, reason: "git_process_failed" }) as const,
   )
   if (performance.now() > deadline) return { ok: false, reason: "content_time_limit_exceeded" } as const
   if (!observation.ok) return observation
-  const refs = await observeGitRefs(productionDependencies, binaries, root, limits, deadline).catch(
+  const refs = await observeGitRefs(dependencies, binaries, root, limits, deadline).catch(
     () => ({ ok: false, reason: "git_process_failed" }) as const,
   )
   if (performance.now() > deadline) return { ok: false, reason: "content_time_limit_exceeded" } as const

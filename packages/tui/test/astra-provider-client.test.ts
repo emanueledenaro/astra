@@ -1,0 +1,230 @@
+import { afterAll, expect, test } from "bun:test"
+import { createHash } from "node:crypto"
+import { mkdtemp, rm } from "node:fs/promises"
+import { createServer, type Server, type Socket } from "node:net"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { AstraControlClientError } from "../src/astra/control-client"
+import { createAstraProviderClient } from "../src/astra/provider-client"
+
+const roots: string[] = []
+const servers: Server[] = []
+
+afterAll(async () => {
+  await Promise.all(servers.map(closeServer))
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })))
+})
+
+test("provider client accepts only correlated catalog, preview, progress, and observed response", async () => {
+  const fixture = await startFixture((socket, request) => {
+    accepted(socket, request.requestId)
+    if (request.method === "provider.catalog") return terminal(socket, catalogResult(request.requestId))
+    if (request.method === "provider.turn.prepare") return terminal(socket, prepareResult(request.requestId))
+    for (const status of progressOrder) progress(socket, request.requestId, status)
+    terminal(socket, completionResult(request.requestId))
+  })
+  const client = createAstraProviderClient(fixture.environment, sessionID)
+  const catalog = await client.catalog()
+  expect(catalog).toMatchObject({ status: "available", catalog: { providerID: "anthropic" } })
+  const prepared = await client.prepare(modelID, "private prompt")
+  expect(prepared.status).toBe("prepared")
+  if (prepared.status !== "prepared") throw new Error("Expected prepared fixture")
+  const observed: string[] = []
+  const result = await client.decide(prepared.preview.proposalID, "approve", {
+    onProgress(event) {
+      observed.push(event.status)
+    },
+  })
+
+  expect(observed).toEqual([...progressOrder])
+  expect(result).toMatchObject({
+    status: "response_observed_not_verified",
+    completionLabel: "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED",
+    response: { assistantText: "Hello Astra" },
+  })
+  client.dispose()
+})
+
+test("provider client rejects a forged response digest and a post-approval disconnect", async () => {
+  const forged = await startFixture((socket, request) => {
+    accepted(socket, request.requestId)
+    if (request.method === "provider.turn.prepare") return terminal(socket, prepareResult(request.requestId))
+    for (const status of progressOrder) progress(socket, request.requestId, status)
+    terminal(socket, {
+      ...completionResult(request.requestId),
+      response: { ...completionResult(request.requestId).response, assistantTextDigest: digest("forged") },
+    })
+  })
+  const forgedClient = createAstraProviderClient(forged.environment, sessionID)
+  const prepared = await forgedClient.prepare(modelID, "private")
+  if (prepared.status !== "prepared") throw new Error("Expected prepared fixture")
+  expect(await forgedClient.decide(prepared.preview.proposalID, "approve").catch((error) => error)).toMatchObject({
+    code: "protocol_invalid",
+  })
+
+  const disconnected = await startFixture((socket, request) => {
+    accepted(socket, request.requestId)
+    if (request.method === "provider.turn.prepare") return terminal(socket, prepareResult(request.requestId))
+    progress(socket, request.requestId, "recording_authority")
+    socket.destroy()
+  })
+  const disconnectedClient = createAstraProviderClient(disconnected.environment, sessionID)
+  const second = await disconnectedClient.prepare(modelID, "private")
+  if (second.status !== "prepared") throw new Error("Expected prepared fixture")
+  expect(await disconnectedClient.decide(second.preview.proposalID, "approve").catch((error) => error)).toMatchObject({
+    code: "transport_failed",
+  })
+})
+
+test("provider client fails closed without a private provider socket", async () => {
+  const client = createAstraProviderClient({}, sessionID)
+  const error = await client.catalog().catch((cause) => cause)
+  expect(error).toBeInstanceOf(AstraControlClientError)
+  expect(error).toMatchObject({ code: "unavailable" })
+})
+
+test("provider client preserves domain-valid escape-heavy request and response frames", async () => {
+  const escapedPrompt = "\u0001".repeat(65_536)
+  const escapedResponse = "\u0001".repeat(300_000)
+  const fixture = await startFixture((socket, request) => {
+    accepted(socket, request.requestId)
+    if (request.method === "provider.turn.prepare") {
+      expect(request.userText).toBe(escapedPrompt)
+      return terminal(socket, prepareResult(request.requestId))
+    }
+    for (const status of progressOrder) progress(socket, request.requestId, status)
+    terminal(socket, completionResult(request.requestId, escapedResponse))
+  })
+  const client = createAstraProviderClient(fixture.environment, sessionID)
+  const prepared = await client.prepare(modelID, escapedPrompt)
+  if (prepared.status !== "prepared") throw new Error("Expected prepared fixture")
+  const result = await client.decide(prepared.preview.proposalID, "approve")
+
+  expect(Buffer.byteLength(JSON.stringify(escapedResponse))).toBeGreaterThan(1_200_000)
+  expect(result).toMatchObject({
+    status: "response_observed_not_verified",
+    response: { assistantText: escapedResponse, assistantTextBytes: escapedResponse.length },
+  })
+})
+
+const sessionID = "10000000-0000-4000-8000-000000000001"
+const requestToken = "a".repeat(43)
+const proposalID = "20000000-0000-4000-8000-000000000002"
+const operationID = "30000000-0000-4000-8000-000000000003"
+const receiptID = "40000000-0000-4000-8000-000000000004"
+const modelID = "claude-sonnet-4-5-20250929"
+const progressOrder = [
+  "recording_authority",
+  "authority_claimed",
+  "network_dispatch",
+  "response_observed_not_verified",
+  "receipt_acknowledged",
+] as const
+
+async function startFixture(handler: (socket: Socket, request: Record<string, string>) => void) {
+  const root = await mkdtemp(join(tmpdir(), "astra-provider-client-"))
+  roots.push(root)
+  const socketPath = join(root, "provider.sock")
+  const server = createServer((socket) => readRequest(socket).then((request) => handler(socket, request)))
+  servers.push(server)
+  await listen(server, socketPath)
+  return { environment: { ASTRA_PROVIDER_SOCKET: socketPath, ASTRA_PROVIDER_TOKEN: requestToken } }
+}
+
+function readRequest(socket: Socket) {
+  return new Promise<Record<string, string>>((resolve) => {
+    let value = ""
+    socket.setEncoding("utf8")
+    socket.on("data", (chunk: string) => {
+      value += chunk
+      if (!value.endsWith("\n")) return
+      resolve(JSON.parse(value))
+    })
+  })
+}
+
+function accepted(socket: Socket, requestId: string) {
+  socket.write(JSON.stringify({ schemaVersion: 1, type: "accepted", requestId }) + "\n")
+}
+
+function progress(socket: Socket, requestId: string, status: (typeof progressOrder)[number]) {
+  socket.write(JSON.stringify({ schemaVersion: 1, requestId, proposalID, operationID, status }) + "\n")
+}
+
+function terminal(socket: Socket, result: unknown) {
+  socket.end(JSON.stringify(result) + "\n")
+}
+
+function catalogResult(requestId: string) {
+  return {
+    schemaVersion: 1,
+    requestId,
+    status: "available",
+    catalog: {
+      providerID: "anthropic",
+      providerName: "Anthropic",
+      models: [{ id: modelID, name: "Claude Sonnet", limits: { context: 200_000, output: 8_192 } }],
+    },
+  }
+}
+
+function prepareResult(requestId: string) {
+  return {
+    schemaVersion: 1,
+    requestId,
+    status: "prepared",
+    preview: {
+      proposalID,
+      operationID,
+      providerID: "anthropic",
+      modelID,
+      destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
+      logicalPayload: { digest: digest("private body"), bytes: 128 },
+      headerNames: ["anthropic-version", "content-type", "x-api-key"],
+      credential: { accountFingerprint: `sha256:${"2".repeat(64)}`, headerName: "x-api-key" },
+      expiresAt: "2026-07-17T16:00:00.000Z",
+      hostBoundaryLabel: "HOST EXECUTION — NO SANDBOX",
+      networkBoundaryLabel: "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX",
+      assurance: "NOT VERIFIED",
+    },
+  }
+}
+
+function completionResult(requestId: string, assistantText = "Hello Astra") {
+  return {
+    schemaVersion: 1,
+    requestId,
+    proposalID,
+    operationID,
+    status: "response_observed_not_verified",
+    receiptID,
+    completionLabel: "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED",
+    response: {
+      assistantText,
+      assistantTextDigest: digest(assistantText),
+      assistantTextBytes: Buffer.byteLength(assistantText),
+      finishReason: "stop",
+    },
+  }
+}
+
+function digest(input: string) {
+  return `sha256:${createHash("sha256").update(input).digest("hex")}`
+}
+
+function listen(server: Server, socketPath: string) {
+  return new Promise<void>((resolve, reject) => {
+    server.once("error", reject)
+    server.listen(socketPath, () => {
+      server.off("error", reject)
+      resolve()
+    })
+  })
+}
+
+function closeServer(server: Server) {
+  return new Promise<void>((resolve) => {
+    if (!server.listening) return resolve()
+    server.close(() => resolve())
+  })
+}

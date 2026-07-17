@@ -14,10 +14,7 @@ export type GitUnstageAllBaseline = Readonly<{
   gitIdentity: Readonly<{ device: string; inode: string }>
   indexDigest: `sha256:${string}`
   indexMetadataDigest: `sha256:${string}`
-  indexIdentity: Readonly<{ device: string; inode: string; size: number }>
-  head:
-    | Readonly<{ kind: "symbolic"; symbolicRef: string; oid: string }>
-    | Readonly<{ kind: "detached"; oid: string }>
+  head: Readonly<{ kind: "symbolic"; symbolicRef: string; oid: string }> | Readonly<{ kind: "detached"; oid: string }>
   refsDigest: `sha256:${string}`
   worktreeDigest: `sha256:${string}`
 }>
@@ -49,6 +46,18 @@ export type GitUnstageAllPreviewAuthority = Readonly<{
   }>
   repositoryWrites: readonly [".git/index", ".git/index.lock"]
   scratchWrites: readonly [string, string, string]
+  sealedExecutableScratch: Readonly<{
+    root: "/private/tmp"
+    directoryPrefix: "astra-git-exec-"
+    executableName: "git"
+    lifecycle: "created_after_claim_cleanup_required_before_return"
+    purposes: readonly [
+      "baseline_revalidation",
+      "operation_execution",
+      "post_state_observation",
+      "independent_verification",
+    ]
+  }>
   scratchCleanup: "required_before_return"
   authorizationConsumption: "durable_operation_kernel_claim_required"
   preserves: Readonly<{
@@ -59,16 +68,15 @@ export type GitUnstageAllPreviewAuthority = Readonly<{
   }>
   network: "not_requested_host_unrestricted"
   splitIndex: Readonly<{
-    config: "absent"
-    sharedIndexFiles: "absent"
+    config: "validated_after_claim"
+    sharedIndexFiles: "validated_after_claim"
     indexExtension: "rejected_by_baseline"
     invocation: "forced_disabled"
   }>
   limitations: typeof gitUnstageAllLimitations
 }>
 
-export type GitUnstageAllPreview = GitUnstageAllPreviewAuthority &
-  Readonly<{ proposalDigest: `sha256:${string}` }>
+export type GitUnstageAllPreview = GitUnstageAllPreviewAuthority & Readonly<{ proposalDigest: `sha256:${string}` }>
 
 export type GitUnstageAllObservation = Readonly<{
   schemaVersion: 1
@@ -108,18 +116,14 @@ export type GitUnstageAllParseResult<Value> =
         | "invalid_observation_value"
     }>
 
-export function computeGitUnstageAllProposalDigest(
-  preview: GitUnstageAllPreviewAuthority,
-): `sha256:${string}` {
+export function computeGitUnstageAllProposalDigest(preview: GitUnstageAllPreviewAuthority): `sha256:${string}` {
   return digest(`astra.git-unstage-all-preview.v1\0${JSON.stringify(preview)}`)
 }
 
 export function parseGitUnstageAllPreview(input: unknown): GitUnstageAllParseResult<GitUnstageAllPreview> {
   const record = parseExactRecord(input, [...previewKeys, "proposalDigest"])
   if (!record.ok) return rejected("invalid_preview_shape")
-  const authority = parsePreviewAuthority(
-    Object.fromEntries(previewKeys.map((key) => [key, record.value[key]])),
-  )
+  const authority = parsePreviewAuthority(Object.fromEntries(previewKeys.map((key) => [key, record.value[key]])))
   if (!authority.ok) return authority
   if (!isDigest(record.value.proposalDigest)) return rejected("invalid_proposal_digest")
   if (record.value.proposalDigest !== computeGitUnstageAllProposalDigest(authority.value)) {
@@ -128,9 +132,7 @@ export function parseGitUnstageAllPreview(input: unknown): GitUnstageAllParseRes
   return { ok: true, value: { ...authority.value, proposalDigest: record.value.proposalDigest } }
 }
 
-export function parseGitUnstageAllObservation(
-  input: unknown,
-): GitUnstageAllParseResult<GitUnstageAllObservation> {
+export function parseGitUnstageAllObservation(input: unknown): GitUnstageAllParseResult<GitUnstageAllObservation> {
   const record = parseExactRecord(input, [
     "schemaVersion",
     "operation",
@@ -181,9 +183,7 @@ export function parseGitUnstageAllObservation(
   }
 }
 
-export function parseGitUnstageAllDecision(
-  input: unknown,
-): GitUnstageAllParseResult<GitUnstageAllDecision> {
+export function parseGitUnstageAllDecision(input: unknown): GitUnstageAllParseResult<GitUnstageAllDecision> {
   const record = parseExactRecord(input, [
     "schemaVersion",
     "operation",
@@ -234,6 +234,7 @@ const previewKeys = [
   "invocation",
   "repositoryWrites",
   "scratchWrites",
+  "sealedExecutableScratch",
   "scratchCleanup",
   "authorizationConsumption",
   "preserves",
@@ -242,9 +243,7 @@ const previewKeys = [
   "limitations",
 ] as const
 
-function parsePreviewAuthority(
-  input: unknown,
-): GitUnstageAllParseResult<GitUnstageAllPreviewAuthority> {
+function parsePreviewAuthority(input: unknown): GitUnstageAllParseResult<GitUnstageAllPreviewAuthority> {
   const record = parseExactRecord(input, previewKeys)
   if (!record.ok) return rejected("invalid_preview_shape")
   const baseline = parseBaseline(record.value.baseline)
@@ -252,12 +251,14 @@ function parsePreviewAuthority(
   const invocation = parseInvocation(record.value.invocation)
   const preserves = parsePreserves(record.value.preserves)
   const splitIndex = parseSplitIndex(record.value.splitIndex)
+  const sealedExecutableScratch = parseSealedExecutableScratch(record.value.sealedExecutableScratch)
   if (
     !baseline ||
     !inspection ||
     !invocation ||
     !preserves ||
     !splitIndex ||
+    !sealedExecutableScratch ||
     record.value.schemaVersion !== 1 ||
     record.value.operation !== "git_unstage_all" ||
     record.value.boundary !== "host_no_sandbox" ||
@@ -302,6 +303,7 @@ function parsePreviewAuthority(
         join(record.value.runtimeScratch, "index"),
         join(record.value.runtimeScratch, "index.lock"),
       ],
+      sealedExecutableScratch,
       scratchCleanup: "required_before_return",
       authorizationConsumption: "durable_operation_kernel_claim_required",
       preserves,
@@ -319,7 +321,6 @@ function parseBaseline(input: unknown): GitUnstageAllBaseline | null {
     "gitIdentity",
     "indexDigest",
     "indexMetadataDigest",
-    "indexIdentity",
     "head",
     "refsDigest",
     "worktreeDigest",
@@ -327,13 +328,11 @@ function parseBaseline(input: unknown): GitUnstageAllBaseline | null {
   if (!record.ok) return null
   const rootIdentity = parseIdentity(record.value.rootIdentity)
   const gitIdentity = parseIdentity(record.value.gitIdentity)
-  const indexIdentity = parseFileIdentity(record.value.indexIdentity)
   const head = parseHead(record.value.head)
   if (
     !head ||
     !rootIdentity ||
     !gitIdentity ||
-    !indexIdentity ||
     !isDigest(record.value.snapshotDigest) ||
     !isDigest(record.value.indexDigest) ||
     !isDigest(record.value.indexMetadataDigest) ||
@@ -348,29 +347,10 @@ function parseBaseline(input: unknown): GitUnstageAllBaseline | null {
     gitIdentity,
     indexDigest: record.value.indexDigest,
     indexMetadataDigest: record.value.indexMetadataDigest,
-    indexIdentity,
     head,
     refsDigest: record.value.refsDigest,
     worktreeDigest: record.value.worktreeDigest,
   }
-}
-
-function parseFileIdentity(input: unknown): GitUnstageAllBaseline["indexIdentity"] | null {
-  const record = parseExactRecord(input, ["device", "inode", "size"])
-  if (
-    !record.ok ||
-    typeof record.value.device !== "string" ||
-    !/^[1-9][0-9]*$/u.test(record.value.device) ||
-    typeof record.value.inode !== "string" ||
-    !/^[1-9][0-9]*$/u.test(record.value.inode) ||
-    typeof record.value.size !== "number" ||
-    !Number.isSafeInteger(record.value.size) ||
-    record.value.size < 1 ||
-    record.value.size > 32 * 1024 * 1024
-  ) {
-    return null
-  }
-  return { device: record.value.device, inode: record.value.inode, size: record.value.size }
 }
 
 function parseIdentity(input: unknown): GitUnstageAllBaseline["rootIdentity"] | null {
@@ -453,18 +433,44 @@ function parseSplitIndex(input: unknown): GitUnstageAllPreviewAuthority["splitIn
   const record = parseExactRecord(input, ["config", "sharedIndexFiles", "indexExtension", "invocation"])
   if (
     !record.ok ||
-    record.value.config !== "absent" ||
-    record.value.sharedIndexFiles !== "absent" ||
+    record.value.config !== "validated_after_claim" ||
+    record.value.sharedIndexFiles !== "validated_after_claim" ||
     record.value.indexExtension !== "rejected_by_baseline" ||
     record.value.invocation !== "forced_disabled"
   ) {
     return null
   }
   return {
-    config: "absent",
-    sharedIndexFiles: "absent",
+    config: "validated_after_claim",
+    sharedIndexFiles: "validated_after_claim",
     indexExtension: "rejected_by_baseline",
     invocation: "forced_disabled",
+  }
+}
+
+function parseSealedExecutableScratch(input: unknown): GitUnstageAllPreviewAuthority["sealedExecutableScratch"] | null {
+  const record = parseExactRecord(input, ["root", "directoryPrefix", "executableName", "lifecycle", "purposes"])
+  if (
+    !record.ok ||
+    record.value.root !== "/private/tmp" ||
+    record.value.directoryPrefix !== "astra-git-exec-" ||
+    record.value.executableName !== "git" ||
+    record.value.lifecycle !== "created_after_claim_cleanup_required_before_return" ||
+    !Array.isArray(record.value.purposes) ||
+    record.value.purposes.length !== 4 ||
+    record.value.purposes[0] !== "baseline_revalidation" ||
+    record.value.purposes[1] !== "operation_execution" ||
+    record.value.purposes[2] !== "post_state_observation" ||
+    record.value.purposes[3] !== "independent_verification"
+  ) {
+    return null
+  }
+  return {
+    root: "/private/tmp",
+    directoryPrefix: "astra-git-exec-",
+    executableName: "git",
+    lifecycle: "created_after_claim_cleanup_required_before_return",
+    purposes: ["baseline_revalidation", "operation_execution", "post_state_observation", "independent_verification"],
   }
 }
 

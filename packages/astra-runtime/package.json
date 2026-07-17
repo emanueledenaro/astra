@@ -14,7 +14,13 @@
     "./operation-ledger": "./src/operation-ledger.ts",
     "./controlled-write-coordinator": "./src/controlled-write-coordinator.ts",
     "./controlled-write-verifier": "./src/controlled-write-verifier.ts",
-    "./host-command": "./src/host-command.ts"
+    "./host-command": "./src/host-command.ts",
+    "./git-unstage-coordinator": "./src/git-unstage-coordinator.ts",
+    "./anthropic-one-turn": "./src/anthropic-one-turn.ts",
+    "./provider-turn-coordinator": "./src/provider-turn-coordinator.ts",
+    "./provider-turn-network-policy": "./src/provider-turn-network-policy.ts",
+    "./provider-turn-operation-facts": "./src/provider-turn-operation-facts.ts",
+    "./provider-turn-transport": "./src/provider-turn-transport.ts"
   },
   "scripts": {
     "test": "bun test",

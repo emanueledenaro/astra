@@ -342,7 +342,7 @@ async function fingerprint(apiKey: string, salt: Uint8Array) {
   input.set(key, salt.length)
   try {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input))
-    return `acct_${toHex(digest.subarray(0, 16))}`
+    return `sha256:${toHex(digest)}`
   } catch {
     return undefined
   } finally {

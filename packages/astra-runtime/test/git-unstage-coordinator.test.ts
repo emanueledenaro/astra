@@ -414,10 +414,9 @@ async function operationInput(decision: "approved" | "rejected"): Promise<Durabl
   const state = await temporaryDirectory("astra-git-operation-state-")
   await mkdir(join(workspace, ".git"))
   await writeFile(join(workspace, ".git", "index"), "synthetic-index\n")
-  const [rootFacts, gitFacts, indexFacts] = await Promise.all([
+  const [rootFacts, gitFacts] = await Promise.all([
     stat(workspace, { bigint: true }),
     stat(join(workspace, ".git"), { bigint: true }),
-    stat(join(workspace, ".git", "index"), { bigint: true }),
   ])
   const rootIdentity = { device: String(rootFacts.dev), inode: String(rootFacts.ino) }
   const gitIdentity = { canonicalPath: join(workspace, ".git"), device: String(gitFacts.dev), inode: String(gitFacts.ino) }
@@ -495,11 +494,6 @@ async function operationInput(decision: "approved" | "rejected"): Promise<Durabl
       gitIdentity: { device: gitIdentity.device, inode: gitIdentity.inode },
       indexDigest: expectedBaseline.index.digest,
       indexMetadataDigest: expectedBaseline.index.metadataDigest,
-      indexIdentity: {
-        device: String(indexFacts.dev),
-        inode: String(indexFacts.ino),
-        size: Number(indexFacts.size),
-      },
       head: baselineAuthority.head,
       refsDigest: expectedBaseline.refs.digest,
       worktreeDigest: expectedBaseline.worktree.digest,
@@ -515,13 +509,25 @@ async function operationInput(decision: "approved" | "rejected"): Promise<Durabl
     },
     repositoryWrites: [".git/index", ".git/index.lock"],
     scratchWrites: [runtimeScratch, join(runtimeScratch, "index"), join(runtimeScratch, "index.lock")],
+    sealedExecutableScratch: {
+      root: "/private/tmp",
+      directoryPrefix: "astra-git-exec-",
+      executableName: "git",
+      lifecycle: "created_after_claim_cleanup_required_before_return",
+      purposes: [
+        "baseline_revalidation",
+        "operation_execution",
+        "post_state_observation",
+        "independent_verification",
+      ],
+    },
     scratchCleanup: "required_before_return",
     authorizationConsumption: "durable_operation_kernel_claim_required",
     preserves: { worktree: "required", head: "required", refs: "required", objectStore: "not_observed" },
     network: "not_requested_host_unrestricted",
     splitIndex: {
-      config: "absent",
-      sharedIndexFiles: "absent",
+      config: "validated_after_claim",
+      sharedIndexFiles: "validated_after_claim",
       indexExtension: "rejected_by_baseline",
       invocation: "forced_disabled",
     },

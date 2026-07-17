@@ -8,6 +8,18 @@ import {
 import { registerAstraExtensions } from "../feature-plugins/system/astra-extensions"
 import { registerAstraControlledWrite } from "../feature-plugins/system/astra-controlled-write"
 import { registerAstraGitControlPlane } from "../feature-plugins/system/astra-git-control"
+import { registerAstraChat } from "../feature-plugins/system/astra-chat"
+import type { AstraProviderClient } from "./provider-client"
+import {
+  createAstraSkillActivationClient,
+  type AstraSkillActivationClient,
+} from "./skill-activation-client"
+import { registerAstraSkillActivation } from "../feature-plugins/system/astra-skill-activation"
+import {
+  createAstraGitUnstageClient,
+  type AstraGitUnstageClient,
+} from "./git-unstage-client"
+import { registerAstraGitUnstage } from "../feature-plugins/system/astra-git-unstage"
 
 /** Registers built-in Astra surfaces from the authority validated at process admission. */
 export function registerAstraAppFeatures(
@@ -15,7 +27,11 @@ export function registerAstraAppFeatures(
   authority: AstraSessionAuthority,
   gitInspectionClient?: AstraGitInspectionClient,
   controlledWriteClient?: AstraControlledWriteClient,
+  providerClient?: AstraProviderClient,
+  skillActivationClient?: AstraSkillActivationClient,
+  gitUnstageClient?: AstraGitUnstageClient,
 ) {
+  registerAstraChat(api, authority, providerClient)
   registerAstraGitControlPlane(
     api,
     authority,
@@ -25,6 +41,22 @@ export function registerAstraAppFeatures(
     api,
     authority,
     controlledWriteClient ?? createAstraControlledWriteClient(process.env, authority.sessionID),
+  )
+  registerAstraSkillActivation(
+    api,
+    authority,
+    skillActivationClient ?? createAstraSkillActivationClient(process.env, authority.sessionID),
+  )
+  registerAstraGitUnstage(
+    api,
+    authority,
+    gitUnstageClient ??
+      createAstraGitUnstageClient(process.env, authority.sessionID, {
+        expectedWorkspaceRoot: authority.workspace.root,
+        ...(authority.repositoryBaseline
+          ? { expectedBaselineSnapshotDigest: authority.repositoryBaseline.snapshotDigest }
+          : {}),
+      }),
   )
   registerAstraExtensions(api, authority)
 }
