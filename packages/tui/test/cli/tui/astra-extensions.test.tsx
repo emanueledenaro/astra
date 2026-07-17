@@ -13,13 +13,13 @@ import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 
-test("keeps the Git Control Plane out of non-Astra OpenCode", () => {
+test("keeps the Astra Extensions surface out of non-Astra OpenCode", () => {
   expect(
-    createBuiltinPlugins({ experimentalEventSystem: false }).some((plugin) => plugin.id === "astra-git-control-plane"),
+    createBuiltinPlugins({ experimentalEventSystem: false }).some((plugin) => plugin.id === "astra-extensions"),
   ).toBe(false)
 })
 
-test("registers the real Astra /git surface without external effects", async () => {
+test("opens the static Astra /extensions surface without effects", async () => {
   const effects: string[] = []
   const commands = new Map<
     string,
@@ -52,12 +52,12 @@ test("registers the real Astra /git surface without external effects", async () 
         throw new Error("Unexpected network capability access")
       },
       get state(): never {
-        effects.push("workspace")
-        throw new Error("Unexpected workspace state access")
+        effects.push("filesystem")
+        throw new Error("Unexpected workspace or filesystem state access")
       },
       route: {
         register(routes) {
-          route = routes.find((candidate) => candidate.name === "astra-git-control") ?? route
+          route = routes.find((candidate) => candidate.name === "astra-extensions")
           return () => {}
         },
         navigate(name, params) {
@@ -70,9 +70,9 @@ test("registers the real Astra /git surface without external effects", async () 
     } satisfies TuiPluginApi
 
     registerAstraAppFeatures(api, authority)
-    const open = commands.get("astra.git.open")
-    expect(open?.slashName).toBe("git")
-    void keymap.dispatchCommand("astra.git.open")
+    const open = commands.get("astra.extensions.open")
+    expect(open?.slashName).toBe("extensions")
+    void keymap.dispatchCommand("astra.extensions.open")
 
     return (
       <TestTuiContexts directory={authority.workspace.root}>
@@ -85,22 +85,22 @@ test("registers the real Astra /git surface without external effects", async () 
     )
   }
 
-  const app = await testRender(() => <Harness />, { width: 54, height: 14 })
+  const app = await testRender(() => <Harness />, { width: 88, height: 22 })
   try {
-    const frame = await app.waitForFrame((value) => value.includes("separate authorization required"))
-    expect(frame).toContain("Git Control Plane")
+    const frame = await app.waitForFrame((value) => value.includes("every call must pass the Operation Kernel"))
+    expect(frame).toContain("Extensions")
     expect(frame).toContain("HOST EXECUTION — NO SANDBOX")
-    expect(frame).toContain("WORKSPACE")
-    expect(frame).toContain("astra-project")
-    expect(frame).toContain("ACTIVE ONCE")
+    expect(frame).toContain("SAFE START  ALWAYS ACTIVE")
     expect(frame).toContain("NOT INSPECTED • NOT VERIFIED")
-    expect(frame).toContain("Operation Kernel adapter required")
-    expect(frame).toContain("PUSH        UNAVAILABLE")
-    expect(frame).not.toContain("Stage")
-    expect(frame).not.toContain("Unstage")
-    expect(frame).not.toContain("Commit")
+    expect(frame).toContain("STATIC POLICY ONLY")
+    expect(frame).toContain("no initialization, scanning, or execution")
+    expect(frame).toContain("SKILLS      PLANNED • ACTIVATE ONCE")
+    expect(frame).toContain("REMOTE MCP  BLOCKED — every call must pass the Operation Kernel")
+    expect(frame).toContain("LOCAL MCP   BLOCKED — isolation deferred to hardening")
+    expect(frame).toContain("PLUGINS     BLOCKED — external plugins require isolation and hardening")
+    expect(frame).toContain("no filesystem, process, network, or client request")
     expect(effects).toEqual([])
-    expect(current.name).toBe("astra-git-control")
+    expect(current.name).toBe("astra-extensions")
   } finally {
     app.renderer.destroy()
   }
@@ -113,7 +113,7 @@ const authority = {
   mode: "activate-once",
   effectPolicy: "deny",
   workspace: {
-    root: "/Users/example/Documents/very-long-workspace-name/astra-project",
+    root: "/Users/example/Documents/astra-project",
     identity: { device: "1", inode: "2" },
     securityDigest: `sha256:${"a".repeat(64)}`,
   },
