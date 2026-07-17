@@ -6,6 +6,7 @@ import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { expect, test } from "bun:test"
 import { testRender, useRenderer } from "@opentui/solid"
 import { registerAstraAppFeatures } from "../../../src/astra/features"
+import type { AstraGitInspectionClient } from "../../../src/astra/control-client"
 import { TuiConfigProvider } from "../../../src/config"
 import { createBuiltinPlugins } from "../../../src/feature-plugins/builtins"
 import { OpencodeKeymapProvider } from "../../../src/keymap"
@@ -27,6 +28,22 @@ test("registers the real Astra /git surface without external effects", async () 
   >()
   let current: TuiRouteCurrent = { name: "session", params: { sessionID: "session-1" } }
   let route: TuiRouteDefinition | undefined
+  let inspectCalls = 0
+  let accepted!: (requestId: string) => void
+  let finish!: (result: Awaited<ReturnType<AstraGitInspectionClient["inspect"]>>) => void
+  let inspectSignal: AbortSignal | undefined
+  const gitInspectionClient = {
+    inspect(options) {
+      inspectCalls++
+      inspectSignal = options?.signal
+      accepted = (requestId) => options?.onAccepted?.(requestId)
+      return new Promise((resolve) => {
+        finish = resolve
+      })
+    },
+    dispose() {},
+  } satisfies AstraGitInspectionClient
+  let dispatch: (command: string) => void
 
   function Harness() {
     const renderer = useRenderer()
@@ -69,10 +86,11 @@ test("registers the real Astra /git surface without external effects", async () 
       },
     } satisfies TuiPluginApi
 
-    registerAstraAppFeatures(api, authority)
+    registerAstraAppFeatures(api, authority, gitInspectionClient)
     const open = commands.get("astra.git.open")
     expect(open?.slashName).toBe("git")
     void keymap.dispatchCommand("astra.git.open")
+    dispatch = (command) => void keymap.dispatchCommand(command)
 
     return (
       <TestTuiContexts directory={authority.workspace.root}>
@@ -94,13 +112,46 @@ test("registers the real Astra /git surface without external effects", async () 
     expect(frame).toContain("astra-project")
     expect(frame).toContain("ACTIVE ONCE")
     expect(frame).toContain("NOT INSPECTED • NOT VERIFIED")
-    expect(frame).toContain("Operation Kernel adapter required")
+    expect(frame).toContain("write operations unavailable")
     expect(frame).toContain("PUSH        UNAVAILABLE")
     expect(frame).not.toContain("Stage")
     expect(frame).not.toContain("Unstage")
     expect(frame).not.toContain("Commit")
     expect(effects).toEqual([])
+    expect(inspectCalls).toBe(0)
     expect(current.name).toBe("astra-git-control")
+
+    dispatch!("astra.git.inspect")
+    await app.waitForFrame((value) => value.includes("QUEUED • NOT VERIFIED"))
+    dispatch!("astra.git.inspect")
+    expect(inspectCalls).toBe(1)
+
+    const requestId = "10000000-0000-4000-8000-000000000001"
+    accepted(requestId)
+    await app.waitForFrame((value) => value.includes("RUNNING • NOT VERIFIED"))
+    finish({ requestId, summary: completeSummary })
+    const completed = await app.waitForFrame((value) => value.includes("COMPLETED • OBSERVED • NOT VERIFIED"))
+    expect(completed).toContain("4 total")
+    expect(completed).toContain("1 staged")
+    expect(completed).toContain("REPORT")
+    expect(completed).not.toContain("private-file-name")
+
+    dispatch!("astra.git.inspect")
+    await app.waitForFrame((value) => value.includes("QUEUED • NOT VERIFIED"))
+    const blockedRequestId = "20000000-0000-4000-8000-000000000002"
+    accepted(blockedRequestId)
+    await app.waitForFrame((value) => value.includes("RUNNING • NOT VERIFIED"))
+    finish({ requestId: blockedRequestId, summary: timeoutSummary })
+    const blocked = await app.waitForFrame((value) => value.includes("BLOCKED • NOT VERIFIED"))
+    expect(blocked).toContain("inspection timed out")
+
+    dispatch!("astra.git.inspect")
+    await app.waitForFrame((value) => value.includes("QUEUED • NOT VERIFIED"))
+    accepted("30000000-0000-4000-8000-000000000003")
+    await app.waitForFrame((value) => value.includes("RUNNING • NOT VERIFIED"))
+    dispatch!("astra.git.close")
+    expect(current.name).toBe("session")
+    expect(inspectSignal?.aborted).toBe(true)
   } finally {
     app.renderer.destroy()
   }
@@ -119,3 +170,27 @@ const authority = {
   },
   repositoryBaseline: null,
 } as const satisfies AstraSessionAuthority
+
+const completeSummary = {
+  schemaVersion: 1,
+  status: "complete",
+  mode: "bounded_read_only",
+  verification: "not_verified",
+  baseline: "not_captured",
+  activationAllowed: false,
+  submodules: "not_inspected",
+  counts: { total: 4, staged: 1, unstaged: 2, untracked: 1, conflicts: 0 },
+  observationDigest: `sha256:${"b".repeat(64)}`,
+  reportDigest: `sha256:${"c".repeat(64)}`,
+} as const
+
+const timeoutSummary = {
+  schemaVersion: 1,
+  status: "blocked",
+  mode: "bounded_read_only",
+  verification: "not_verified",
+  baseline: "not_captured",
+  activationAllowed: false,
+  submodules: "not_inspected",
+  reason: "inspection_timed_out",
+} as const
