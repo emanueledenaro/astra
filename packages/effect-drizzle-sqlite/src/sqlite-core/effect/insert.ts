@@ -243,7 +243,12 @@ export class SQLiteEffectInsertBase<
     withList?: Subquery[],
     select?: boolean,
   ) {
-    this.config = { table, values: values as any, withList, select }
+    this.config = {
+      table,
+      values: values as any,
+      ...(withList === undefined ? {} : { withList }),
+      ...(select === undefined ? {} : { select }),
+    }
   }
 
   returning(): SQLiteEffectInsertReturningAll<this, TDynamic>

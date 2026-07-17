@@ -1115,7 +1115,11 @@ function ingestReceipt(
           ) {
             return yield* Effect.fail(new ReceiptIngestionError(receipt.receiptID, "claim_not_accepted"))
           }
-          const admission = yield* parseStoredLifecycle(replay.events[0])
+          const admissionEvent = replay.events[0]
+          if (!admissionEvent) {
+            return yield* Effect.fail(new LedgerCorruptionError("The dispatched operation has no admission event"))
+          }
+          const admission = yield* parseStoredLifecycle(admissionEvent)
           const admittedBaseline = parseWorkspaceBaseline(admission.payload.baseline)
           if (!admittedBaseline.ok) {
             return yield* Effect.fail(new LedgerCorruptionError("The admitted workspace baseline cannot be decoded"))
@@ -1377,7 +1381,11 @@ function ingestEvidence(
           if (!replay || replay.operation.state !== "effect_observed") {
             return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "effect_not_observed"))
           }
-          const admission = yield* parseStoredLifecycle(replay.events[0])
+          const admissionEvent = replay.events[0]
+          if (!admissionEvent) {
+            return yield* Effect.fail(new LedgerCorruptionError("The observed operation has no admission event"))
+          }
+          const admission = yield* parseStoredLifecycle(admissionEvent)
           if (!admission.verificationPlan || !evidenceMatchesPlan(evidence, admission.verificationPlan)) {
             return yield* Effect.fail(new EvidenceIngestionError(evidence.evidenceID, "binding_mismatch"))
           }
@@ -1573,8 +1581,13 @@ function decodeVerificationRecord(
     `)
     if (events.length !== 2)
       return yield* Effect.fail(new LedgerCorruptionError("Verification evidence events are missing"))
-    const startedEvent = yield* decodeEventRow(events[0])
-    const terminalEvent = yield* decodeEventRow(events[1])
+    const startedRow = events[0]
+    const terminalRow = events[1]
+    if (!startedRow || !terminalRow) {
+      return yield* Effect.fail(new LedgerCorruptionError("Verification evidence events are missing"))
+    }
+    const startedEvent = yield* decodeEventRow(startedRow)
+    const terminalEvent = yield* decodeEventRow(terminalRow)
     return { evidence, evidenceDigest: row.evidence_digest, startedEvent, terminalEvent }
   }).pipe(Effect.mapError(mapStorageError("Failed to decode verification evidence")))
 }

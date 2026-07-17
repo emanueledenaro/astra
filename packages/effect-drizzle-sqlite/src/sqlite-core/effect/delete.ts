@@ -157,7 +157,7 @@ export class SQLiteEffectDeleteBase<
     private effectDialect: SQLiteDialect,
     withList?: Subquery[],
   ) {
-    this.config = { table, withList }
+    this.config = { table, ...(withList === undefined ? {} : { withList }) }
   }
 
   where(where: SQL | undefined): SQLiteEffectDeleteWithout<this, TDynamic, "where"> {
