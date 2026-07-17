@@ -10,6 +10,7 @@ import { Hash } from "@opencode-ai/core/util/hash"
 import { Config } from "@/config/config"
 import { Global } from "@opencode-ai/core/global"
 import { Info } from "@opencode-ai/schema/file-diff"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 export const Patch = Schema.Struct({
   hash: Schema.String,
@@ -25,6 +26,9 @@ const limit = 2 * 1024 * 1024
 const core = ["-c", "core.longpaths=true", "-c", "core.symlinks=true"]
 const cfg = ["-c", "core.autocrlf=false", ...core]
 const quote = [...cfg, "-c", "core.quotepath=false"]
+const SAFE_START_SNAPSHOT_MESSAGE =
+  "Snapshot Git operations are blocked until the Astra Git Control Plane authorizes them"
+
 interface GitResult {
   readonly code: ChildProcessSpawner.ExitCode
   readonly text: string
@@ -769,29 +773,41 @@ const layer: Layer.Layer<Service, never, FSUtil.Service | AppProcess.Service | C
       }),
     )
 
+    const guardSafeStart = Effect.suspend(() =>
+      Flag.ASTRA_SAFE_START ? Effect.die(new Error(SAFE_START_SNAPSHOT_MESSAGE)) : Effect.void,
+    )
+
     return Service.of({
       init: Effect.fn("Snapshot.init")(function* () {
+        yield* guardSafeStart
         yield* InstanceState.get(state)
       }),
       cleanup: Effect.fn("Snapshot.cleanup")(function* () {
+        yield* guardSafeStart
         return yield* InstanceState.useEffect(state, (s) => s.cleanup())
       }),
       track: Effect.fn("Snapshot.track")(function* () {
+        yield* guardSafeStart
         return yield* InstanceState.useEffect(state, (s) => s.track())
       }),
       patch: Effect.fn("Snapshot.patch")(function* (hash: string) {
+        yield* guardSafeStart
         return yield* InstanceState.useEffect(state, (s) => s.patch(hash))
       }),
       restore: Effect.fn("Snapshot.restore")(function* (snapshot: string) {
+        yield* guardSafeStart
         return yield* InstanceState.useEffect(state, (s) => s.restore(snapshot))
       }),
       revert: Effect.fn("Snapshot.revert")(function* (patches: Patch[]) {
+        yield* guardSafeStart
         return yield* InstanceState.useEffect(state, (s) => s.revert(patches))
       }),
       diff: Effect.fn("Snapshot.diff")(function* (hash: string) {
+        yield* guardSafeStart
         return yield* InstanceState.useEffect(state, (s) => s.diff(hash))
       }),
       diffFull: Effect.fn("Snapshot.diffFull")(function* (from: string, to: string) {
+        yield* guardSafeStart
         return yield* InstanceState.useEffect(state, (s) => s.diffFull(from, to))
       }),
     })

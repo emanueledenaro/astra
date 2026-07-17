@@ -15,6 +15,7 @@ import { Effect, Layer, Path, Schema, Scope, Context } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { AppProcess } from "@opencode-ai/core/process"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { InstanceState } from "@/effect/instance-state"
 import { WorktreeEvent } from "@opencode-ai/schema/worktree-event"
 
@@ -128,6 +129,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/Worktree") {}
 
 type GitResult = { code: number; text: string; stderr: string }
+const SAFE_START_WORKTREE_MESSAGE = "Worktree mutation is blocked until the Astra Git Control Plane authorizes it"
 
 const layer: Layer.Layer<
   Service,
@@ -151,25 +153,14 @@ const layer: Layer.Layer<
     const project = yield* Project.Service
     const store = yield* InstanceStore.Service
 
-    const git = Effect.fnUntraced(
-      function* (args: string[], opts?: { cwd?: string }) {
-        const result = yield* appProcess.run(
-          ChildProcess.make("git", args, { cwd: opts?.cwd, extendEnv: true, stdin: "ignore" }),
-        )
-        return {
-          code: result.exitCode,
-          text: result.stdout.toString("utf8"),
-          stderr: result.stderr.toString("utf8"),
-        } satisfies GitResult
-      },
-      Effect.catch((e) =>
-        Effect.succeed({
-          code: 1,
-          text: "",
-          stderr: e instanceof Error ? e.message : String(e),
-        } satisfies GitResult),
-      ),
-    )
+    const git = Effect.fnUntraced(function* (args: string[], opts: { cwd: string }) {
+      const result = yield* gitSvc.run(args, { cwd: opts.cwd })
+      return {
+        code: result.exitCode,
+        text: result.text(),
+        stderr: result.stderr.toString("utf8"),
+      } satisfies GitResult
+    })
 
     const MAX_NAME_ATTEMPTS = 26
     const candidate = Effect.fn("Worktree.candidate")(function* (input: {
@@ -200,6 +191,9 @@ const layer: Layer.Layer<
       name?: string
       detached?: boolean
     }) {
+      if (Flag.ASTRA_SAFE_START) {
+        return yield* new CreateFailedError({ message: SAFE_START_WORKTREE_MESSAGE })
+      }
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
         return yield* new NotGitError({ message: "Worktrees are only supported for git projects" })
@@ -279,6 +273,9 @@ const layer: Layer.Layer<
     })
 
     const createFromInfo = Effect.fn("Worktree.createFromInfo")(function* (info: Info, startCommand?: string) {
+      if (Flag.ASTRA_SAFE_START) {
+        yield* new CreateFailedError({ message: SAFE_START_WORKTREE_MESSAGE })
+      }
       yield* setup(info)
       yield* boot(info, startCommand).pipe(
         Effect.catchCause((cause) => Effect.logError("worktree bootstrap failed", { cause })),
@@ -287,6 +284,9 @@ const layer: Layer.Layer<
     })
 
     const create = Effect.fn("Worktree.create")(function* (input?: CreateInput) {
+      if (Flag.ASTRA_SAFE_START) {
+        return yield* new CreateFailedError({ message: SAFE_START_WORKTREE_MESSAGE })
+      }
       const info = yield* makeWorktreeInfo({ name: input?.name })
       yield* createFromInfo(info, input?.startCommand)
       return info
@@ -386,6 +386,9 @@ const layer: Layer.Layer<
     }
 
     const remove = Effect.fn("Worktree.remove")(function* (input: RemoveInput) {
+      if (Flag.ASTRA_SAFE_START) {
+        return yield* new RemoveFailedError({ message: SAFE_START_WORKTREE_MESSAGE })
+      }
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
         return yield* new NotGitError({ message: "Worktrees are only supported for git projects" })
@@ -523,6 +526,9 @@ const layer: Layer.Layer<
     })
 
     const reset = Effect.fn("Worktree.reset")(function* (input: ResetInput) {
+      if (Flag.ASTRA_SAFE_START) {
+        return yield* new ResetFailedError({ message: SAFE_START_WORKTREE_MESSAGE })
+      }
       const ctx = yield* InstanceState.context
       if (ctx.project.vcs !== "git") {
         return yield* new NotGitError({ message: "Worktrees are only supported for git projects" })

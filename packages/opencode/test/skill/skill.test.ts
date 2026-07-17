@@ -63,7 +63,52 @@ const withHome = <A, E, R>(home: string, self: Effect.Effect<A, E, R>) =>
       }),
   )
 
+const withAstraSafeStart = <A, E, R>(self: Effect.Effect<A, E, R>) =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => self,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+
 describe("skill", () => {
+  it.live("Astra safe start does not discover or load workspace skills", () =>
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const marker = path.join(dir, ".agents", "skills", "canary", "SKILL.md")
+          yield* Effect.promise(() =>
+            Bun.write(
+              marker,
+              `---
+name: canary
+description: Must remain unread during safe start.
+---
+
+# Canary
+`,
+            ),
+          )
+
+          yield* withAstraSafeStart(
+            Effect.gen(function* () {
+              const skill = yield* Skill.Service
+              expect(yield* skill.all()).toEqual([])
+              expect(yield* skill.dirs()).toEqual([])
+            }),
+          )
+        }),
+      { git: true },
+    ),
+  )
+
   it.effect("formats verbose locations as XML-safe filesystem paths", () =>
     Effect.sync(() => {
       const output = Skill.fmt(

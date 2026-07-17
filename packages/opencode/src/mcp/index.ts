@@ -70,6 +70,18 @@ export class NotFoundError extends Schema.TaggedErrorClass<NotFoundError>()("MCP
   name: Schema.String,
 }) {}
 
+export class SafeStartDisabledError extends Schema.TaggedErrorClass<SafeStartDisabledError>()(
+  "MCP.SafeStartDisabledError",
+  {
+    operation: Schema.String,
+    name: Schema.String,
+  },
+) {
+  override get message() {
+    return `MCP ${this.operation} is disabled during Astra safe start: ${this.name}`
+  }
+}
+
 type MCPClient = Client
 
 function createClient(directory: string) {
@@ -171,9 +183,12 @@ export interface Interface {
   readonly resourceTemplates: (
     clientName?: string,
   ) => Effect.Effect<Record<string, ResourceTemplateInfo & { client: string }>>
-  readonly add: (name: string, mcp: ConfigMCPV1.Info) => Effect.Effect<{ status: Record<string, Status> | Status }>
-  readonly connect: (name: string) => Effect.Effect<void, NotFoundError>
-  readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError>
+  readonly add: (
+    name: string,
+    mcp: ConfigMCPV1.Info,
+  ) => Effect.Effect<{ status: Record<string, Status> | Status }, SafeStartDisabledError>
+  readonly connect: (name: string) => Effect.Effect<void, NotFoundError | SafeStartDisabledError>
+  readonly disconnect: (name: string) => Effect.Effect<void, NotFoundError | SafeStartDisabledError>
   readonly getPrompt: (
     clientName: string,
     name: string,
@@ -185,16 +200,19 @@ export interface Interface {
   ) => Effect.Effect<Awaited<ReturnType<MCPClient["readResource"]>> | undefined>
   readonly startAuth: (
     mcpName: string,
-  ) => Effect.Effect<{ authorizationUrl: string; oauthState: string }, NotFoundError>
+  ) => Effect.Effect<{ authorizationUrl: string; oauthState: string }, NotFoundError | SafeStartDisabledError>
   readonly authenticate: (
     mcpName: string,
     onAuthorization?: (authorizationUrl: string) => void,
-  ) => Effect.Effect<Status, NotFoundError>
-  readonly finishAuth: (mcpName: string, authorizationCode: string) => Effect.Effect<Status, NotFoundError>
-  readonly removeAuth: (mcpName: string) => Effect.Effect<void>
-  readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError>
-  readonly hasStoredTokens: (mcpName: string) => Effect.Effect<boolean>
-  readonly getAuthStatus: (mcpName: string) => Effect.Effect<AuthStatus>
+  ) => Effect.Effect<Status, NotFoundError | SafeStartDisabledError>
+  readonly finishAuth: (
+    mcpName: string,
+    authorizationCode: string,
+  ) => Effect.Effect<Status, NotFoundError | SafeStartDisabledError>
+  readonly removeAuth: (mcpName: string) => Effect.Effect<void, SafeStartDisabledError>
+  readonly supportsOAuth: (mcpName: string) => Effect.Effect<boolean, NotFoundError | SafeStartDisabledError>
+  readonly hasStoredTokens: (mcpName: string) => Effect.Effect<boolean, SafeStartDisabledError>
+  readonly getAuthStatus: (mcpName: string) => Effect.Effect<AuthStatus, SafeStartDisabledError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/MCP") {}
@@ -491,9 +509,6 @@ const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(
       Effect.fn("MCP.state")(function* () {
-        const cfg = yield* cfgSvc.get()
-        const bridge = yield* EffectBridge.make()
-        const config = Flag.ASTRA_SAFE_START ? {} : (cfg.mcp ?? {})
         const s: State = {
           config: {},
           status: {},
@@ -501,6 +516,11 @@ const layer = Layer.effect(
           defs: {},
           instructions: {},
         }
+        if (Flag.ASTRA_SAFE_START) return s
+
+        const cfg = yield* cfgSvc.get()
+        const bridge = yield* EffectBridge.make()
+        const config = cfg.mcp ?? {}
 
         yield* Effect.forEach(
           Object.entries(config),
@@ -625,11 +645,8 @@ const layer = Layer.effect(
     })
 
     const createAndStore = Effect.fn("MCP.createAndStore")(function* (name: string, mcp: ConfigMCPV1.Info) {
+      if (Flag.ASTRA_SAFE_START) return yield* new SafeStartDisabledError({ operation: "connect", name })
       const s = yield* InstanceState.get(state)
-      if (Flag.ASTRA_SAFE_START) {
-        s.status[name] = { status: "disabled" }
-        return s.status[name]
-      }
       const result = yield* create(name, mcp)
 
       s.status[name] = result.status
@@ -643,24 +660,21 @@ const layer = Layer.effect(
     })
 
     const add = Effect.fn("MCP.add")(function* (name: string, mcp: ConfigMCPV1.Info) {
+      if (Flag.ASTRA_SAFE_START) return yield* new SafeStartDisabledError({ operation: "add", name })
       const s = yield* InstanceState.get(state)
-      if (Flag.ASTRA_SAFE_START) {
-        s.status[name] = { status: "disabled" }
-        return { status: s.status }
-      }
       s.config[name] = mcp
       yield* createAndStore(name, mcp)
       return { status: s.status }
     })
 
     const connect = Effect.fn("MCP.connect")(function* (name: string) {
-      if (Flag.ASTRA_SAFE_START) return
+      if (Flag.ASTRA_SAFE_START) yield* new SafeStartDisabledError({ operation: "connect", name })
       const mcp = yield* requireMcpConfig(name)
       yield* createAndStore(name, { ...mcp, enabled: true })
     })
 
     const disconnect = Effect.fn("MCP.disconnect")(function* (name: string) {
-      if (Flag.ASTRA_SAFE_START) return
+      if (Flag.ASTRA_SAFE_START) yield* new SafeStartDisabledError({ operation: "disconnect", name })
       yield* requireMcpConfig(name)
       const s = yield* InstanceState.get(state)
       yield* closeClient(s, name)
@@ -813,8 +827,10 @@ const layer = Layer.effect(
       return mcpConfig
     })
 
-    const startAuth = Effect.fn("MCP.startAuth")(function* (mcpName: string) {
-      if (Flag.ASTRA_SAFE_START) yield* new NotFoundError({ name: mcpName })
+    const startAuth: (mcpName: string) => Effect.Effect<AuthResult, NotFoundError | SafeStartDisabledError> = Effect.fn(
+      "MCP.startAuth",
+    )(function* (mcpName: string) {
+      if (Flag.ASTRA_SAFE_START) return yield* new SafeStartDisabledError({ operation: "start OAuth", name: mcpName })
       const mcpConfig = yield* requireMcpConfig(mcpName)
       if (mcpConfig.type !== "remote") throw new Error(`MCP server ${mcpName} is not a remote server`)
       if (mcpConfig.oauth === false) throw new Error(`MCP server ${mcpName} has OAuth explicitly disabled`)
@@ -884,6 +900,7 @@ const layer = Layer.effect(
       mcpName: string,
       onAuthorization?: (authorizationUrl: string) => void,
     ) {
+      if (Flag.ASTRA_SAFE_START) return yield* new SafeStartDisabledError({ operation: "authenticate", name: mcpName })
       const result = yield* startAuth(mcpName)
       if (!result.authorizationUrl) {
         const client = "client" in result ? result.client : undefined
@@ -927,7 +944,7 @@ const layer = Layer.effect(
     })
 
     const finishAuth = Effect.fn("MCP.finishAuth")(function* (mcpName: string, authorizationCode: string) {
-      if (Flag.ASTRA_SAFE_START) yield* new NotFoundError({ name: mcpName })
+      if (Flag.ASTRA_SAFE_START) return yield* new SafeStartDisabledError({ operation: "finish OAuth", name: mcpName })
       yield* requireMcpConfig(mcpName)
       const pending = pendingOAuthTransports.get(mcpName)
       if (!pending) throw new Error(`No pending OAuth flow for MCP server: ${mcpName}`)
@@ -954,26 +971,30 @@ const layer = Layer.effect(
     })
 
     const removeAuth = Effect.fn("MCP.removeAuth")(function* (mcpName: string) {
-      if (Flag.ASTRA_SAFE_START) return
+      if (Flag.ASTRA_SAFE_START)
+        yield* new SafeStartDisabledError({ operation: "remove OAuth credentials", name: mcpName })
       yield* auth.remove(mcpName)
       McpOAuthCallback.cancelPending(mcpName)
       pendingOAuthTransports.delete(mcpName)
     })
 
     const supportsOAuth = Effect.fn("MCP.supportsOAuth")(function* (mcpName: string) {
-      if (Flag.ASTRA_SAFE_START) return false
+      if (Flag.ASTRA_SAFE_START)
+        return yield* new SafeStartDisabledError({ operation: "inspect OAuth support", name: mcpName })
       const mcpConfig = yield* requireMcpConfig(mcpName)
       return mcpConfig.type === "remote" && mcpConfig.oauth !== false
     })
 
     const hasStoredTokens = Effect.fn("MCP.hasStoredTokens")(function* (mcpName: string) {
-      if (Flag.ASTRA_SAFE_START) return false
+      if (Flag.ASTRA_SAFE_START)
+        return yield* new SafeStartDisabledError({ operation: "inspect OAuth tokens", name: mcpName })
       const entry = yield* auth.get(mcpName)
       return !!entry?.tokens
     })
 
     const getAuthStatus = Effect.fn("MCP.getAuthStatus")(function* (mcpName: string) {
-      if (Flag.ASTRA_SAFE_START) return "not_authenticated" as const
+      if (Flag.ASTRA_SAFE_START)
+        return yield* new SafeStartDisabledError({ operation: "inspect OAuth status", name: mcpName })
       const runtimeConfig = (yield* InstanceState.has(state))
         ? (yield* InstanceState.get(state)).config[mcpName]
         : undefined

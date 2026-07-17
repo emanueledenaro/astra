@@ -219,6 +219,39 @@ describe("tool.shell", () => {
   )
 })
 
+describe("tool.shell safe start", () => {
+  it.live("rejects generic shell execution before permission or process spawn", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const marker = path.join(tmp, "blocked-shell-effect.txt")
+      const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
+      const command = `${bin} -e ${evalarg(`await Bun.write(${JSON.stringify(marker)}, "effect")`)}`
+      const shell = yield* runIn(tmp, initShell())
+
+      const exit = yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const previous = process.env.ASTRA_SAFE_START
+          process.env.ASTRA_SAFE_START = "1"
+          return previous
+        }),
+        () => Effect.exit(shell.execute({ command }, capture(requests))),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.ASTRA_SAFE_START
+            else process.env.ASTRA_SAFE_START = previous
+          }),
+      )
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        expect(Cause.squash(exit.cause)).toMatchObject({ message: expect.stringContaining("Astra Git Control Plane") })
+      }
+      expect(requests).toHaveLength(0)
+      expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(marker))).toBe(false)
+    }),
+  )
+})
+
 describe("tool.shell permissions", () => {
   each("asks for bash permission with correct pattern", () =>
     Effect.gen(function* () {

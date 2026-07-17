@@ -131,10 +131,19 @@ declare const OPENCODE_MODELS_DEV: Record<string, Provider> | undefined
 
 export interface Interface {
   readonly get: () => Effect.Effect<Record<string, Provider>>
-  readonly refresh: (force?: boolean) => Effect.Effect<void>
+  readonly refresh: (force?: boolean) => Effect.Effect<void, SafeStartDisabledError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelsDev") {}
+
+export class SafeStartDisabledError extends Schema.TaggedErrorClass<SafeStartDisabledError>()(
+  "ModelsDev.SafeStartDisabledError",
+  {},
+) {
+  override get message() {
+    return "Models cache refresh is disabled during Astra safe start"
+  }
+}
 
 const layer = Layer.effect(
   Service,
@@ -209,6 +218,7 @@ const layer = Layer.effect(
     })
 
     const populate = Effect.gen(function* () {
+      if (Flag.ASTRA_SAFE_START) return (yield* loadSnapshot) ?? {}
       const fromDisk = yield* loadFromDisk
       if (fromDisk) return fromDisk
       const snapshot = yield* loadSnapshot
@@ -229,8 +239,9 @@ const layer = Layer.effect(
     const get = (): Effect.Effect<Record<string, Provider>> => cachedGet
 
     const refresh = Effect.fn("ModelsDev.refresh")(function* (force = false) {
-      if (!force && (yield* fresh())) return
-      yield* Effect.scoped(
+      if (Flag.ASTRA_SAFE_START) return yield* new SafeStartDisabledError({})
+      if (!force && (yield* fresh())) return yield* Effect.void
+      return yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Flock.effect(lockKey)
           // Re-check under the lock: another process may have refreshed between
@@ -246,7 +257,11 @@ const layer = Layer.effect(
       )
     })
 
-    if (!Flag.OPENCODE_DISABLE_MODELS_FETCH && !process.argv.includes("--get-yargs-completions")) {
+    if (
+      !Flag.ASTRA_SAFE_START &&
+      !Flag.OPENCODE_DISABLE_MODELS_FETCH &&
+      !process.argv.includes("--get-yargs-completions")
+    ) {
       // Schedule.spaced runs the effect once, then waits between completions.
       yield* Effect.forkScoped(refresh().pipe(Effect.repeat(Schedule.spaced("60 minutes")), Effect.ignore))
     }

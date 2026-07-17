@@ -3,9 +3,12 @@ import { $ } from "bun"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Global } from "@opencode-ai/core/global"
+import { Hash } from "@opencode-ai/core/util/hash"
 import fs from "fs/promises"
 import path from "path"
-import { Effect, Fiber, Layer } from "effect"
+import { Effect, Exit, Fiber, Layer } from "effect"
+import { InstanceState } from "@/effect/instance-state"
 import { Snapshot } from "../../src/snapshot"
 import {
   disposeAllInstances,
@@ -105,6 +108,35 @@ const withGitConfigGlobal = <A, E, R>(config: string, self: Effect.Effect<A, E, 
         else delete process.env.GIT_CONFIG_GLOBAL
       }),
   )
+
+it.instance(
+  "blocks snapshot Git mutation during Astra safe start without effects",
+  () =>
+    Effect.gen(function* () {
+      const ctx = yield* InstanceState.context
+      const snapshot = yield* Snapshot.Service
+      const gitdir = path.join(Global.Path.data, "snapshot", ctx.project.id, Hash.fast(ctx.worktree))
+      expect(yield* exists(gitdir)).toBe(false)
+
+      const exit = yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const previous = process.env.ASTRA_SAFE_START
+          process.env.ASTRA_SAFE_START = "1"
+          return previous
+        }),
+        () => Effect.exit(snapshot.track()),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.ASTRA_SAFE_START
+            else process.env.ASTRA_SAFE_START = previous
+          }),
+      )
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* exists(gitdir)).toBe(false)
+    }),
+  { git: true },
+)
 
 it.instance(
   "tracks deleted files correctly",

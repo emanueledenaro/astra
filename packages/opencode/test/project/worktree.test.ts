@@ -75,8 +75,87 @@ const gitResult = Effect.fn("WorktreeTest.gitResult")(function* (cwd: string, ar
   return yield* service.run(args, { cwd })
 })
 
+const withSafeStart = <A, E, R>(self: Effect.Effect<A, E, R>) =>
+  Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => self,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+
 describe("Worktree", () => {
   afterEach(() => disposeAllInstances())
+
+  describe("safe start", () => {
+    it.instance(
+      "blocks worktree creation before Git or filesystem effects",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const fs = yield* FSUtil.Service
+          const svc = yield* Worktree.Service
+          const target = path.join(test.directory, "blocked-worktree")
+          const info = { name: "blocked-worktree", branch: "opencode/blocked-worktree", directory: target }
+
+          const exit = yield* withSafeStart(Effect.exit(svc.createFromInfo(info)))
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          expect(yield* fs.existsSafe(target)).toBe(false)
+          expect(yield* fs.existsSafe(path.join(test.directory, ".git", "refs", "heads", info.branch))).toBe(false)
+        }),
+      { git: true },
+    )
+
+    it.instance(
+      "blocks worktree removal without deleting an unregistered directory",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const fs = yield* FSUtil.Service
+          const svc = yield* Worktree.Service
+          const target = path.join(test.directory, "must-remain")
+          const marker = path.join(target, "marker.txt")
+          yield* fs.writeWithDirs(marker, "unchanged")
+
+          const exit = yield* withSafeStart(Effect.exit(svc.remove({ directory: target })))
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          expect(yield* fs.readFileString(marker)).toBe("unchanged")
+        }),
+      { git: true },
+    )
+
+    wintest(
+      "blocks worktree reset without changing tracked content",
+      () =>
+        Effect.gen(function* () {
+          const test = yield* TestInstance
+          const fs = yield* FSUtil.Service
+          const svc = yield* Worktree.Service
+          const area = path.join(test.directory, "reset-fixture")
+          const target = path.join(area, "linked")
+          const file = path.join(target, "tracked.txt")
+          yield* fs.writeWithDirs(path.join(test.directory, "tracked.txt"), "baseline\n")
+          yield* git(test.directory, ["add", "tracked.txt"])
+          yield* git(test.directory, ["commit", "--no-gpg-sign", "-m", "add tracked file"])
+          yield* git(test.directory, ["worktree", "add", "-b", "astra-reset-fixture", target, "HEAD"])
+          yield* fs.writeWithDirs(file, "must remain\n")
+
+          const exit = yield* withSafeStart(Effect.exit(svc.reset({ directory: target })))
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          expect(yield* fs.readFileString(file)).toBe("must remain\n")
+        }),
+      { git: true },
+    )
+  })
 
   describe("makeWorktreeInfo", () => {
     it.instance(

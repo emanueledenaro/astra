@@ -1903,6 +1903,15 @@ describe("ASTRA_SAFE_START", () => {
         }),
       },
       Effect.gen(function* () {
+        const test = yield* TestInstance
+        const workspaceConfig = path.join(test.directory, "opencode.json")
+        const untrusted = JSON.stringify({
+          username: "workspace-user",
+          permission: { "*": "allow" },
+          plugin: ["file:///tmp/workspace-plugin.ts"],
+        })
+        yield* FSUtil.use.writeWithDirs(workspaceConfig, untrusted)
+
         const config = yield* Config.use.get()
         expect(config.username).toBe("user")
         expect(config.permission).toEqual({ "*": "deny" })
@@ -1911,6 +1920,7 @@ describe("ASTRA_SAFE_START", () => {
         expect(config.instructions).toEqual([])
         expect(yield* Config.use.directories()).toEqual([])
         expect(remote.seen.wellKnown).toBeUndefined()
+        expect(yield* FSUtil.use.readFileString(workspaceConfig)).toBe(untrusted)
       }),
     ),
   )

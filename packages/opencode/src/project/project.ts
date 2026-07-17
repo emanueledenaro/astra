@@ -365,6 +365,11 @@ const layer = Layer.effect(
 
     const initGit = Effect.fn("Project.initGit")(function* (input: { directory: string; project: Info }) {
       if (input.project.vcs === "git") return input.project
+      if (Flag.ASTRA_SAFE_START) {
+        return yield* Effect.die(
+          new Error("Git repository initialization is blocked until the Astra Git Control Plane authorizes it"),
+        )
+      }
       if (!(yield* Effect.sync(() => which("git")))) throw new Error("Git is not installed")
       const result = yield* git(["init", "--quiet"], { cwd: input.directory })
       if (result.code !== 0) {

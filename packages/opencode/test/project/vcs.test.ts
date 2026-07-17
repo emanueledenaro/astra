@@ -376,3 +376,97 @@ describe("Vcs apply", () => {
     { git: true },
   )
 })
+
+describe("Git safe start", () => {
+  afterEach(async () => {
+    await disposeAllInstances()
+  })
+
+  it.instance(
+    "blocks every generic Git process before the explicit Astra Git decision",
+    () =>
+      Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const previous = process.env.ASTRA_SAFE_START
+          process.env.ASTRA_SAFE_START = "1"
+          return previous
+        }),
+        () =>
+          Effect.gen(function* () {
+            const test = yield* TestInstance
+            const service = yield* Git.Service
+            const branch = "astra-safe-start-bypass"
+            const ref = path.join(test.directory, ".git", "refs", "heads", branch)
+            const output = path.join(test.directory, "blocked-diff-output.txt")
+            const trace = path.join(test.directory, "blocked-git-trace.json")
+
+            const branchResult = yield* service.run(["branch", branch], { cwd: test.directory })
+            const diffResult = yield* service.run(
+              ["diff", "--no-ext-diff", "--no-textconv", `--output=${output}`, "HEAD"],
+              { cwd: test.directory },
+            )
+            const statusResult = yield* service.run(["status", "--porcelain=v1"], {
+              cwd: test.directory,
+              env: { GIT_TRACE2_EVENT: trace },
+            })
+
+            expect(branchResult.exitCode).not.toBe(0)
+            expect(branchResult.stderr.toString("utf8")).toContain("Astra Git Control Plane")
+            expect(diffResult.exitCode).not.toBe(0)
+            expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(ref))).toBe(false)
+            expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(output))).toBe(false)
+            expect(statusResult.exitCode).not.toBe(0)
+            expect(statusResult.stderr.toString("utf8")).toContain("Astra Git Control Plane")
+            expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(trace))).toBe(false)
+          }),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.ASTRA_SAFE_START
+            else process.env.ASTRA_SAFE_START = previous
+          }),
+      ),
+    { git: true },
+  )
+
+  it.instance(
+    "rejects hostile diff option overrides before external process execution",
+    () =>
+      Effect.gen(function* () {
+        if (process.platform === "win32") return
+        const test = yield* TestInstance
+        const service = yield* Git.Service
+        const marker = path.join(test.directory, "external-diff-ran.txt")
+        const externalDiff = path.join(test.directory, "external-diff.sh")
+        const tracked = path.join(test.directory, "tracked.txt")
+        yield* write(tracked, "baseline\n")
+        yield* git(test.directory, ["add", "tracked.txt"])
+        yield* git(test.directory, ["commit", "--no-gpg-sign", "-m", "add tracked file"])
+        yield* write(tracked, "changed\n")
+        yield* write(externalDiff, '#!/bin/sh\nprintf touched > "$ASTRA_EXTERNAL_DIFF_MARKER"\n')
+        yield* Effect.promise(() => fs.chmod(externalDiff, 0o755))
+
+        const result = yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const previous = process.env.ASTRA_SAFE_START
+            process.env.ASTRA_SAFE_START = "1"
+            return previous
+          }),
+          () =>
+            service.run(["diff", "--no-ext-diff", "--no-textconv", "--ext-diff", "HEAD", "--", "tracked.txt"], {
+              cwd: test.directory,
+              env: { GIT_EXTERNAL_DIFF: externalDiff, ASTRA_EXTERNAL_DIFF_MARKER: marker },
+            }),
+          (previous) =>
+            Effect.sync(() => {
+              if (previous === undefined) delete process.env.ASTRA_SAFE_START
+              else process.env.ASTRA_SAFE_START = previous
+            }),
+        )
+
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stderr.toString("utf8")).toContain("Astra Git Control Plane")
+        expect(yield* FSUtil.Service.use((fs) => fs.existsSafe(marker))).toBe(false)
+      }),
+    { git: true },
+  )
+})

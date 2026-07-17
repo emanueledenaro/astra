@@ -14,7 +14,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Option } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { MCP } from "../../src/mcp/index"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
@@ -180,7 +180,67 @@ function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server:
   return status[server]?.status
 }
 
+function withAstraSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+}
+
 const remote = (url: string, timeout?: number) => ({ type: "remote" as const, url, oauth: false as const, timeout })
+
+it.instance("Astra safe start rejects MCP mutations and authentication without effects", () =>
+  withAstraSafeStart(
+    Effect.gen(function* () {
+      const mcp = yield* MCP.Service
+      const test = yield* TestInstance
+      const marker = path.join(test.directory, "mcp-process-ran")
+      const script = path.join(test.directory, "mcp-process-canary.ts")
+      yield* Effect.promise(() => Bun.write(script, `await Bun.write(${JSON.stringify(marker)}, "executed")`))
+      const server = yield* lifecycleServer()
+
+      expect(yield* mcp.status()).toEqual({})
+      expect(yield* mcp.clients()).toEqual({})
+
+      const attempts = [
+        mcp.add("blocked-local", { type: "local", command: [process.execPath, script] }),
+        mcp.add("blocked-remote", remote(server.url)),
+        mcp.connect("blocked"),
+        mcp.disconnect("blocked"),
+        mcp.startAuth("blocked"),
+        mcp.authenticate("blocked"),
+        mcp.finishAuth("blocked", "code"),
+        mcp.removeAuth("blocked"),
+        mcp.supportsOAuth("blocked"),
+        mcp.hasStoredTokens("blocked"),
+        mcp.getAuthStatus("blocked"),
+      ]
+
+      for (const attempt of attempts) {
+        const exit = yield* Effect.exit(attempt)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (!Exit.isFailure(exit)) continue
+        const failure = Cause.findErrorOption(exit.cause)
+        expect(Option.isSome(failure)).toBe(true)
+        if (Option.isSome(failure)) expect(failure.value).toBeInstanceOf(MCP.SafeStartDisabledError)
+      }
+
+      expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+      expect(server.state.requests).toEqual([])
+      expect(yield* mcp.status()).toEqual({})
+      expect(yield* mcp.clients()).toEqual({})
+    }),
+  ),
+)
 
 it.instance("advertises and lists the instance directory as its root", () =>
   Effect.gen(function* () {

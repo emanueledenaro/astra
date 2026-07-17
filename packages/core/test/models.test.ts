@@ -127,6 +127,40 @@ const initialState: MockState = {
 }
 
 describe("ModelsDev Service", () => {
+  it.live("Astra safe start does not read, replace, or fetch the models cache", () =>
+    Effect.gen(function* () {
+      yield* writeCacheText("{")
+      const state = yield* Ref.make({ ...initialState, body: JSON.stringify(fixture2) })
+      const previous = process.env.ASTRA_SAFE_START
+
+      const result = yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          process.env.ASTRA_SAFE_START = "1"
+        }),
+        () =>
+          provided(
+            state,
+            Effect.gen(function* () {
+              const svc = yield* ModelsDev.Service
+              const before = yield* svc.get()
+              const error = yield* Effect.flip(svc.refresh(true))
+              expect(error).toBeInstanceOf(ModelsDev.SafeStartDisabledError)
+              return { before, after: yield* svc.get() }
+            }),
+          ),
+        () =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.ASTRA_SAFE_START
+            else process.env.ASTRA_SAFE_START = previous
+          }),
+      )
+
+      expect(result).toEqual({ before: {}, after: {} })
+      expect(yield* Effect.promise(() => readFile(cacheFile, "utf8"))).toBe("{")
+      expect((yield* Ref.get(state)).calls).toEqual([])
+    }),
+  )
+
   it.live("get() returns providers from disk when cache file exists", () =>
     Effect.gen(function* () {
       yield* writeCache(fixture)

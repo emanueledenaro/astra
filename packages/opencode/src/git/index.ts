@@ -1,5 +1,6 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { AppProcess } from "@opencode-ai/core/process"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { Effect, Layer, Context, Stream } from "effect"
 import { ChildProcess } from "effect/unstable/process"
 
@@ -27,6 +28,8 @@ const fail = (err: unknown) =>
     stderr: Buffer.from(err instanceof Error ? err.message : String(err)),
     truncated: false,
   }) satisfies Result
+
+const SAFE_START_GIT_MESSAGE = "Git is blocked until the Astra Git Control Plane authorizes it"
 
 export type Kind = "added" | "deleted" | "modified"
 
@@ -109,6 +112,9 @@ const layer = Layer.effect(
 
     const run = Effect.fn("Git.run")(
       function* (args: string[], opts: Options) {
+        if (Flag.ASTRA_SAFE_START) {
+          return fail(new Error(SAFE_START_GIT_MESSAGE))
+        }
         const result = yield* appProcess.run(
           ChildProcess.make("git", [...cfg, ...args], {
             cwd: opts.cwd,
@@ -206,7 +212,7 @@ const layer = Layer.effect(
 
     const show = Effect.fn("Git.show")(function* (cwd: string, ref: string, file: string, prefix = "") {
       const target = prefix ? `${prefix}${file}` : file
-      const result = yield* run(["show", `${ref}:${target}`], { cwd })
+      const result = yield* run(["show", "--no-textconv", `${ref}:${target}`], { cwd })
       if (result.exitCode !== 0) return ""
       if (result.stdout.includes(0)) return ""
       return result.text()
@@ -227,7 +233,9 @@ const layer = Layer.effect(
 
     const diff = Effect.fn("Git.diff")(function* (cwd: string, ref: string) {
       const list = nuls(
-        yield* text(["diff", "--no-ext-diff", "--no-renames", "--name-status", "-z", ref, "--", "."], { cwd }),
+        yield* text(["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-status", "-z", ref, "--", "."], {
+          cwd,
+        }),
       )
       return list.flatMap((code, idx) => {
         if (idx % 2 !== 0) return []
@@ -239,7 +247,9 @@ const layer = Layer.effect(
 
     const stats = Effect.fn("Git.stats")(function* (cwd: string, ref: string) {
       return nuls(
-        yield* text(["diff", "--no-ext-diff", "--no-renames", "--numstat", "-z", ref, "--", "."], { cwd }),
+        yield* text(["diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--numstat", "-z", ref, "--", "."], {
+          cwd,
+        }),
       ).flatMap((item) => {
         const a = item.indexOf("\t")
         const b = item.indexOf("\t", a + 1)
@@ -262,7 +272,17 @@ const layer = Layer.effect(
 
     const patch = Effect.fn("Git.patch")(function* (cwd: string, ref: string, file: string, options?: PatchOptions) {
       const result = yield* run(
-        ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", file],
+        [
+          "diff",
+          "--patch",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-renames",
+          `--unified=${options?.context ?? 3}`,
+          ref,
+          "--",
+          file,
+        ],
         { cwd, maxOutputBytes: options?.maxOutputBytes },
       )
       return { text: result.truncated ? "" : result.text(), truncated: result.truncated } satisfies Patch
@@ -270,7 +290,17 @@ const layer = Layer.effect(
 
     const patchAll = Effect.fn("Git.patchAll")(function* (cwd: string, ref: string, options?: PatchOptions) {
       const result = yield* run(
-        ["diff", "--patch", "--no-ext-diff", "--no-renames", `--unified=${options?.context ?? 3}`, ref, "--", "."],
+        [
+          "diff",
+          "--patch",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--no-renames",
+          `--unified=${options?.context ?? 3}`,
+          ref,
+          "--",
+          ".",
+        ],
         { cwd, maxOutputBytes: options?.maxOutputBytes },
       )
       return { text: result.text(), truncated: result.truncated } satisfies Patch
@@ -287,6 +317,7 @@ const layer = Layer.effect(
           "--no-index",
           "--patch",
           "--no-ext-diff",
+          "--no-textconv",
           "--no-renames",
           `--unified=${options?.context ?? 3}`,
           "--",
@@ -299,10 +330,13 @@ const layer = Layer.effect(
     })
 
     const statUntracked = Effect.fn("Git.statUntracked")(function* (cwd: string, file: string) {
-      const result = yield* run(["diff", "--no-index", "--numstat", "--", "/dev/null", file], {
-        cwd,
-        maxOutputBytes: 4096,
-      })
+      const result = yield* run(
+        ["diff", "--no-index", "--no-ext-diff", "--no-textconv", "--numstat", "--", "/dev/null", file],
+        {
+          cwd,
+          maxOutputBytes: 4096,
+        },
+      )
 
       if (result.truncated) return
       const text = result.text()

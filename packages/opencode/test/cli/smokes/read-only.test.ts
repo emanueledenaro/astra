@@ -17,6 +17,8 @@
 import { describe, expect } from "bun:test"
 import { Effect } from "effect"
 import { cliIt } from "../../lib/cli-process"
+import path from "node:path"
+import { withAstraSafeStart } from "../../lib/astra-safe-start"
 
 describe("opencode read-only commands (smoke)", () => {
   // `mcp list` reads MCP server config and pings each one. With the empty
@@ -58,6 +60,23 @@ describe("opencode read-only commands (smoke)", () => {
         const r = yield* opencode.spawn(["models"])
         opencode.expectExit(r, 0, "models")
         expect(r.stdout).toContain("test/test-model")
+      }),
+    60_000,
+  )
+
+  cliIt.live(
+    "models --refresh: rejects safe start without claiming success or writing cache",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const r = yield* withAstraSafeStart(home, (env) => opencode.spawn(["models", "--refresh"], { env }))
+        expect(r.exitCode).not.toBe(0)
+        expect(r.stderr).toContain("Models cache refresh is disabled during Astra safe start")
+        expect(r.stdout).not.toContain("Models cache refreshed")
+        expect(
+          yield* Effect.promise(() =>
+            Bun.file(path.join(home, ".astra-safe-state", "cache", "opencode", "models.json")).exists(),
+          ),
+        ).toBe(false)
       }),
     60_000,
   )
