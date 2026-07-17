@@ -34,6 +34,27 @@ export type DurableDenial = Readonly<{
   lastCursor: number
 }>
 
+export type DurableExecution = Readonly<{
+  operationID: string
+  state: "effect_observed" | "failed" | "reconciliation_required"
+  sequence: number
+  lastCursor: number
+  receiptID: string | null
+  status: "effect_observed" | "failed_without_effect" | "reconciliation_required"
+}>
+
+export type DurableVerification = Readonly<{
+  operationID: string
+  state: "succeeded" | "failed" | "reconciliation_required"
+  sequence: number
+  lastCursor: number
+  status: "verified" | "failed" | "unknown"
+  evidence: Readonly<{
+    snapshotDigest: string
+    criteria: ReadonlyArray<Readonly<{ result: "passed" | "failed" | "unknown"; observationDigest: string }>>
+  }>
+}>
+
 export type WorkspaceGateDependencies = Readonly<{
   recordDeniedOperation?: (
     input: Readonly<{
@@ -44,6 +65,21 @@ export type WorkspaceGateDependencies = Readonly<{
       recordingStartedAt: string
     }>,
   ) => Promise<DurableDenial>
+  executeApprovedOperation?: (
+    input: Readonly<{
+      plan: ReturnType<typeof createControlledWritePlan>
+      report: WorkspaceTrustReport
+      policyAskedAt: string
+      approvalGrantedAt: string
+      recordingStartedAt: string
+    }>,
+  ) => Promise<DurableExecution>
+  verifyApprovedOperation?: (
+    input: Readonly<{
+      plan: ReturnType<typeof createControlledWritePlan>
+      report: WorkspaceTrustReport
+    }>,
+  ) => Promise<DurableVerification>
 }>
 
 export async function runWorkspaceGate(
@@ -137,46 +173,77 @@ export async function runWorkspaceGate(
     return { exitCode: 0, workspaceState, operationState, report }
   }
 
-  operationState = advanceOperation(operationState, "approval.granted", plan.operationId, io)
-  operationState = advanceOperation(operationState, "dispatch.requested", plan.operationId, io)
-  const { prepareControlledWrite } = await import("@astra/runtime/controlled-write")
-  const prepared = await prepareControlledWrite(plan, report)
-  if (!prepared.prepared) {
-    operationState = advanceOperation(operationState, "dispatch.proved_unclaimed", plan.operationId, io)
-    operationState = advanceOperation(operationState, "operation.cancelled", plan.operationId, io)
-    const snapshotChanged = ["identity_changed", "security_digest_changed", "preflight_blocked"].includes(
-      prepared.reason,
-    )
-    workspaceState = advanceWorkspace(workspaceState, snapshotChanged ? "snapshot.drifted" : "process.ended", io)
-    io.write(`CANCELLED  ${prepared.reason} • no host effect`)
+  if (!dependencies.executeApprovedOperation || !dependencies.verifyApprovedOperation) {
+    operationState = "reconciliation_required"
+    io.write(renderOperationState(plan.operationId, Operation.operationSemanticKey(operationState)))
+    io.write("RECONCILIATION REQUIRED  durable executor or independent verifier is unavailable")
+    workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
     return { exitCode: 2, workspaceState, operationState, report }
   }
 
-  operationState = advanceOperation(operationState, "executor.accepted", plan.operationId, io)
-  const effect = await prepared.execute()
-  if (effect.status === "failed_without_effect") {
-    operationState = advanceOperation(operationState, "execution.failed_without_effect", plan.operationId, io)
-    io.write(`FAILED     ${effect.reason} • no host effect observed`)
+  io.write("APPROVED   recording durable authority before host execution")
+  let executed: DurableExecution
+  try {
+    const approvalGrantedAt = new Date().toISOString()
+    executed = await dependencies.executeApprovedOperation({
+      plan,
+      report,
+      policyAskedAt,
+      approvalGrantedAt,
+      recordingStartedAt: new Date().toISOString(),
+    })
+    requireMatchingDurableExecution(executed, plan.operationId)
+  } catch (error) {
+    operationState = "reconciliation_required"
+    io.write(renderOperationState(plan.operationId, Operation.operationSemanticKey(operationState)))
+    io.write(`RECONCILIATION REQUIRED  ${recordingFailureMessage(error)} • effect will not be retried`)
+    workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
+    return { exitCode: 2, workspaceState, operationState, report }
+  }
+
+  operationState = executed.state
+  io.write(renderOperationState(plan.operationId, Operation.operationSemanticKey(operationState)))
+  io.write(`LEDGER     durable • sequence ${executed.sequence} • cursor ${executed.lastCursor}`)
+  if (executed.status === "failed_without_effect") {
+    io.write("FAILED     durable proof reports no host effect")
     workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
     return { exitCode: 1, workspaceState, operationState, report }
   }
-
-  operationState = advanceOperation(operationState, "effect.observed", plan.operationId, io)
-  io.write("EFFECT OBSERVED — NOT VERIFIED")
-  operationState = advanceOperation(operationState, "verification.started", plan.operationId, io)
-
-  if (effect.status === "effect_observed_unverified") {
-    operationState = advanceOperation(operationState, "verification.unknown", plan.operationId, io)
-    io.write(`RECONCILIATION REQUIRED  ${effect.reason}`)
+  if (executed.status === "reconciliation_required") {
+    io.write("RECONCILIATION REQUIRED  effect is uncertain • no automatic retry")
     workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
     return { exitCode: 2, workspaceState, operationState, report }
   }
 
-  operationState = advanceOperation(operationState, "verification.passed", plan.operationId, io)
-  io.write("VERIFIED   demo marker matches the exact expected bytes and SHA-256")
-  io.write(`EVIDENCE   ${effect.receipt.observedDigest} • ${effect.receipt.bytes} bytes`)
+  io.write("EFFECT OBSERVED — NOT VERIFIED")
+  let verification: DurableVerification
+  try {
+    verification = await dependencies.verifyApprovedOperation({ plan, report })
+    requireMatchingDurableVerification(verification, plan.operationId)
+  } catch {
+    operationState = "reconciliation_required"
+    io.write(renderOperationState(plan.operationId, Operation.operationSemanticKey(operationState)))
+    io.write("RECONCILIATION REQUIRED  independent verification evidence is unavailable")
+    workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
+    return { exitCode: 2, workspaceState, operationState, report }
+  }
+
+  operationState = verification.state
+  io.write(renderOperationState(plan.operationId, Operation.operationSemanticKey(operationState)))
+  io.write(`LEDGER     durable • sequence ${verification.sequence} • cursor ${verification.lastCursor}`)
+  if (verification.status === "verified") {
+    io.write("VERIFIED   independent verifier matched the exact expected bytes and SHA-256")
+    io.write(`EVIDENCE   ${verification.evidence.snapshotDigest}`)
+    workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
+    return { exitCode: 0, workspaceState, operationState, report }
+  }
+  io.write(
+    verification.status === "failed"
+      ? "FAILED     independent verification did not match"
+      : "RECONCILIATION REQUIRED  independent verification is inconclusive",
+  )
   workspaceState = advanceWorkspace(workspaceState, "process.ended", io)
-  return { exitCode: 0, workspaceState, operationState, report }
+  return { exitCode: verification.status === "failed" ? 1 : 2, workspaceState, operationState, report }
 }
 
 function requireMatchingDurableDenial(value: DurableDenial, operationID: string) {
@@ -189,6 +256,36 @@ function requireMatchingDurableDenial(value: DurableDenial, operationID: string)
     value.lastCursor < 1
   ) {
     throw new Error("The durable denial projection does not match the current Operation")
+  }
+}
+
+function requireMatchingDurableExecution(value: DurableExecution, operationID: string) {
+  if (
+    value.operationID !== operationID ||
+    !Number.isSafeInteger(value.sequence) ||
+    value.sequence < 1 ||
+    !Number.isSafeInteger(value.lastCursor) ||
+    value.lastCursor < 1 ||
+    (value.status === "effect_observed" && value.state !== "effect_observed") ||
+    (value.status === "failed_without_effect" && value.state !== "failed") ||
+    (value.status === "reconciliation_required" && value.state !== "reconciliation_required")
+  ) {
+    throw new Error("The durable execution projection does not match the current Operation")
+  }
+}
+
+function requireMatchingDurableVerification(value: DurableVerification, operationID: string) {
+  if (
+    value.operationID !== operationID ||
+    !Number.isSafeInteger(value.sequence) ||
+    value.sequence < 1 ||
+    !Number.isSafeInteger(value.lastCursor) ||
+    value.lastCursor < 1 ||
+    (value.status === "verified" && value.state !== "succeeded") ||
+    (value.status === "failed" && value.state !== "failed") ||
+    (value.status === "unknown" && value.state !== "reconciliation_required")
+  ) {
+    throw new Error("The durable verification projection does not match the current Operation")
   }
 }
 

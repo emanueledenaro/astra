@@ -1,10 +1,17 @@
 #!/usr/bin/env bun
 
-import { runWorkspaceGate, type DurableDenial, type EffectApproval, type WorkspaceDecision } from "./workspace-gate"
-import { operationLedgerPath } from "./app-state"
+import {
+  runWorkspaceGate,
+  type DurableDenial,
+  type DurableExecution,
+  type DurableVerification,
+  type EffectApproval,
+  type WorkspaceDecision,
+} from "./workspace-gate"
+import { operationLedgerPath, receiptSpoolPath } from "./app-state"
 import { createTerminalIO } from "./terminal-io"
 
-type OperationLedgerModule = Readonly<{
+type DeniedLedgerModule = Readonly<{
   recordDeniedControlledWrite: (
     input: Readonly<{
       filename: string
@@ -16,6 +23,38 @@ type OperationLedgerModule = Readonly<{
       >[0]["report"]
     }>,
   ) => Promise<DurableDenial>
+}>
+
+type ApprovedCoordinatorModule = Readonly<{
+  executeApprovedControlledWrite: (
+    input: Readonly<{
+      ledgerFilename: string
+      spoolFilename: string
+      plan: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
+      >[0]["plan"]
+      report: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
+      >[0]["report"]
+      policyAskedAt: string
+      approvalGrantedAt: string
+      recordingStartedAt: string
+    }>,
+  ) => Promise<DurableExecution>
+}>
+
+type ApprovedVerifierModule = Readonly<{
+  verifyRecordedControlledWrite: (
+    input: Readonly<{
+      ledgerFilename: string
+      plan: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["verifyApprovedOperation"]>
+      >[0]["plan"]
+      report: Parameters<
+        NonNullable<import("./workspace-gate").WorkspaceGateDependencies["verifyApprovedOperation"]>
+      >[0]["report"]
+    }>,
+  ) => Promise<DurableVerification>
 }>
 
 type Arguments = Readonly<{
@@ -39,6 +78,22 @@ if (!parsed.ok) {
           const loaded: unknown = await import(moduleName)
           if (!isOperationLedgerModule(loaded)) throw new Error("Astra Operation ledger adapter is unavailable")
           return loaded.recordDeniedControlledWrite({ filename: operationLedgerPath(), ...input })
+        },
+        async executeApprovedOperation(input) {
+          const moduleName = ["@astra/runtime", "controlled-write-coordinator"].join("/")
+          const loaded: unknown = await import(moduleName)
+          if (!isApprovedCoordinatorModule(loaded)) throw new Error("Astra durable executor is unavailable")
+          return loaded.executeApprovedControlledWrite({
+            ledgerFilename: operationLedgerPath(),
+            spoolFilename: receiptSpoolPath(),
+            ...input,
+          })
+        },
+        async verifyApprovedOperation(input) {
+          const moduleName = ["@astra/runtime", "controlled-write-verifier"].join("/")
+          const loaded: unknown = await import(moduleName)
+          if (!isApprovedVerifierModule(loaded)) throw new Error("Astra independent verifier is unavailable")
+          return loaded.verifyRecordedControlledWrite({ ledgerFilename: operationLedgerPath(), ...input })
         },
       })
     ).exitCode
@@ -88,12 +143,30 @@ function parseArguments(
   }
 }
 
-function isOperationLedgerModule(value: unknown): value is OperationLedgerModule {
+function isOperationLedgerModule(value: unknown): value is DeniedLedgerModule {
   return (
     typeof value === "object" &&
     value !== null &&
     "recordDeniedControlledWrite" in value &&
     typeof value.recordDeniedControlledWrite === "function"
+  )
+}
+
+function isApprovedCoordinatorModule(value: unknown): value is ApprovedCoordinatorModule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "executeApprovedControlledWrite" in value &&
+    typeof value.executeApprovedControlledWrite === "function"
+  )
+}
+
+function isApprovedVerifierModule(value: unknown): value is ApprovedVerifierModule {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "verifyRecordedControlledWrite" in value &&
+    typeof value.verifyRecordedControlledWrite === "function"
   )
 }
 

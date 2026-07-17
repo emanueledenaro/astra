@@ -24,13 +24,13 @@ describe("controlled demo write", () => {
     const root = await workspace()
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, "operation-positive")
-    const prepared = await prepareControlledWrite(plan, report)
+    const prepared = await prepareControlledWrite(plan, report, allowTestEffect)
 
     expect(prepared.prepared).toBeTrue()
     if (!prepared.prepared) throw new Error(prepared.reason)
     const result = await prepared.execute()
     expect(result).toMatchObject({
-      status: "verified",
+      status: "effect_observed",
       receipt: {
         path: join(root, demoMarkerName),
         expectedDigest: plan.contentDigest,
@@ -51,7 +51,11 @@ describe("controlled demo write", () => {
     const marker = join(root, demoMarkerName)
     await writeFile(marker, "user-owned\n")
     const report = await scanWorkspace(root)
-    const prepared = await prepareControlledWrite(createControlledWritePlan(root, "operation-existing"), report)
+    const prepared = await prepareControlledWrite(
+      createControlledWritePlan(root, "operation-existing"),
+      report,
+      allowTestEffect,
+    )
 
     expect(prepared).toEqual({ prepared: false, reason: "target_already_exists" })
     expect(await readFile(marker, "utf8")).toBe("user-owned\n")
@@ -99,7 +103,9 @@ describe("controlled demo write", () => {
     const report = await scanWorkspace(root)
     await writeFile(join(root, "AGENTS.md"), "changed after approval preview\n")
 
-    expect(await prepareControlledWrite(createControlledWritePlan(root, "operation-stale"), report)).toMatchObject({
+    expect(
+      await prepareControlledWrite(createControlledWritePlan(root, "operation-stale"), report, allowTestEffect),
+    ).toMatchObject({
       prepared: false,
       reason: "security_digest_changed",
     })
@@ -110,7 +116,9 @@ describe("controlled demo write", () => {
     await mkdir(join(root, ".git"))
     const report = await scanWorkspace(root)
 
-    expect(await prepareControlledWrite(createControlledWritePlan(root, "operation-git"), report)).toEqual({
+    expect(
+      await prepareControlledWrite(createControlledWritePlan(root, "operation-git"), report, allowTestEffect),
+    ).toEqual({
       prepared: false,
       reason: "git_baseline_not_inspected",
     })
@@ -120,7 +128,11 @@ describe("controlled demo write", () => {
   test("blocks the effect when Git metadata appears after preparation", async () => {
     const root = await workspace()
     const report = await scanWorkspace(root)
-    const prepared = await prepareControlledWrite(createControlledWritePlan(root, "operation-late-git"), report)
+    const prepared = await prepareControlledWrite(
+      createControlledWritePlan(root, "operation-late-git"),
+      report,
+      allowTestEffect,
+    )
     expect(prepared.prepared).toBeTrue()
     if (!prepared.prepared) throw new Error(prepared.reason)
 
@@ -133,3 +145,7 @@ describe("controlled demo write", () => {
     expect(await lstat(join(root, demoMarkerName)).catch(() => null)).toBeNull()
   })
 })
+
+async function allowTestEffect() {
+  return { allowed: true as const }
+}

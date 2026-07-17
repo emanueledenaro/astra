@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 const roots: Array<string> = []
@@ -39,6 +39,30 @@ describe("Astra CLI durable state", () => {
     })
   })
 
+  test("an approval uses the durable executor and independent verifier before printing VERIFIED", async () => {
+    const root = await workspace()
+    const dataDirectory = join(await temporaryDirectory("astra-cli-data-parent-"), "state")
+    const run = await runCli(root, dataDirectory, "activate-once", "approve")
+    const operationID = run.stdout.match(/OPERATION ([0-9a-f-]{36})/)?.[1]
+
+    expect(run.exitCode).toBe(0)
+    expect(run.stderr).toBe("")
+    expect(operationID).toBeDefined()
+    expect(await readFile(join(root, ".astra-demo-marker"), "utf8")).toContain(`operation_id=${operationID}`)
+    expect(run.stdout).toContain("EFFECT OBSERVED — NOT VERIFIED")
+    expect(run.stdout).toContain("VERIFIED   independent verifier matched")
+    expect(run.stdout.indexOf("EFFECT OBSERVED — NOT VERIFIED")).toBeLessThan(
+      run.stdout.indexOf("VERIFIED   independent verifier matched"),
+    )
+    expect(await readOperation(join(dataDirectory, "operations.sqlite"), operationID!)).toMatchObject({
+      operationID,
+      state: "succeeded",
+      sequence: 8,
+      lastCursor: 8,
+    })
+    expect(await exists(join(dataDirectory, "receipts.sqlite"))).toBeTrue()
+  })
+
   test("a command-line decision override cannot activate a Git workspace", async () => {
     const root = await workspace()
     await mkdir(join(root, ".git"))
@@ -74,7 +98,7 @@ async function runCli(root: string, dataDirectory: string, decision: string, app
     cwd: packageRoot,
     env: {
       ASTRA_DATA_DIR: dataDirectory,
-      HOME: join(root, "isolated-home"),
+      HOME: join(dataDirectory, "..", "isolated-home"),
       NO_COLOR: "1",
       PATH: process.env.PATH ?? "/usr/bin:/bin",
       TMPDIR: process.env.TMPDIR ?? tmpdir(),

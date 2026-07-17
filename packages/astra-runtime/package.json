@@ -9,7 +9,9 @@
     "./preflight": "./src/workspace-preflight.ts",
     "./controlled-write-plan": "./src/controlled-write-plan.ts",
     "./controlled-write": "./src/controlled-write.ts",
-    "./operation-ledger": "./src/operation-ledger.ts"
+    "./operation-ledger": "./src/operation-ledger.ts",
+    "./controlled-write-coordinator": "./src/controlled-write-coordinator.ts",
+    "./controlled-write-verifier": "./src/controlled-write-verifier.ts"
   },
   "scripts": {
     "test": "bun test",
@@ -17,6 +19,7 @@
   },
   "dependencies": {
     "@astra/domain": "workspace:*",
+    "@astra/executor": "workspace:*",
     "@astra/ledger": "workspace:*",
     "@effect/sql-sqlite-bun": "catalog:",
     "effect": "catalog:"

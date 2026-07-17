@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert"
 import { access, mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { Database } from "bun:sqlite"
 import { demoMarkerName } from "@astra/runtime/controlled-write-plan"
 import { createMaliciousWorkspace, directoryDigest, sentinelNames } from "../../astra-runtime/test/support"
 
@@ -27,9 +28,9 @@ try {
   console.log("\nDEMO MATRIX PASS")
   console.log("- read-only: zero workspace effects")
   console.log("- denied operation: durable state, no dispatch, and no marker")
-  console.log("- approved operation: one create-only marker with exact readback verification")
+  console.log("- approved operation: one create-only marker with independent durable verification")
   console.log("- network canary: zero requests")
-  console.log("- persistent trust: none; app state: one denied Operation ledger")
+  console.log("- persistent trust: none; durable ledger and acknowledged receipt spool only")
 } finally {
   await server.stop(true)
   await Promise.all(fixtures.map((fixture) => fixture.cleanup()))
@@ -85,9 +86,24 @@ async function verifyApprovedEffect() {
 
   assert.equal(run.exitCode, 0, run.stderr)
   assert.match(run.stdout, /EFFECT OBSERVED — NOT VERIFIED/)
-  assert.match(run.stdout, /VERIFIED   demo marker matches the exact expected bytes and SHA-256/)
+  assert.match(run.stdout, /VERIFIED   independent verifier matched the exact expected bytes and SHA-256/)
   assert.match(marker, /^Astra controlled host write\noperation_id=/)
   assert.deepEqual(await sentinelNames(fixture.sentinel), [])
+  const operationID = run.stdout.match(/OPERATION ([0-9a-f-]{36})/)?.[1]
+  assert.ok(operationID, "approved Operation ID was not rendered")
+  const durable = await readOperation(join(appState, "operations.sqlite"), operationID)
+  assert.equal(durable?.state, "succeeded", "approved Operation did not reach durable succeeded state")
+  assert.equal(durable?.sequence, 8, "approved Operation has an unexpected durable sequence")
+  const spool = new Database(join(appState, "receipts.sqlite"), { readonly: true })
+  const pending = spool
+    .query<
+      { count: number },
+      []
+    >("SELECT COUNT(*) AS count FROM receipt_spool LEFT JOIN receipt_ingestion_ack USING (receipt_id) WHERE receipt_ingestion_ack.receipt_id IS NULL")
+    .get()
+  spool.close()
+  assert.ok(pending, "receipt spool count query returned no row")
+  assert.equal(pending.count, 0, "executor receipt was not acknowledged after exact ledger ingestion")
   printCase("POSITIVE — APPROVED CONTROLLED WRITE", run.stdout)
 }
 

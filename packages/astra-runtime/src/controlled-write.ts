@@ -13,10 +13,11 @@ export type ControlledWriteReceipt = Readonly<{
   observedDigest: string | null
   targetIdentityMatched: boolean
   workspaceIdentityMatched: boolean
+  targetIdentity: WorkspaceIdentity | null
 }>
 
 export type ControlledWriteResult =
-  | Readonly<{ status: "verified"; receipt: ControlledWriteReceipt }>
+  | Readonly<{ status: "effect_observed"; receipt: ControlledWriteReceipt }>
   | Readonly<{ status: "failed_without_effect"; reason: string }>
   | Readonly<{
       status: "effect_observed_unverified"
@@ -28,6 +29,10 @@ export type PreparedControlledWrite =
   | Readonly<{ prepared: false; reason: string }>
   | Readonly<{ prepared: true; execute: () => Promise<ControlledWriteResult> }>
 
+export type EffectAuthorityCheck = () => Promise<
+  Readonly<{ allowed: true }> | Readonly<{ allowed: false; reason: string }>
+>
+
 /**
  * Revalidates the exact preflight snapshot before exposing the host effect.
  * The returned attempt is single-purpose and create-only.
@@ -35,6 +40,7 @@ export type PreparedControlledWrite =
 export async function prepareControlledWrite(
   plan: ControlledWritePlan,
   trustedReport: WorkspaceTrustReport,
+  authorizeEffect: EffectAuthorityCheck,
 ): Promise<PreparedControlledWrite> {
   if (plan.relativePath !== demoMarkerName || plan.workspaceRoot !== trustedReport.root) {
     return { prepared: false, reason: "plan_scope_mismatch" }
@@ -64,7 +70,7 @@ export async function prepareControlledWrite(
           reason: gitMetadataAppeared ? "git_baseline_not_inspected" : revalidation.reason,
         }
       }
-      return executeCreateOnlyWrite(plan, target, expectedIdentity)
+      return executeCreateOnlyWrite(plan, target, expectedIdentity, authorizeEffect)
     },
   }
 }
@@ -92,10 +98,13 @@ async function executeCreateOnlyWrite(
   plan: ControlledWritePlan,
   target: string,
   expectedWorkspaceIdentity: WorkspaceIdentity,
+  authorizeEffect: EffectAuthorityCheck,
 ): Promise<ControlledWriteResult> {
   let handle: Awaited<ReturnType<typeof open>> | null = null
   let created = false
   try {
+    const authority = await authorizeEffect()
+    if (!authority.allowed) return { status: "failed_without_effect", reason: authority.reason }
     handle = await open(target, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600)
     created = true
     const createdFacts = await handle.stat()
@@ -106,13 +115,13 @@ async function executeCreateOnlyWrite(
     const receipt = await readReceiptFromHandle(plan, target, handle, expectedWorkspaceIdentity, createdIdentity)
     await handle.close()
     handle = null
-    const verified =
+    const exactReadbackObserved =
       receipt.workspaceIdentityMatched &&
       receipt.targetIdentityMatched &&
       receipt.observedDigest === receipt.expectedDigest &&
       receipt.bytes === Buffer.byteLength(plan.content)
-    if (!verified) return { status: "effect_observed_unverified", reason: "readback_mismatch", receipt }
-    return { status: "verified", receipt }
+    if (!exactReadbackObserved) return { status: "effect_observed_unverified", reason: "readback_mismatch", receipt }
+    return { status: "effect_observed", receipt }
   } catch {
     if (handle) await handle.close().catch(() => {})
     if (!created) return { status: "failed_without_effect", reason: "create_rejected" }
@@ -126,6 +135,7 @@ async function executeCreateOnlyWrite(
         observedDigest: null,
         targetIdentityMatched: false,
         workspaceIdentityMatched: false,
+        targetIdentity: null,
       },
     }
   }
@@ -169,6 +179,7 @@ async function readReceiptFromHandle(
       completeRead && stableHandle ? `sha256:${createHash("sha256").update(content).digest("hex")}` : null,
     targetIdentityMatched,
     workspaceIdentityMatched,
+    targetIdentity: expectedTargetIdentity,
   }
 }
 
@@ -187,6 +198,7 @@ async function emptyReceipt(
     workspaceIdentityMatched: expectedWorkspaceIdentity
       ? await rootIdentityMatches(plan.workspaceRoot, expectedWorkspaceIdentity)
       : true,
+    targetIdentity: null,
   }
 }
 

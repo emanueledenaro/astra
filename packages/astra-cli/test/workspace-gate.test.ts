@@ -39,6 +39,43 @@ function scriptedIO(decision: WorkspaceDecision, approval: EffectApproval = "den
   return { io, lines }
 }
 
+function approvedDependencies() {
+  return {
+    async executeApprovedOperation({
+      plan,
+    }: Parameters<
+      NonNullable<import("../src/workspace-gate").WorkspaceGateDependencies["executeApprovedOperation"]>
+    >[0]) {
+      await writeFile(join(plan.workspaceRoot, plan.relativePath), plan.content, { flag: "wx" })
+      return {
+        operationID: plan.operationId,
+        state: "effect_observed" as const,
+        sequence: 6,
+        lastCursor: 6,
+        receiptID: crypto.randomUUID(),
+        status: "effect_observed" as const,
+      }
+    },
+    async verifyApprovedOperation({
+      plan,
+    }: Parameters<
+      NonNullable<import("../src/workspace-gate").WorkspaceGateDependencies["verifyApprovedOperation"]>
+    >[0]) {
+      return {
+        operationID: plan.operationId,
+        state: "succeeded" as const,
+        sequence: 8,
+        lastCursor: 8,
+        status: "verified" as const,
+        evidence: {
+          snapshotDigest: plan.contentDigest,
+          criteria: [{ result: "passed" as const, observationDigest: plan.contentDigest }],
+        },
+      }
+    },
+  }
+}
+
 async function exists(path: string) {
   try {
     await lstat(path)
@@ -238,28 +275,19 @@ describe("workspace gate", () => {
   test("runs one approved create-only effect through observed and verified states", async () => {
     const root = await workspace()
     const terminal = scriptedIO("activate-once", "approve")
-    const result = await runWorkspaceGate(root, terminal.io)
+    const result = await runWorkspaceGate(root, terminal.io, approvedDependencies())
     const output = terminal.lines.join("\n")
 
     expect(result).toMatchObject({ exitCode: 0, workspaceState: "UNTRUSTED", operationState: "succeeded" })
     expect(await readFile(join(root, demoMarkerName), "utf8")).toContain("Astra controlled host write")
-    for (const state of [
-      "PLANNING",
-      "AWAITING_APPROVAL",
-      "READY",
-      "DISPATCHING",
-      "RUNNING",
-      "EFFECT_OBSERVED",
-      "VERIFYING",
-      "VERIFIED",
-    ]) {
+    for (const state of ["PLANNING", "AWAITING_APPROVAL", "EFFECT_OBSERVED", "VERIFIED"]) {
       expect(output).toContain(state)
     }
     expect(output.indexOf("EFFECT OBSERVED — NOT VERIFIED")).toBeLessThan(
-      output.indexOf("VERIFIED   demo marker matches"),
+      output.indexOf("VERIFIED   independent verifier matched"),
     )
     expect(output).toContain("HOST EXECUTION — NO SANDBOX")
-    expect(output).toContain("demo marker matches the exact expected bytes and SHA-256")
+    expect(output).toContain("independent verifier matched the exact expected bytes and SHA-256")
   })
 
   test("invalidates activate-once when bounded static facts change after preview", async () => {
@@ -274,25 +302,38 @@ describe("workspace gate", () => {
     expect(terminal.lines.join("\n")).toContain("run a new bounded static preflight")
   })
 
-  test("cancels without overwriting an existing marker or inventing stale trust", async () => {
+  test("fails closed without overwriting an existing marker", async () => {
     const root = await workspace()
     const marker = join(root, demoMarkerName)
     await writeFile(marker, "user-owned\n")
     const terminal = scriptedIO("activate-once", "approve")
-    const result = await runWorkspaceGate(root, terminal.io)
+    const dependencies = approvedDependencies()
+    const result = await runWorkspaceGate(root, terminal.io, {
+      ...dependencies,
+      async executeApprovedOperation({ plan }) {
+        return {
+          operationID: plan.operationId,
+          state: "failed",
+          sequence: 6,
+          lastCursor: 6,
+          receiptID: crypto.randomUUID(),
+          status: "failed_without_effect",
+        }
+      },
+    })
 
-    expect(result).toMatchObject({ exitCode: 2, workspaceState: "UNTRUSTED", operationState: "cancelled" })
+    expect(result).toMatchObject({ exitCode: 1, workspaceState: "UNTRUSTED", operationState: "failed" })
     expect(await readFile(marker, "utf8")).toBe("user-owned\n")
-    expect(terminal.lines.join("\n")).toContain("target_already_exists • no host effect")
+    expect(terminal.lines.join("\n")).toContain("durable proof reports no host effect")
   })
 
-  test("loads the effect adapter dynamically only after explicit approval", async () => {
+  test("does not import or invoke the host effect adapter directly", async () => {
     const source = await Bun.file(new URL("../src/workspace-gate.ts", import.meta.url)).text()
 
     expect(source).not.toContain('from "@astra/runtime/controlled-write"')
-    expect(source).toContain('await import("@astra/runtime/controlled-write")')
+    expect(source).not.toContain('import("@astra/runtime/controlled-write")')
     expect(source.indexOf('if (approval === "deny")')).toBeLessThan(
-      source.indexOf('await import("@astra/runtime/controlled-write")'),
+      source.indexOf("dependencies.executeApprovedOperation"),
     )
   })
 })
