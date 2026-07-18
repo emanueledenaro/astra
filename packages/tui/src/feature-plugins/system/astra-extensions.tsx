@@ -264,15 +264,27 @@ export function AstraExtensionsView(props: {
       <Show when={completed()}>
         {(terminal) => (
           <>
-            <box height={1} />
-            <text fg={props.api.theme.current.warning}>CANDIDATES • INACTIVE • NOT VERIFIED</text>
+            <Show when={!terminal().candidates.some((candidate) => candidate.kind === "plugin")}>
+              <box height={1} />
+              <text fg={props.api.theme.current.warning}>CANDIDATES • INACTIVE • NOT VERIFIED</text>
+            </Show>
             <For each={terminal().candidates}>
               {(candidate) => (
-                <Row
-                  label={candidate.kind.toUpperCase()}
-                  value={`${candidate.displayName} • ${candidate.referenceClass} • INACTIVE • NOT VERIFIED`}
-                  api={props.api}
-                />
+                <Show
+                  when={candidate.kind === "plugin"}
+                  fallback={
+                    <Row
+                      label={candidate.kind.toUpperCase()}
+                      value={`${candidate.displayName} • ${candidate.referenceClass} • INACTIVE • NOT VERIFIED`}
+                      api={props.api}
+                    />
+                  }
+                >
+                  <box flexDirection="column" flexShrink={0}>
+                    <Row label="PLUGIN" value="QUARANTINED • INACTIVE • NOT VERIFIED" api={props.api} />
+                    <text fg={props.api.theme.current.warning}>ACTIVATION DEFERRED — HOST CODE IS NOT CONTAINED</text>
+                  </box>
+                </Show>
               )}
             </For>
           </>

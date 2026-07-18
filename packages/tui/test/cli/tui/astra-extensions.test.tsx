@@ -102,6 +102,7 @@ test("opens Astra /extensions inertly, previews exact authority, and shows inact
     expect(frame).toContain("STATIC JSON/JSONC • NO ACTIVATION")
     expect(frame).toContain("NO AUTOMATIC discovery, initialization, or activation")
     expect(frame).toContain("M activate eligible MCP")
+    expect([...commands.keys()].some((name) => name.includes("plugin") && name.includes("activate"))).toBe(false)
     expect(effects).toEqual([])
     expect(current.name).toBe("astra-extensions")
     dispatchCommand("astra.extensions.inventory")
@@ -111,8 +112,11 @@ test("opens Astra /extensions inertly, previews exact authority, and shows inact
     expect(preview).toContain("opencode.json")
     expect(preview).not.toContain("Plugin candidate")
     dispatchCommand("astra.extensions.approve")
-    const completed = await app.waitForFrame((value) => value.includes("Plugin candidate abcdef12"))
-    expect(completed).toContain("INACTIVE • NOT VERIFIED")
+    const completed = await app.waitForFrame((value) => value.includes("ACTIVATION DEFERRED"))
+    expect(completed).toContain("PLUGIN")
+    expect(completed).toContain("QUARANTINED • INACTIVE • NOT VERIFIED")
+    expect(completed).toContain("ACTIVATION DEFERRED — HOST CODE IS NOT CONTAINED")
+    expect(completed).not.toContain("Activate plugin")
     expect(calls).toEqual(["prepare", "approve"])
     dispatchCommand("astra.extensions.mcp.prepare")
     const mcpPreview = await app.waitForFrame((value) => value.includes("MCP ACTIVATION • AWAITING_DECISION"))
@@ -187,8 +191,8 @@ const inventoryClient = {
           kind: "plugin",
           displayName: "Plugin candidate abcdef12",
           source: "config",
-          sourcePath: "opencode.json",
-          referenceClass: "package",
+          sourcePath: ".opencode/plugin/hostile.mjs",
+          referenceClass: "local_path",
           referenceDigest: contentDigest("c"),
           state: "inactive",
           verification: "not_verified",
