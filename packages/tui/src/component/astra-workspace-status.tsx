@@ -9,6 +9,7 @@ export type AstraWorkspaceStatusView = Readonly<{
   mode: AstraWorkspaceMode
   label: string
   color: string
+  boundaryLabel?: "HOST EXECUTION — NO SANDBOX"
 }>
 
 export function getAstraWorkspaceStatus(
@@ -22,6 +23,7 @@ export function getAstraWorkspaceStatus(
       mode: "activate-once",
       label: "ASTRA  •  ACTIVE ONCE  •  GOVERNED EFFECTS ONLY",
       color: "#f0bd6a",
+      boundaryLabel: "HOST EXECUTION — NO SANDBOX",
     }
   }
   return undefined
@@ -35,8 +37,9 @@ export function AstraWorkspaceStatus(props: { authority?: AstraSessionAuthority 
   if (!status) return null
 
   return (
-    <box paddingLeft={1} paddingRight={1}>
+    <box paddingLeft={1} paddingRight={1} flexDirection="column">
       <text fg={status.color}>{status.label}</text>
+      {status.boundaryLabel ? <text fg="#ff6b6b">{status.boundaryLabel}</text> : null}
     </box>
   )
 }

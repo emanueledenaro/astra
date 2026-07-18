@@ -15,6 +15,7 @@ test("describes activate-once as governed rather than generally enabled", () => 
   expect(getAstraWorkspaceStatus(authority("activate-once"))).toMatchObject({
     mode: "activate-once",
     label: "ASTRA  •  ACTIVE ONCE  •  GOVERNED EFFECTS ONLY",
+    boundaryLabel: "HOST EXECUTION — NO SANDBOX",
   })
 })
 
@@ -29,7 +30,24 @@ test("renders the read-only state as a visible TUI strip", async () => {
   })
   try {
     await app.renderOnce()
-    expect(app.captureCharFrame()).toContain("ASTRA  •  READ ONLY  •  EFFECTS DENIED")
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("ASTRA  •  READ ONLY  •  EFFECTS DENIED")
+    expect(frame).not.toContain("HOST EXECUTION — NO SANDBOX")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("keeps the host execution boundary visible across active workspace surfaces", async () => {
+  const app = await testRender(() => <AstraWorkspaceStatus authority={authority("activate-once")} />, {
+    width: 60,
+    height: 3,
+  })
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("ASTRA  •  ACTIVE ONCE  •  GOVERNED EFFECTS ONLY")
+    expect(frame).toContain("HOST EXECUTION — NO SANDBOX")
   } finally {
     app.renderer.destroy()
   }
