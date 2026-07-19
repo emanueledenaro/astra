@@ -19,6 +19,9 @@ test("wires provider chat to the exact parent-owned skill control instance", () 
         },
       }
     },
+    revoke() {
+      return false
+    },
     takeForParentTransport() {
       return {
         ok: false as const,

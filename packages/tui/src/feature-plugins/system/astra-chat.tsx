@@ -9,12 +9,20 @@ import type {
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import type { TuiPluginApi, TuiRouteCurrent } from "@opencode-ai/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js"
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { createAstraProviderClient, type AstraProviderClient } from "../../astra/provider-client"
 import { useBindings } from "../../keymap"
 import { Locale } from "../../util/locale"
 
 const routeName = "astra-chat"
+const maximumVisibleHistoryTurns = 8
+
+type ChatTurn = Readonly<{
+  modelID: string
+  userText: string
+  assistantText: string
+  finishReason: string
+}>
 
 type ChatState =
   | Readonly<{ status: "loading_catalog" }>
@@ -45,6 +53,7 @@ type ChatState =
     }>
   | Readonly<{
       status: "completed"
+      catalog: ProviderControlCatalog
       modelID: string
       userText: string
       result: Extract<ProviderTurnDecisionResult, { status: "response_observed_not_verified" }>
@@ -62,6 +71,7 @@ export function AstraChatView(props: {
   const dimensions = useTerminalDimensions()
   const valueWidth = createMemo(() => Math.max(24, dimensions().width - 18))
   const [state, setState] = createSignal<ChatState>({ status: "loading_catalog" })
+  const [history, setHistory] = createSignal<ReadonlyArray<ChatTurn>>([])
   let generation = 0
   let abort: AbortController | undefined
 
@@ -105,7 +115,7 @@ export function AstraChatView(props: {
   const compose = () => {
     const current = state()
     if (props.authority.mode !== "activate-once") return setState({ status: "blocked", reason: "read_only" })
-    if (current.status !== "ready") return
+    if (current.status !== "ready" && current.status !== "completed") return
     props.api.ui.dialog.replace(() => (
       <props.api.ui.DialogPrompt
         title="Message Astra"
@@ -114,6 +124,19 @@ export function AstraChatView(props: {
           const userText = raw.trim()
           if (!userText) return
           props.api.ui.dialog.clear()
+          if (current.status === "completed") {
+            setHistory((turns) =>
+              [
+                ...turns,
+                {
+                  modelID: current.modelID,
+                  userText: current.userText,
+                  assistantText: current.result.response.assistantText,
+                  finishReason: current.result.response.finishReason,
+                },
+              ].slice(-maximumVisibleHistoryTurns),
+            )
+          }
           const currentGeneration = ++generation
           abort = new AbortController()
           setState({ status: "preparing", catalog: current.catalog, modelID: current.modelID, userText })
@@ -153,7 +176,13 @@ export function AstraChatView(props: {
       .then((result) => {
         if (generation !== currentGeneration) return
         if (result.status === "response_observed_not_verified") {
-          setState({ status: "completed", modelID: current.modelID, userText: current.userText, result })
+          setState({
+            status: "completed",
+            catalog: current.catalog,
+            modelID: current.modelID,
+            userText: current.userText,
+            result,
+          })
           return
         }
         if (result.status === "denied_without_effect") {
@@ -176,9 +205,13 @@ export function AstraChatView(props: {
 
   const reset = () => {
     const current = state()
-    if (current.status === "prepared") return decide("reject", loadCatalog)
+    const clear = () => {
+      setHistory([])
+      loadCatalog()
+    }
+    if (current.status === "prepared") return decide("reject", clear)
     if (decisionInFlight(current)) return
-    loadCatalog()
+    clear()
   }
   const close = () => {
     const navigate = () => {
@@ -240,7 +273,9 @@ export function AstraChatView(props: {
       </box>
       <text fg={props.api.theme.current.error}>HOST EXECUTION — NO SANDBOX</text>
       <text fg={props.api.theme.current.warning}>NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX</text>
-      <text fg={props.api.theme.current.warning}>ONE TURN · NO TOOLS · NO FILES · NO HISTORY · NOT VERIFIED</text>
+      <text fg={props.api.theme.current.warning}>
+        INDEPENDENT TURNS · IN-MEMORY DISPLAY ONLY · NO TOOLS · NO FILES · NOT VERIFIED
+      </text>
       <box height={1} />
       <Row
         label="WORKSPACE"
@@ -314,6 +349,16 @@ export function AstraChatView(props: {
           </>
         )}
       </Show>
+      <For each={history()}>
+        {(turn) => (
+          <box marginTop={1} flexDirection="column">
+            <text fg={props.api.theme.current.textMuted}>YOU · MEMORY ONLY · {turn.modelID}</text>
+            <text fg={props.api.theme.current.text}>{turn.userText}</text>
+            <text fg={props.api.theme.current.textMuted}>ASTRA · {turn.finishReason.toUpperCase()} · MEMORY ONLY</text>
+            <text fg={props.api.theme.current.text}>{turn.assistantText}</text>
+          </box>
+        )}
+      </For>
       <Show when={userTextOf(state())}>
         {(text) => (
           <box marginTop={1} flexDirection="column">
@@ -333,6 +378,13 @@ export function AstraChatView(props: {
       </Show>
       <Show when={blockedOf(state())}>
         {(reason) => <Row label="REASON" value={reason().replaceAll("_", " ")} api={props.api} />}
+      </Show>
+      <Show when={blockedOf(state()) === "credential_unavailable"}>
+        <box marginTop={1} flexDirection="column">
+          <Row label="ACTION" value="Add an Anthropic API key with the existing OpenCode authentication flow." api={props.api} />
+          <Row label="THEN" value="Restart Astra and open /chat again." api={props.api} />
+          <Row label="SECRET" value="Never displayed or stored by this chat screen." api={props.api} />
+        </box>
       </Show>
       <Show when={reconciliationOf(state())}>{(id) => <Row label="OPERATION" value={id()} api={props.api} />}</Show>
     </box>

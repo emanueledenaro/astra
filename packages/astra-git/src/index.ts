@@ -18,6 +18,19 @@ export {
   prepareGitStageSelected,
   verifyGitStageSelected,
 } from "./stage"
+export { executeGitCommitLocal, prepareGitCommitLocal, verifyGitCommitLocal } from "./commit"
+export type {
+  GitCommitBlockReason,
+  GitCommitDependencies,
+  GitCommitDurableClaim,
+  GitCommitDurableClaimResult,
+  GitCommitExecutionResult,
+  GitCommitFaultPoint,
+  GitCommitInvocation,
+  GitCommitPreparationResult,
+  GitCommitProcessObservation,
+  GitCommitVerificationResult,
+} from "./commit"
 export type {
   GitStageBlockReason,
   GitStageDependencies,

@@ -78,6 +78,84 @@ test("renders skill metadata only and rejects a prepared proposal before reset o
   }
 })
 
+test("explains safe credential setup without rendering a secret", async () => {
+  const secret = "sk-ant-must-never-render"
+  const client = {
+    catalog: () => Promise.resolve(catalogResult),
+    prepare: () =>
+      Promise.resolve({ schemaVersion: 1, requestId, status: "blocked", reason: "credential_unavailable" } as const),
+    decide: () => Promise.reject(new Error("No proposal must be decided")),
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderSurface(client)
+
+  try {
+    await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
+    await prepareThroughDialog(app)
+    const blocked = await app.render.waitForFrame((frame) => frame.includes("credential unavailable"))
+    expect(blocked).toContain("Add an Anthropic API key with the existing OpenCode authentication flow.")
+    expect(blocked).toContain("Restart Astra and open /chat again.")
+    expect(blocked).toContain("Never displayed or stored by this chat screen.")
+    expect(blocked).not.toContain(secret)
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
+test("keeps consecutive independent turns in route memory and clears them on reset", async () => {
+  let decisions = 0
+  const client = {
+    catalog: () => Promise.resolve(catalogResult),
+    prepare: () => Promise.resolve({ schemaVersion: 1, requestId, status: "prepared", preview } as const),
+    decide: () => {
+      decisions += 1
+      const assistantText = decisions === 1 ? "First observed answer" : "Second observed answer"
+      return Promise.resolve({
+        schemaVersion: 1,
+        requestId,
+        proposalID,
+        operationID,
+        status: "response_observed_not_verified",
+        receiptID: "50000000-0000-4000-8000-000000000005",
+        completionLabel: "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED",
+        response: {
+          assistantText,
+          assistantTextDigest: sha256(assistantText),
+          assistantTextBytes: Buffer.byteLength(assistantText),
+          finishReason: "stop",
+        },
+      } as const)
+    },
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderSurface(client)
+
+  try {
+    await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
+    await prepareThroughDialog(app)
+    await app.render.waitForFrame((frame) => frame.includes("AWAITING EXPLICIT DECISION"))
+    app.dispatch("astra.chat.approve")
+    await app.render.waitForFrame((frame) => frame.includes("First observed answer"))
+
+    await prepareThroughDialog(app)
+    const secondPrepared = await app.render.waitForFrame(
+      (frame) => frame.includes("AWAITING EXPLICIT DECISION") && frame.includes("First observed answer"),
+    )
+    app.dispatch("astra.chat.approve")
+    const completed = await app.render.waitForFrame(
+      (frame) => frame.includes("First observed answer") && frame.includes("Second observed answer"),
+    )
+    expect(completed).toContain("COMPLETED — RESPONSE OBSERVED — NOT VERIFIED")
+
+    app.dispatch("astra.chat.reset")
+    const reset = await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
+    expect(reset).not.toContain("First observed answer")
+    expect(reset).not.toContain("Second observed answer")
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
 async function prepareThroughDialog(app: Awaited<ReturnType<typeof renderSurface>>) {
   app.dispatch("astra.chat.compose")
 }
@@ -163,6 +241,9 @@ const operationID = "30000000-0000-4000-8000-000000000003"
 const modelID = "claude-sonnet-4-5-20250929"
 const privateInstructions = "PRIVATE RAW INSTRUCTIONS MUST NOT RENDER"
 const digest = `sha256:${"a".repeat(64)}` as const
+function sha256(value: string) {
+  return `sha256:${Bun.CryptoHasher.hash("sha256", value, "hex")}` as const
+}
 const catalogResult = {
   schemaVersion: 1,
   requestId,

@@ -171,6 +171,27 @@ describe("parent provider credential broker", () => {
     })
   })
 
+  test("revokes only an exact session-bound handle and releases its capacity", async () => {
+    const broker = createParentProviderCredentialBroker({
+      auth: { get: async () => ({ type: "api", key: API_KEY }) },
+    })
+    const issued = await Promise.all(Array.from({ length: 4 }, () => broker.issueForSession("session-1")))
+    expect(issued.every((result) => result.ok)).toBe(true)
+    const first = issued[0]
+    if (!first?.ok) throw new Error("Expected an issued credential")
+
+    expect(broker.revoke({ credentialHandle: first.grant.credentialHandle, sessionID: "session-2" })).toBe(false)
+    expect(broker.revoke({ credentialHandle: first.grant.credentialHandle, sessionID: "session-1" })).toBe(true)
+    expect(broker.revoke({ credentialHandle: first.grant.credentialHandle, sessionID: "session-1" })).toBe(false)
+    expect(
+      broker.takeForParentTransport({
+        credentialHandle: first.grant.credentialHandle,
+        sessionID: "session-1",
+      }),
+    ).toMatchObject({ ok: false })
+    expect((await broker.issueForSession("session-1")).ok).toBe(true)
+  })
+
   test("keeps the non-secret account fingerprint stable inside one parent broker", async () => {
     const broker = createParentProviderCredentialBroker({
       auth: { get: async () => ({ type: "api", key: API_KEY }) },

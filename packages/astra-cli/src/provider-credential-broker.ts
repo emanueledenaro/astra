@@ -61,6 +61,7 @@ export type ParentTransportCredentialResult =
 
 export type ParentProviderCredentialBroker = Readonly<{
   issueForSession: (sessionID: string) => Promise<ProviderCredentialGrantResult>
+  revoke: (input: Readonly<{ credentialHandle: string; sessionID: string }>) => boolean
   takeForParentTransport: (
     input: Readonly<{ credentialHandle: string; sessionID: string }>,
   ) => ParentTransportCredentialResult
@@ -188,7 +189,15 @@ export function createParentProviderCredentialBroker(
     })
   }
 
-  return Object.freeze({ issueForSession, takeForParentTransport })
+  const revoke = (input: Readonly<{ credentialHandle: string; sessionID: string }>) => {
+    if (!isCredentialHandle(input.credentialHandle) || !isSessionID(input.sessionID)) return false
+    const record = records.get(input.credentialHandle)
+    if (!record || record.sessionID !== input.sessionID) return false
+    removeGrant(records, expiryCancellations, input.credentialHandle)
+    return true
+  }
+
+  return Object.freeze({ issueForSession, revoke, takeForParentTransport })
 }
 
 async function readAnthropicApiAuth(

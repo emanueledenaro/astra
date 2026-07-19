@@ -9,7 +9,10 @@ import { makeProviderTurnOperationFacts } from "@astra/runtime/provider-turn-ope
 import type { TrustedObservedProviderCompletion } from "@astra/runtime/provider-turn-transport"
 import { scanWorkspace } from "@astra/runtime/preflight"
 import { createAstraProviderControl } from "../src/provider-control"
-import type { ParentProviderCredentialBroker } from "../src/provider-credential-broker"
+import {
+  createParentProviderCredentialBroker,
+  type ParentProviderCredentialBroker,
+} from "../src/provider-credential-broker"
 import type { TrustedPromptSkillBundle } from "../src/skill-activation-control"
 
 const roots: string[] = []
@@ -143,6 +146,45 @@ describe("parent provider control", () => {
     expect(result).toMatchObject({ status: "denied_without_effect", receiptID: null })
     expect(takes).toBe(0)
     expect(dispatches).toBe(0)
+  })
+
+  test("revokes every rejected credential so four denials do not block a fifth proposal", async () => {
+    const fixture = await makeFixture("activate-once")
+    const issued: Array<Readonly<{ credentialHandle: string; sessionID: string }>> = []
+    const parentBroker = createParentProviderCredentialBroker({
+      auth: { get: async () => ({ type: "api", key: "sk-ant-rejected-and-revoked" }) },
+    })
+    const credentialBroker: ParentProviderCredentialBroker = {
+      async issueForSession(sessionID) {
+        const result = await parentBroker.issueForSession(sessionID)
+        if (result.ok) issued.push(result.grant)
+        return result
+      },
+      revoke: parentBroker.revoke,
+      takeForParentTransport: parentBroker.takeForParentTransport,
+    }
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker,
+      randomUUID: uuidSequence(),
+      execute: async (input, _resolveWire, _parse, dependencies) => {
+        expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("reject")
+        return denied(input.plan.operationID)
+      },
+    })
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const prepared = await control.prepare(modelID, `reject ${attempt}`)
+      if (prepared.status !== "prepared") throw new Error(`Attempt ${attempt}: ${prepared.reason}`)
+      expect(prepared.status).toBe("prepared")
+      expect(await control.decide(prepared.preview.proposalID, "reject", () => {})).toMatchObject({
+        status: "denied_without_effect",
+      })
+      const grant = issued.at(-1)
+      expect(grant).toBeDefined()
+      if (!grant) throw new Error("Expected an issued credential grant")
+      expect(parentBroker.takeForParentTransport(grant)).toMatchObject({ ok: false })
+    }
   })
 
   test("binds one activated skill as metadata before consent and reveals instructions only to approved parent transport", async () => {
@@ -405,6 +447,9 @@ function broker(
       input.onIssue?.()
       return { ok: true as const, grant }
     },
+    revoke() {
+      return true
+    },
     takeForParentTransport() {
       input.onTake?.()
       return {
@@ -427,6 +472,9 @@ function unavailableBroker(): ParentProviderCredentialBroker {
         ok: false,
         error: { code: "credential_unavailable", message: "Anthropic API credential is unavailable." },
       }
+    },
+    revoke() {
+      return false
     },
     takeForParentTransport() {
       return {

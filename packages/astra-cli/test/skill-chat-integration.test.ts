@@ -169,6 +169,9 @@ function broker(sessionID: string) {
     async issueForSession() {
       return { ok: true as const, grant }
     },
+    revoke() {
+      return true
+    },
     takeForParentTransport() {
       return {
         ok: true as const,

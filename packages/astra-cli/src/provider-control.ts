@@ -135,41 +135,49 @@ export function createAstraProviderControl(
     const credential = await dependencies.credentialBroker.issueForSession(sessionID)
     if (!credential.ok) return blockedPrepare("credential_unavailable")
 
-    const proposalID = uuid()
-    const operationID = uuid()
-    const createdAt = new Date(now()).toISOString()
-    const facts = operationFacts(session, state, request, credential.grant, operationID, uuid(), modelID, createdAt)
-    const skillContext = skillBundle ? publicSkillContext(skillBundle) : null
-    const contextBindingDigest = skillContext ? computeProviderSkillContextBindingDigest(skillContext) : null
-    if (request.evidence.skillContextBindingDigest !== contextBindingDigest) return blockedPrepare("input_rejected")
-    const providerCapabilityDigest = makeProviderTurnOperationFacts(facts).capabilityDigest
-    const preview: ProviderTurnPreview = Object.freeze({
-      proposalID,
-      operationID,
-      providerID: "anthropic",
-      modelID,
-      destination: request.destination,
-      logicalPayload: {
-        digest: request.evidence.requestDigest,
-        bytes: request.evidence.requestBytes,
-        contextBindingDigest,
-      },
-      providerCapabilityDigest,
-      skillContext,
-      headerNames: [...facts.plan.wireRequest.headerNames],
-      credential: {
-        accountFingerprint: credential.grant.accountFingerprint,
-        headerName: "x-api-key" as const,
-      },
-      expiresAt: new Date(credential.grant.expiresAt).toISOString(),
-      hostBoundaryLabel: providerHostExecutionBoundaryLabel,
-      networkBoundaryLabel: providerNetworkExecutionBoundaryLabel,
-      assurance: "NOT VERIFIED",
-    })
-    pending = { proposalID, operationID, facts, request, grant: credential.grant, preview, skillBundle }
-    if (skillBundle) availableSkill = undefined
-    prepared += 1
-    return { status: "prepared", preview }
+    try {
+      const proposalID = uuid()
+      const operationID = uuid()
+      const createdAt = new Date(now()).toISOString()
+      const facts = operationFacts(session, state, request, credential.grant, operationID, uuid(), modelID, createdAt)
+      const skillContext = skillBundle ? publicSkillContext(skillBundle) : null
+      const contextBindingDigest = skillContext ? computeProviderSkillContextBindingDigest(skillContext) : null
+      if (request.evidence.skillContextBindingDigest !== contextBindingDigest) {
+        revokeCredential(dependencies.credentialBroker, credential.grant)
+        return blockedPrepare("input_rejected")
+      }
+      const providerCapabilityDigest = makeProviderTurnOperationFacts(facts).capabilityDigest
+      const preview: ProviderTurnPreview = Object.freeze({
+        proposalID,
+        operationID,
+        providerID: "anthropic",
+        modelID,
+        destination: request.destination,
+        logicalPayload: {
+          digest: request.evidence.requestDigest,
+          bytes: request.evidence.requestBytes,
+          contextBindingDigest,
+        },
+        providerCapabilityDigest,
+        skillContext,
+        headerNames: [...facts.plan.wireRequest.headerNames],
+        credential: {
+          accountFingerprint: credential.grant.accountFingerprint,
+          headerName: "x-api-key" as const,
+        },
+        expiresAt: new Date(credential.grant.expiresAt).toISOString(),
+        hostBoundaryLabel: providerHostExecutionBoundaryLabel,
+        networkBoundaryLabel: providerNetworkExecutionBoundaryLabel,
+        assurance: "NOT VERIFIED",
+      })
+      pending = { proposalID, operationID, facts, request, grant: credential.grant, preview, skillBundle }
+      if (skillBundle) availableSkill = undefined
+      prepared += 1
+      return { status: "prepared", preview }
+    } catch (cause) {
+      revokeCredential(dependencies.credentialBroker, credential.grant)
+      throw cause
+    }
   }
 
   const decide = async (
@@ -184,6 +192,8 @@ export function createAstraProviderControl(
     pending = undefined
     consumed.add(proposalID)
     if (now() >= proposal.grant.expiresAt) {
+      revokeCredential(dependencies.credentialBroker, proposal.grant)
+      prepared -= 1
       availableSkill = releaseSkillBundle(availableSkill, proposal.skillBundle)
       return blockedDecision(proposalID, "proposal_expired")
     }
@@ -232,6 +242,7 @@ export function createAstraProviderControl(
         if (!responseObserved) return reconciliation(proposal, result.receiptID)
         progress("receipt_acknowledged")
       }
+      if (result.status === "denied_without_effect") prepared -= 1
       if (decision === "reject" && result.status === "denied_without_effect") {
         availableSkill = releaseSkillBundle(availableSkill, proposal.skillBundle)
       }
@@ -241,13 +252,19 @@ export function createAstraProviderControl(
       return mapDecisionResult(proposal, result)
     } catch {
       if (decision === "approve") return reconciliation(proposal, null)
+      prepared -= 1
       return blockedDecision(proposalID, "control_failed")
     } finally {
+      revokeCredential(dependencies.credentialBroker, proposal.grant)
       deciding = false
     }
   }
 
   return Object.freeze({ catalog, prepare, decide })
+}
+
+function revokeCredential(broker: ParentProviderCredentialBroker, grant: ProviderCredentialGrant) {
+  broker.revoke({ credentialHandle: grant.credentialHandle, sessionID: grant.sessionID })
 }
 
 function validatedModelCatalog(
