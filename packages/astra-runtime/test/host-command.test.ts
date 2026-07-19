@@ -30,6 +30,8 @@ describe("governed host command", () => {
 
     expect(preview).toMatchObject({
       command: "pwd",
+      script: null,
+      scriptBytes: 0,
       boundary: "host_no_sandbox",
       boundaryLabel: "HOST EXECUTION — NO SANDBOX",
       argv: [preview.executable.canonicalPath],
@@ -43,7 +45,9 @@ describe("governed host command", () => {
       limits: { timeoutMs: 3_000, maxStdoutBytes: 4_096, maxStderrBytes: 4_096 },
       workspace: { canonicalPath: input.report.root, access: "identity_guard" },
       network: { mode: "host_unrestricted", warning: "network is not isolated" },
+      filesystem: { mode: "bounded_read_only", warning: "workspace reads only" },
       writes: [],
+      verification: "not_verified",
     })
     expect(preview.executable.requestedPath).toBe("/bin/pwd")
     expect(preview.argv).toHaveLength(1)
@@ -120,6 +124,46 @@ describe("governed host command", () => {
       status: "completed_observed_not_verified",
       output: { stdout: "/\n", stderr: "", exitCode: 0 },
     })
+  })
+
+  test("runs one exact shell script with an unrestricted host warning and never claims verification", async () => {
+    const input = await commandInput("approved", "printf 'shell-ready\\n'")
+    const preview = input.proposal.preview
+
+    expect(preview).toMatchObject({
+      command: "shell",
+      script: "printf 'shell-ready\\n'",
+      scriptBytes: 22,
+      boundaryLabel: hostExecutionBoundaryLabel,
+      executable: { requestedPath: "/bin/zsh" },
+      argv: [preview.executable.canonicalPath, "-f", "-c", "printf 'shell-ready\\n'"],
+      workingDirectory: input.report.root,
+      workspace: { access: "host_unrestricted" },
+      filesystem: { mode: "host_unrestricted", warning: "host filesystem is not isolated" },
+      network: { mode: "host_unrestricted", warning: "network is not isolated" },
+      writes: ["command-defined host filesystem effects"],
+      verification: "not_verified",
+    })
+    const result = await executeHostCommand(input)
+    expect(result).toMatchObject({
+      state: "completed",
+      status: "completed_observed_not_verified",
+      output: { stdout: "shell-ready\n", stderr: "", exitCode: 0 },
+    })
+    expect(JSON.stringify(result)).not.toContain("VERIFIED")
+  })
+
+  test("rejects an invalid shell script before inspecting or dispatching a process", async () => {
+    const workspace = await temporaryDirectory("astra-host-command-workspace-")
+    const report = await scanWorkspace(workspace)
+    const input = {
+      operationID: crypto.randomUUID(),
+      request: { command: "shell", script: "printf ok", scriptBytes: 999 },
+      report,
+      policyAskedAt: new Date().toISOString(),
+    } as const
+
+    expect(proposeHostCommand(input)).rejects.toThrow("The shell script request is invalid")
   })
 
   test("classifies any observed nonzero process exit as effect unknown", () => {
@@ -294,7 +338,7 @@ describe("governed host command", () => {
   })
 })
 
-async function commandInput(decision: "approved" | "rejected"): Promise<ExecuteHostCommandInput> {
+async function commandInput(decision: "approved" | "rejected", script?: string): Promise<ExecuteHostCommandInput> {
   const workspace = await temporaryDirectory("astra-host-command-workspace-")
   const state = await temporaryDirectory("astra-host-command-state-")
   await writeFile(join(workspace, "package.json"), "{}\n")
@@ -302,7 +346,10 @@ async function commandInput(decision: "approved" | "rejected"): Promise<ExecuteH
   const base = Date.now() - 1_000
   const policyAskedAt = new Date(base).toISOString()
   const operationID = crypto.randomUUID()
-  const proposalInput = { operationID, report, policyAskedAt }
+  const request = script
+    ? ({ command: "shell", script, scriptBytes: Buffer.byteLength(script) } as const)
+    : ({ command: "pwd" } as const)
+  const proposalInput = { operationID, request, report, policyAskedAt }
   return {
     ...proposalInput,
     ledgerFilename: join(state, "operations.sqlite"),

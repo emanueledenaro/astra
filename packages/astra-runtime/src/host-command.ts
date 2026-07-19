@@ -51,8 +51,12 @@ const claimLeaseMilliseconds = 60_000
 const minimumEffectLeaseMilliseconds = 5_000
 const processTerminationGraceMilliseconds = 500
 const pwdExecutable = "/bin/pwd"
+const shellExecutable = "/bin/zsh"
 const commandTimeoutMilliseconds = 3_000
 const commandOutputLimitBytes = 4_096
+const shellTimeoutMilliseconds = 30_000
+const shellOutputLimitBytes = 65_536
+const maximumShellScriptBytes = 4_096
 
 const hostCommandPolicyDigest = digest("astra-policy:host-command-explicit-consent:v1")
 const hostCommandAdapterDigest = digest("astra-runtime:host-command:direct-host-process:v1")
@@ -76,20 +80,37 @@ export type HostCommandCoordinatorDependencies = Readonly<{
   now?: () => number
 }>
 
+export type HostCommandRequest =
+  | Readonly<{ command: "pwd" }>
+  | Readonly<{ command: "shell"; script: string; scriptBytes: number }>
+
 export type HostCommandPreview = Readonly<{
-  command: "pwd"
+  command: "pwd" | "shell"
+  script: string | null
+  scriptBytes: number
+  scriptDigest: ContentDigest
   boundary: "host_no_sandbox"
   boundaryLabel: typeof hostExecutionBoundaryLabel
-  executable: ExecutionCapabilityManifest["process"]["executable"] & Readonly<{ requestedPath: typeof pwdExecutable }>
+  executable: ExecutionCapabilityManifest["process"]["executable"] & Readonly<{ requestedPath: string }>
   argv: ReadonlyArray<string>
-  workingDirectory: "/"
-  environment: ReadonlyArray<Readonly<{ name: "LANG" | "LC_ALL" | "TZ"; value: string }>>
+  workingDirectory: string
+  environment: ExecutionCapabilityManifest["environment"]["variables"]
   stdin: Readonly<{ bytes: 0; digest: ContentDigest }>
   limits: Readonly<{ timeoutMs: number; maxStdoutBytes: number; maxStderrBytes: number }>
-  workspace: Readonly<{ canonicalPath: string; device: string; inode: string; access: "identity_guard" }>
+  workspace: Readonly<{
+    canonicalPath: string
+    device: string
+    inode: string
+    access: "identity_guard" | "host_unrestricted"
+  }>
   resources: ReadonlyArray<string>
   network: Readonly<{ mode: "host_unrestricted"; warning: "network is not isolated" }>
-  writes: ReadonlyArray<never>
+  filesystem: Readonly<{
+    mode: "bounded_read_only" | "host_unrestricted"
+    warning: "workspace reads only" | "host filesystem is not isolated"
+  }>
+  writes: ReadonlyArray<string>
+  verification: "not_verified"
 }>
 
 export type HostCommandProposal = Readonly<{
@@ -100,6 +121,7 @@ export type HostCommandProposal = Readonly<{
 
 export type ProposeHostCommandInput = Readonly<{
   operationID: string
+  request: HostCommandRequest
   report: WorkspaceTrustReport
   repositoryBaseline?: GitRepositoryBaselineSnapshot
   policyAskedAt: string
@@ -153,7 +175,7 @@ export class HostCommandCoordinationError extends Error {
 /** Prepares the exact direct-exec authority that must be displayed before consent. */
 export async function proposeHostCommand(input: ProposeHostCommandInput): Promise<HostCommandProposal> {
   requireHostCommandInput(input)
-  const executable = await inspectExecutableSource(pwdExecutable)
+  const executable = await inspectExecutableSource(input.request.command === "shell" ? shellExecutable : pwdExecutable)
   const proposal = makeProposal(input, executable)
   const parsed = parseExecutionCapability({
     manifest: proposal.manifest,
@@ -352,25 +374,42 @@ function makeProposal(
   const attemptID = requireAttemptID(deterministicUUID(operationID, "attempt:1"))
   const capabilityGrantID = requireCapabilityGrantID(deterministicUUID(operationID, "capability:1"))
   const baseline = makeControlledWriteBaselineAuthority(input.report, input.repositoryBaseline)
+  const shell = input.request.command === "shell"
+  const script = shell ? input.request.script : null
+  const scriptBytes = shell ? input.request.scriptBytes : 0
+  const scriptDigest = sha256(script === null ? new Uint8Array() : Buffer.from(script))
   const environment = [
     { name: "LANG", value: "C" },
     { name: "LC_ALL", value: "C" },
+    ...(shell
+      ? ([{ name: "PATH", value: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" }] as const)
+      : []),
     { name: "TZ", value: "UTC" },
-  ] as const
-  const resources = [`process:${executable.canonicalPath}`, `workspace:${input.report.root}`]
+  ] as const satisfies ExecutionCapabilityManifest["environment"]["variables"]
+  const resources = shell
+    ? [
+        `process:${executable.canonicalPath}`,
+        `workspace:${input.report.root}`,
+        "filesystem:host-unrestricted",
+        "network:host-unrestricted",
+      ]
+    : [`process:${executable.canonicalPath}`, `workspace:${input.report.root}`]
   const stdinDigest = sha256(new Uint8Array())
   const limits = {
-    timeoutMs: commandTimeoutMilliseconds,
-    maxStdoutBytes: commandOutputLimitBytes,
-    maxStderrBytes: commandOutputLimitBytes,
+    timeoutMs: shell ? shellTimeoutMilliseconds : commandTimeoutMilliseconds,
+    maxStdoutBytes: shell ? shellOutputLimitBytes : commandOutputLimitBytes,
+    maxStderrBytes: shell ? shellOutputLimitBytes : commandOutputLimitBytes,
   } as const
   const preview = freezePreview({
-    command: "pwd",
+    command: shell ? "shell" : "pwd",
+    script,
+    scriptBytes,
+    scriptDigest,
     boundary: "host_no_sandbox",
     boundaryLabel: hostExecutionBoundaryLabel,
-    executable: { requestedPath: pwdExecutable, ...executable },
-    argv: [executable.canonicalPath],
-    workingDirectory: "/",
+    executable: { requestedPath: shell ? shellExecutable : pwdExecutable, ...executable },
+    argv: shell ? [executable.canonicalPath, "-f", "-c", script!] : [executable.canonicalPath],
+    workingDirectory: shell ? input.report.root : "/",
     environment,
     stdin: { bytes: 0, digest: stdinDigest },
     limits,
@@ -378,11 +417,16 @@ function makeProposal(
       canonicalPath: input.report.root,
       device: input.report.identity!.device,
       inode: input.report.identity!.inode,
-      access: "identity_guard",
+      access: shell ? "host_unrestricted" : "identity_guard",
     },
     resources,
     network: { mode: "host_unrestricted", warning: "network is not isolated" },
-    writes: [],
+    filesystem: {
+      mode: shell ? "host_unrestricted" : "bounded_read_only",
+      warning: shell ? "host filesystem is not isolated" : "workspace reads only",
+    },
+    writes: shell ? ["command-defined host filesystem effects"] : [],
+    verification: "not_verified",
   } as const satisfies HostCommandPreview)
   const manifest = {
     schemaVersion: 1,
@@ -396,19 +440,19 @@ function makeProposal(
     isolation: { platform: "darwin", backend: "host", fallback: "deny" },
     process: {
       executable,
-      programDigest: digest("astra-host-command:direct-exec:pwd:v1"),
-      arguments: [],
-      workingDirectory: "/",
+      programDigest: shell ? scriptDigest : digest("astra-host-command:direct-exec:pwd:v1"),
+      arguments: shell ? ["-f", "-c", script!] : [],
+      workingDirectory: shell ? input.report.root : "/",
       stdinDigest,
     },
     filesystem: {
-      mode: "bounded_paths",
+      mode: shell ? "host_unrestricted" : "bounded_paths",
       workspace: { canonicalPath: input.report.root, ...input.report.identity! },
       runtimeScratch: {
         canonicalPath: join(homedir(), "Library", "Application Support", "Astra", "Runtime", capabilityGrantID),
         lifecycle: "private_ephemeral",
       },
-      readOnlyRoots: [input.report.root],
+      readOnlyRoots: shell ? [] : [input.report.root],
       createOnlyFiles: [],
       writableFiles: [],
     },
@@ -427,8 +471,14 @@ function makeHostCommandFacts(input: ExecuteHostCommandInput) {
     ? deepFreeze(structuredClone(input.repositoryBaseline))
     : undefined
   const authorityInput = repositoryBaseline
-    ? { operationID: input.operationID, report, repositoryBaseline, policyAskedAt: input.policyAskedAt }
-    : { operationID: input.operationID, report, policyAskedAt: input.policyAskedAt }
+    ? {
+        operationID: input.operationID,
+        request: input.request,
+        report,
+        repositoryBaseline,
+        policyAskedAt: input.policyAskedAt,
+      }
+    : { operationID: input.operationID, request: input.request, report, policyAskedAt: input.policyAskedAt }
   const parsed = parseExecutionCapability(input.proposal.capability)
   if (!parsed.ok) throw new TypeError("The host command capability is invalid")
   const expected = makeProposal(authorityInput, parsed.value.manifest.process.executable)
@@ -457,6 +507,7 @@ function makeHostCommandFacts(input: ExecuteHostCommandInput) {
     schemaVersion: 1,
     parameters: {
       command: expected.preview.command,
+      scriptDigest: expected.preview.scriptDigest,
       capabilityDigest: parsed.value.capabilityDigest,
       boundary: expected.preview.boundary,
     },
@@ -484,18 +535,25 @@ function makeHostCommandFacts(input: ExecuteHostCommandInput) {
     },
     effectSpecification: {
       effectClass: "host_command",
-      targetDescriptors: [
-        { resource: resources[0]!, mode: "execute_once" },
-        { resource: resources[1]!, mode: "identity_guard" },
-      ],
+      targetDescriptors: resources.map((resource, index) => ({
+        resource,
+        mode: index === 0 ? "execute_once" : expected.preview.filesystem.mode,
+      })),
       partialEffect: "reconciliation_required",
       completionCriteria: [completionCriterion],
     },
     resources,
     risk: {
-      level: "low",
-      classification: "allowlisted_read_only_host_command",
-      rationaleDigest: digest("direct execution of trusted pwd with no arguments and bounded output"),
+      level: expected.preview.command === "shell" ? "high" : "low",
+      classification:
+        expected.preview.command === "shell"
+          ? "explicit_user_shell_host_unrestricted"
+          : "allowlisted_read_only_host_command",
+      rationaleDigest: digest(
+        expected.preview.command === "shell"
+          ? "explicit shell script with unrestricted host filesystem and network access"
+          : "direct execution of trusted pwd with no arguments and bounded output",
+      ),
     },
     reversibility: { kind: "irreversible" },
     verificationPlan: {
@@ -802,7 +860,7 @@ async function appendClaimUncertainty(
     observedAt,
     targetObservation: {
       state: "unavailable",
-      digest: digest(canonicalJson({ command: "pwd", observation: "receipt_missing" })),
+      digest: digest(canonicalJson({ command: facts.preview.command, observation: "receipt_missing" })),
     },
   })
   const recorded = await runWithCoordinatorLedger(
@@ -1122,7 +1180,8 @@ function freezePreview(preview: HostCommandPreview): HostCommandPreview {
     workspace: Object.freeze({ ...preview.workspace }),
     resources: Object.freeze([...preview.resources]),
     network: Object.freeze({ ...preview.network }),
-    writes: Object.freeze([]),
+    filesystem: Object.freeze({ ...preview.filesystem }),
+    writes: Object.freeze([...preview.writes]),
   })
 }
 
@@ -1206,6 +1265,21 @@ function requireHostCommandInput(input: ProposeHostCommandInput) {
   }
   requireOperationID(input.operationID)
   requireCanonicalTimestamp(input.policyAskedAt)
+  if (input.request.command === "shell") {
+    const bytes = Buffer.byteLength(input.request.script)
+    if (
+      bytes === 0 ||
+      bytes > maximumShellScriptBytes ||
+      input.request.scriptBytes !== bytes ||
+      input.request.script.includes("\0")
+    ) {
+      throw new TypeError("The shell script request is invalid")
+    }
+    return
+  }
+  if (input.request.command !== "pwd" || Object.keys(input.request).length !== 1) {
+    throw new TypeError("The host command request is invalid")
+  }
 }
 
 function requireTimeline(input: ExecuteHostCommandInput) {
