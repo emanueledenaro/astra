@@ -303,6 +303,7 @@ async function executionInput(
       stdinDigest: sha256(stdin),
     },
     filesystem: {
+      mode: "bounded_paths",
       workspace: {
         canonicalPath: fixture.workspace,
         device: String(workspaceFacts.dev),

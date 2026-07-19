@@ -156,6 +156,7 @@ function makeProposalFacts(
       stdinDigest: sha256(Buffer.from(stdin, "utf8")),
     },
     filesystem: {
+      mode: "bounded_paths",
       workspace: { canonicalPath: input.report.root, ...input.report.identity },
       runtimeScratch: { canonicalPath: runtimeScratch, lifecycle: "private_ephemeral" },
       readOnlyRoots: [input.report.root],

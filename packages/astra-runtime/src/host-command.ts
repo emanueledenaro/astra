@@ -402,6 +402,7 @@ function makeProposal(
       stdinDigest,
     },
     filesystem: {
+      mode: "bounded_paths",
       workspace: { canonicalPath: input.report.root, ...input.report.identity! },
       runtimeScratch: {
         canonicalPath: join(homedir(), "Library", "Application Support", "Astra", "Runtime", capabilityGrantID),

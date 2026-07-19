@@ -45,6 +45,7 @@ const manifest = {
     stdinDigest: sha256("d"),
   },
   filesystem: {
+    mode: "bounded_paths",
     workspace: {
       canonicalPath: "/private/tmp/astra-workspace",
       device: "16777233",
@@ -136,6 +137,47 @@ describe("Execution capability contracts", () => {
         manifest: {
           ...manifest,
           isolation: { ...manifest.isolation, backend: "host" },
+        },
+      }),
+    ).toEqual({ ok: false, reason: "invalid_capability" })
+  })
+
+  test("accepts an explicit unrestricted host filesystem boundary without fake path scopes", () => {
+    const unrestricted = {
+      ...manifest,
+      isolation: { ...manifest.isolation, backend: "host" },
+      process: { ...manifest.process, workingDirectory: manifest.filesystem.workspace.canonicalPath },
+      filesystem: {
+        ...manifest.filesystem,
+        mode: "host_unrestricted",
+        readOnlyRoots: [],
+        createOnlyFiles: [],
+        writableFiles: [],
+      },
+      network: { mode: "host_unrestricted" },
+      environment: {
+        variables: [
+          { name: "LANG", value: "C" },
+          { name: "PATH", value: "/usr/bin:/bin" },
+          { name: "TZ", value: "UTC" },
+        ],
+      },
+    } as const satisfies ExecutionCapabilityManifest
+    const input = { manifest: unrestricted, capabilityDigest: computeExecutionCapabilityDigest(unrestricted) }
+
+    expect(parseExecutionCapability(input)).toEqual({ ok: true, value: input })
+    expect(
+      parseExecutionCapability({
+        ...input,
+        manifest: { ...unrestricted, isolation: { ...unrestricted.isolation, backend: "seatbelt" } },
+      }),
+    ).toEqual({ ok: false, reason: "invalid_capability" })
+    expect(
+      parseExecutionCapability({
+        ...input,
+        manifest: {
+          ...unrestricted,
+          filesystem: { ...unrestricted.filesystem, writableFiles: ["/private/tmp/astra-workspace/file"] },
         },
       }),
     ).toEqual({ ok: false, reason: "invalid_capability" })

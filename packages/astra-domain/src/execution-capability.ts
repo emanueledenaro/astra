@@ -38,6 +38,7 @@ export type ExecutionCapabilityManifest = Readonly<{
     stdinDigest: ContentDigest
   }>
   filesystem: Readonly<{
+    mode: "bounded_paths" | "host_unrestricted"
     workspace: Readonly<{
       canonicalPath: string
       device: string
@@ -53,7 +54,7 @@ export type ExecutionCapabilityManifest = Readonly<{
   }>
   network: Readonly<{ mode: "none" | "host_unrestricted" }>
   environment: Readonly<{
-    variables: ReadonlyArray<Readonly<{ name: "LANG" | "LC_ALL" | "TMPDIR" | "TZ"; value: string }>>
+    variables: ReadonlyArray<Readonly<{ name: "LANG" | "LC_ALL" | "PATH" | "TMPDIR" | "TZ"; value: string }>>
   }>
   limits: Readonly<{
     timeoutMs: number
@@ -82,7 +83,7 @@ const manifestKeys = [
   "limits",
 ] as const
 
-const permittedEnvironmentNames = new Set(["LANG", "LC_ALL", "TMPDIR", "TZ"])
+const permittedEnvironmentNames = new Set(["LANG", "LC_ALL", "PATH", "TMPDIR", "TZ"])
 
 /** Computes the authority digest over every field that may affect execution. */
 export function computeExecutionCapabilityDigest(manifest: ExecutionCapabilityManifest): ContentDigest {
@@ -122,7 +123,8 @@ function validManifest(input: unknown): input is ExecutionCapabilityManifest {
     validLimits(input.limits)
   ) {
     return (
-      validWorkingDirectory(input.process, input.filesystem.workspace, input.isolation.backend) &&
+      validFilesystemBoundary(input.filesystem, input.isolation.backend) &&
+      validWorkingDirectory(input.process, input.filesystem, input.isolation.backend) &&
       validEnvironmentLocation(input.environment, input.filesystem.runtimeScratch, input.isolation.backend) &&
       validNetworkBoundary(input.network, input.isolation.backend)
     )
@@ -178,7 +180,17 @@ function validExecutableIdentity(input: unknown): input is ExecutionCapabilityMa
 }
 
 function validFilesystem(input: unknown): input is ExecutionCapabilityManifest["filesystem"] {
-  if (!recordWithKeys(input, ["workspace", "runtimeScratch", "readOnlyRoots", "createOnlyFiles", "writableFiles"])) {
+  if (
+    !recordWithKeys(input, [
+      "mode",
+      "workspace",
+      "runtimeScratch",
+      "readOnlyRoots",
+      "createOnlyFiles",
+      "writableFiles",
+    ]) ||
+    (input.mode !== "bounded_paths" && input.mode !== "host_unrestricted")
+  ) {
     return false
   }
   const workspace = input.workspace
@@ -193,14 +205,28 @@ function validFilesystem(input: unknown): input is ExecutionCapabilityManifest["
   }
   const writePaths = [...input.createOnlyFiles, ...input.writableFiles]
   if (new Set(writePaths).size !== writePaths.length) return false
+  if (
+    pathWithinOrEqual(input.runtimeScratch.canonicalPath, workspace.canonicalPath) ||
+    pathWithinOrEqual(workspace.canonicalPath, input.runtimeScratch.canonicalPath)
+  ) {
+    return false
+  }
+  if (input.mode === "host_unrestricted") {
+    return input.readOnlyRoots.length === 0 && input.createOnlyFiles.length === 0 && input.writableFiles.length === 0
+  }
   return (
     input.readOnlyRoots.length > 0 &&
     input.readOnlyRoots.includes(workspace.canonicalPath) &&
-    !pathWithinOrEqual(input.runtimeScratch.canonicalPath, workspace.canonicalPath) &&
-    !pathWithinOrEqual(workspace.canonicalPath, input.runtimeScratch.canonicalPath) &&
     input.readOnlyRoots.every((path) => pathWithinOrEqual(path, workspace.canonicalPath)) &&
     writePaths.every((path) => path !== workspace.canonicalPath && pathWithin(path, workspace.canonicalPath))
   )
+}
+
+function validFilesystemBoundary(
+  filesystem: ExecutionCapabilityManifest["filesystem"],
+  backend: ExecutionCapabilityManifest["isolation"]["backend"],
+) {
+  return filesystem.mode === "host_unrestricted" ? backend === "host" : true
 }
 
 function validRuntimeScratch(input: unknown): input is ExecutionCapabilityManifest["filesystem"]["runtimeScratch"] {
@@ -233,9 +259,11 @@ function validNetworkBoundary(
 
 function validWorkingDirectory(
   process: ExecutionCapabilityManifest["process"],
-  workspace: ExecutionCapabilityManifest["filesystem"]["workspace"],
+  filesystem: ExecutionCapabilityManifest["filesystem"],
   backend: ExecutionCapabilityManifest["isolation"]["backend"],
 ) {
+  const workspace = filesystem.workspace
+  if (filesystem.mode === "host_unrestricted") return process.workingDirectory === workspace.canonicalPath
   return backend === "seatbelt"
     ? process.workingDirectory === workspace.canonicalPath
     : process.workingDirectory === "/"
@@ -343,6 +371,7 @@ function copyManifest(manifest: ExecutionCapabilityManifest): ExecutionCapabilit
       arguments: [...manifest.process.arguments],
     },
     filesystem: {
+      mode: manifest.filesystem.mode,
       workspace: { ...manifest.filesystem.workspace },
       runtimeScratch: { ...manifest.filesystem.runtimeScratch },
       readOnlyRoots: [...manifest.filesystem.readOnlyRoots],
