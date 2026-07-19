@@ -1,7 +1,8 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes, createCliRenderer, type KeyEvent } from "@opentui/core"
+import { TextAttributes, createCliRenderer } from "@opentui/core"
 import { render, useKeyboard, useTerminalDimensions } from "@opentui/solid"
-import { For, Show, createMemo } from "solid-js"
+import { For, Show, createMemo, createSignal } from "solid-js"
+import type { AstraLaunchpadDecision, AstraLaunchpadSnapshot } from "@astra/domain/launchpad"
 import { lynxFrame } from "../component/lynx-model"
 
 const palette = {
@@ -15,10 +16,14 @@ const palette = {
   warning: "#f0bd6a",
 } as const
 
-export const ASTRA_NO_WORKSPACE_STATUS = "NO WORKSPACE • EFFECTS DENIED"
+const emptySnapshot: AstraLaunchpadSnapshot = { recentSessions: [] }
 
-/** Opens the inert product home used when no workspace was proposed. */
-export async function runAstraNoWorkspaceMode(): Promise<void> {
+export const ASTRA_NO_WORKSPACE_STATUS = "NO WORKSPACE · NO PROJECT EFFECTS"
+
+/** Opens the inert Launchpad and returns the user's requested parent-owned action. */
+export async function runAstraNoWorkspaceMode(
+  snapshot: AstraLaunchpadSnapshot = emptySnapshot,
+): Promise<AstraLaunchpadDecision> {
   const renderer = await createCliRenderer({
     targetFps: 30,
     exitOnCtrlC: false,
@@ -27,36 +32,56 @@ export async function runAstraNoWorkspaceMode(): Promise<void> {
     openConsoleOnError: false,
   })
   let settled = false
-  let complete!: () => void
-  const exited = new Promise<void>((resolve) => {
-    complete = () => {
+  let complete!: (decision: AstraLaunchpadDecision) => void
+  const decision = new Promise<AstraLaunchpadDecision>((resolve) => {
+    complete = (value) => {
       if (settled) return
       settled = true
-      resolve()
+      resolve(value)
     }
   })
-  const onKeypress = (event: KeyEvent) => {
-    if (isAstraNoWorkspaceModeExitKey(event)) complete()
-  }
-  renderer.keyInput.on("keypress", onKeypress)
-  renderer.once("destroy", complete)
+  renderer.once("destroy", () => complete({ kind: "exit" }))
 
   try {
-    await render(() => <AstraNoWorkspaceMode onExit={complete} />, renderer)
-    await exited
+    await render(() => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={complete} />, renderer)
+    return await decision
   } finally {
-    renderer.keyInput.off("keypress", onKeypress)
     if (!renderer.isDestroyed) renderer.destroy()
   }
 }
 
-export function AstraNoWorkspaceMode(props: { onExit: () => void }) {
+export function AstraNoWorkspaceMode(props: {
+  snapshot: AstraLaunchpadSnapshot
+  onDecision: (decision: AstraLaunchpadDecision) => void
+}) {
   const dimensions = useTerminalDimensions()
-  const compact = createMemo(() => dimensions().width < 62 || dimensions().height < 16)
+  const compact = createMemo(() => dimensions().width < 62 || dimensions().height < 18)
   const visual = createMemo(() => lynxFrame("idle", compact() ? "compact" : "full", 0, false))
+  const [opening, setOpening] = createSignal(false)
+  const [workspacePath, setWorkspacePath] = createSignal("")
 
   useKeyboard((event) => {
-    if (isAstraNoWorkspaceModeExitKey(event)) props.onExit()
+    const key = event.name.toLowerCase()
+    if (opening()) {
+      if (event.ctrl === true && key === "c") return props.onDecision({ kind: "exit" })
+      if (key === "escape") {
+        event.preventDefault()
+        event.stopPropagation()
+        return cancelWorkspacePath(setOpening, setWorkspacePath)
+      }
+      if (key === "backspace") return setWorkspacePath((path) => path.slice(0, -1))
+      if (key === "return" && workspacePath().startsWith("/")) {
+        return props.onDecision({ kind: "open-workspace", path: workspacePath() })
+      }
+      if (!event.ctrl && !event.meta && !event.shift && event.name.length === 1) {
+        setWorkspacePath((path) => path + event.name)
+      }
+      return
+    }
+
+    if (isAstraNoWorkspaceModeExitKey(event)) return props.onDecision({ kind: "exit" })
+    if (key === "o") return setOpening(true)
+    if (key === "s") return props.onDecision({ kind: "open-system" })
   })
 
   return (
@@ -64,7 +89,7 @@ export function AstraNoWorkspaceMode(props: { onExit: () => void }) {
       <box width={Math.min(82, Math.max(1, dimensions().width - 4))} flexDirection="column" gap={compact() ? 0 : 1}>
         <box flexDirection={compact() ? "column" : "row"} justifyContent="space-between">
           <text fg={palette.primary} attributes={TextAttributes.BOLD}>
-            ASTRA / NO WORKSPACE
+            ASTRA / LAUNCHPAD
           </text>
           <text fg={palette.warning}>{ASTRA_NO_WORKSPACE_STATUS}</text>
         </box>
@@ -87,14 +112,47 @@ export function AstraNoWorkspaceMode(props: { onExit: () => void }) {
           </Show>
 
           <box flexDirection="column" flexGrow={1} minWidth={0} gap={compact() ? 0 : 1}>
-            <text fg={palette.text} attributes={TextAttributes.BOLD}>
-              No workspace is open
-            </text>
-            <text fg={palette.muted}>Open one explicitly after leaving this screen:</text>
-            <text fg={palette.primary}>astra .</text>
-            <text fg={palette.primary}>astra /absolute/path</text>
-            <Show when={!compact()}>
-              <text fg={palette.muted}>No directory was scanned. No workspace service or effect was started.</text>
+            <Show
+              when={opening()}
+              fallback={
+                <>
+                  <Show when={!compact()}>
+                    <text fg={palette.text} attributes={TextAttributes.BOLD}>
+                      Start from a safe local boundary
+                    </text>
+                    <text fg={palette.muted}>Choose an action. Project effects remain unavailable here.</text>
+                  </Show>
+                  <text fg={palette.text}>
+                    <span style={{ fg: palette.primary }}>[C]</span> Create project{" "}
+                    <span style={{ fg: palette.warning }}>NOT AVAILABLE YET</span>
+                  </text>
+                  <text fg={palette.text}>
+                    <span style={{ fg: palette.primary }}>[O]</span> Open workspace
+                  </text>
+                  <text fg={palette.text}>
+                    <span style={{ fg: palette.primary }}>[R]</span> Continue session{" "}
+                    <span style={{ fg: palette.warning }}>NOT AVAILABLE YET</span>
+                  </text>
+                  <text fg={palette.text}>
+                    <span style={{ fg: palette.primary }}>[S]</span> System
+                  </text>
+                  <Show when={props.snapshot.recentSessions.length > 0 && !compact()}>
+                    <box flexDirection="column">
+                      <text fg={palette.muted}>Recent sessions</text>
+                      <For each={props.snapshot.recentSessions}>
+                        {(session) => <text fg={palette.muted}>{session.workspaceRoot}</text>}
+                      </For>
+                    </box>
+                  </Show>
+                </>
+              }
+            >
+              <text fg={palette.text} attributes={TextAttributes.BOLD}>
+                Open workspace path
+              </text>
+              <text fg={palette.primary}>{workspacePath() || "/"}</text>
+              <text fg={palette.muted}>Enter an absolute path, then press Enter.</text>
+              <text fg={palette.muted}>Esc cancels without opening or scanning anything.</text>
             </Show>
           </box>
         </box>
@@ -103,8 +161,8 @@ export function AstraNoWorkspaceMode(props: { onExit: () => void }) {
           <text fg={palette.text}>
             <span style={{ fg: palette.primary }}>[Q]</span> Exit
           </text>
-          <Show when={!compact()}>
-            <text fg={palette.muted}>Esc / Ctrl-C also exit</text>
+          <Show when={!compact() && !opening()}>
+            <text fg={palette.muted}>Create and Continue are unavailable until their parent coordinators exist.</text>
           </Show>
         </box>
       </box>
@@ -114,4 +172,9 @@ export function AstraNoWorkspaceMode(props: { onExit: () => void }) {
 
 export function isAstraNoWorkspaceModeExitKey(event: Readonly<{ name: string; ctrl?: boolean }>) {
   return (event.ctrl === true && event.name === "c") || event.name === "escape" || event.name.toLowerCase() === "q"
+}
+
+function cancelWorkspacePath(setOpening: (value: boolean) => boolean, setWorkspacePath: (value: string) => string) {
+  setWorkspacePath("")
+  setOpening(false)
 }

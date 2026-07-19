@@ -10,6 +10,20 @@ afterAll(async () => {
 })
 
 describe("Astra CLI durable state", () => {
+  test("the CLI parent validates and routes Launchpad Open and System intents", async () => {
+    const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8")
+
+    expect(source).toContain('import { parseAstraLaunchpadDecision } from "@astra/domain/launchpad"')
+    expect(source).toContain("const decision = parseAstraLaunchpadDecision(await loaded.runAstraNoWorkspaceMode())")
+    expect(source).toContain(
+      'if (decision.value.kind === "open-workspace") return openLaunchpadWorkspace(decision.value.path)',
+    )
+    expect(source).toContain('if (decision.value.kind === "open-system") return runSystemMode()')
+    expect(source).toContain("async function openLaunchpadWorkspace(workspace: string)")
+    expect(source).toContain("? runProduct(workspace)")
+    expect(source).toContain(": relaunchProductWithBrowserRuntime([workspace])")
+  })
+
   test("System Mode rejects a non-interactive terminal before creating any local state", async () => {
     const root = await hostileSystemDirectory()
     const dataDirectory = join(await temporaryDirectory("astra-system-data-parent-"), "not-created")

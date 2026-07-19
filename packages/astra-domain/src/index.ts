@@ -18,6 +18,7 @@ export * as ExtensionCapability from "./extension-capability"
 export * as GitControlInspection from "./git-control-inspection"
 export * as GitControlMutation from "./git-control-mutation"
 export * as GitRepositoryBaseline from "./git-repository-baseline"
+export * as Launchpad from "./launchpad"
 export * as SessionAuthority from "./session-authority"
 
 export {
@@ -39,6 +40,10 @@ export * as WorkspaceTrust from "./workspace-trust"
 
 export type { AstraSessionAuthority, AstraSessionAuthorityParseResult } from "./session-authority"
 export { astraProviderConnectExitCode } from "./tui-handoff"
+
+export { parseAstraLaunchpadDecision, parseAstraLaunchpadSnapshot } from "./launchpad"
+
+export type { AstraLaunchpadDecision, AstraLaunchpadParseResult, AstraLaunchpadSnapshot } from "./launchpad"
 
 export {
   controlledWriteBoundaryLabel,

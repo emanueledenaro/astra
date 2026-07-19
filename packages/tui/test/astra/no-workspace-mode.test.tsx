@@ -8,54 +8,109 @@ import {
   isAstraNoWorkspaceModeExitKey,
 } from "../../src/astra/no-workspace-mode"
 
-test("renders a truthful No Workspace mode with explicit open instructions", async () => {
-  const app = await testRender(() => <AstraNoWorkspaceMode onExit={() => {}} />, { width: 86, height: 22 })
+const snapshot = {
+  recentSessions: [{ sessionID: "session-1", workspaceRoot: "/work/astra", updatedAt: "2026-07-20T00:00:00.000Z" }],
+} as const
+
+test("renders the keyboard-first Launchpad with truthful unavailable actions", async () => {
+  const app = await testRender(() => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={() => {}} />, {
+    width: 88,
+    height: 24,
+  })
   try {
     await app.renderOnce()
     const frame = app.captureCharFrame()
 
-    expect(frame).toContain("ASTRA / NO WORKSPACE")
+    expect(frame).toContain("ASTRA / LAUNCHPAD")
     expect(frame).toContain(ASTRA_NO_WORKSPACE_STATUS)
-    expect(frame).not.toContain("SYSTEM MODE")
-    expect(frame).toContain("No workspace is open")
-    expect(frame).toContain("astra .")
-    expect(frame).toContain("astra /absolute/path")
-    expect(frame).toContain("No directory was scanned")
+    expect(frame).toContain("[C] Create project")
+    expect(frame).toContain("[O] Open workspace")
+    expect(frame).toContain("[R] Continue session")
+    expect(frame).toContain("[S] System")
     expect(frame).toContain("[Q] Exit")
+    expect(frame).toContain("NOT AVAILABLE YET")
+    expect(frame).toContain("/work/astra")
   } finally {
     app.renderer.destroy()
   }
 })
 
-test("keeps the safety state visible in a compact terminal", async () => {
-  const app = await testRender(() => <AstraNoWorkspaceMode onExit={() => {}} />, { width: 28, height: 13 })
+test("opens a path entry locally without scanning a workspace", async () => {
+  const app = await testRender(() => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={() => {}} />, {
+    width: 88,
+    height: 24,
+  })
+  try {
+    app.mockInput.pressKey("o")
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Open workspace path")
+    expect(app.captureCharFrame()).toContain("Enter an absolute path")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("returns an Open decision only after an absolute path is submitted", async () => {
+  const decisions: Array<unknown> = []
+  const app = await testRender(
+    () => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={(decision) => decisions.push(decision)} />,
+    { width: 88, height: 24 },
+  )
+  try {
+    app.mockInput.pressKey("o")
+    for (const key of "/work/astra") app.mockInput.pressKey(key)
+    app.mockInput.pressKey("\r")
+
+    expect(decisions).toEqual([{ kind: "open-workspace", path: "/work/astra" }])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("keeps the Launchpad boundary readable in a compact terminal", async () => {
+  const app = await testRender(() => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={() => {}} />, {
+    width: 32,
+    height: 14,
+  })
   try {
     await app.renderOnce()
     const frame = app.captureCharFrame()
     const normalized = frame.replace(/\s+/g, " ")
 
     expect(normalized).toContain(ASTRA_NO_WORKSPACE_STATUS)
-    expect(frame).toContain("astra .")
-    expect(frame).toContain("[Q] Exit")
+    expect(frame).toContain("Open workspace")
+    expect(frame).toContain("System")
+    expect(frame).toContain("Exit")
   } finally {
     app.renderer.destroy()
   }
 })
 
-test("keeps the No Workspace import graph inert", async () => {
+test("keeps the Launchpad import graph inert", async () => {
   const source = await readFile(new URL("../../src/astra/no-workspace-mode.tsx", import.meta.url), "utf8")
   const imports = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map((match) => match[1])
 
-  expect(imports).toEqual(["@opentui/core", "@opentui/solid", "solid-js", "../component/lynx-model"])
+  expect(imports).toEqual([
+    "@opentui/core",
+    "@opentui/solid",
+    "solid-js",
+    "@astra/domain/launchpad",
+    "../component/lynx-model",
+  ])
   expect(source).not.toMatch(/process\.|Bun\.|node:|\.\/workspace|fetch\(|spawn\(|cwd\(|env\b/)
 })
 
-test("exits locally with Q, Escape, or Ctrl-C", async () => {
-  let exits = 0
-  const app = await testRender(() => <AstraNoWorkspaceMode onExit={() => exits++} />)
+test("keeps disabled actions inert and returns System or Exit decisions locally", async () => {
+  const decisions: Array<string> = []
+  const app = await testRender(() => (
+    <AstraNoWorkspaceMode snapshot={snapshot} onDecision={(decision) => decisions.push(decision.kind)} />
+  ))
   try {
+    app.mockInput.pressKey("c")
+    app.mockInput.pressKey("r")
+    app.mockInput.pressKey("s")
     app.mockInput.pressKey("q")
-    expect(exits).toBe(1)
+    expect(decisions).toEqual(["open-system", "exit"])
   } finally {
     app.renderer.destroy()
   }
