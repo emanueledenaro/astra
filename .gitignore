@@ -26,6 +26,10 @@ target
 .scripts
 .direnv/
 
+# Claude Code local (per-developer) files
+CLAUDE.local.md
+.claude/settings.local.json
+
 # Local dev files
 opencode-dev
 UPCOMING_CHANGELOG.md
