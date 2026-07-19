@@ -12,6 +12,7 @@ import {
 } from "../../../astra-domain/src/git-commit-control"
 import { parseGitCommitMessage } from "../../../astra-domain/src/git-commit-mutation"
 import { AstraControlClientError } from "./control-client"
+import { matchesAstraGitClientAuthority, type AstraGitClientAuthority } from "./git-client-authority"
 
 export type { GitCommitControlPreview, GitCommitDecisionResult, GitCommitPrepareResult, GitCommitProgress }
 
@@ -40,6 +41,7 @@ export function createAstraGitCommitClient(
     responseTimeoutMs?: number
     expectedWorkspaceRoot?: string
     expectedBaselineSnapshotDigest?: string
+    baselineAuthority?: AstraGitClientAuthority
     now?: () => Date
   }> = {},
 ): AstraGitCommitClient {
@@ -96,12 +98,16 @@ export function createAstraGitCommitClient(
           Date.parse(authority.expiresAt) > now &&
           authority.message === parsedMessage.value &&
           (options.expectedWorkspaceRoot === undefined || authority.workspaceRoot === options.expectedWorkspaceRoot) &&
-          (options.expectedBaselineSnapshotDigest === undefined ||
-            authority.baselineSnapshotDigest === options.expectedBaselineSnapshotDigest)
+          matchesAstraGitClientAuthority(
+            options.baselineAuthority,
+            options.expectedBaselineSnapshotDigest,
+            authority.baselineSnapshotDigest,
+          )
         if (!valid) throw new AstraControlClientError("protocol_invalid")
         proposals.set(result.preview.proposalID, {
           proposalID: result.preview.proposalID,
           proposalDigest: authority.proposalDigest,
+          baselineSnapshotDigest: authority.baselineSnapshotDigest,
         })
         return result
       })
@@ -121,6 +127,9 @@ export function createAstraGitCommitClient(
       }).then((result) => {
         proposals.delete(proposalID)
         attemptedProposals.delete(proposalID)
+        if (result.status === "verified" && options.baselineAuthority) {
+          options.baselineAuthority.advance(binding.baselineSnapshotDigest, result.snapshotDigest)
+        }
         return result
       })
     },
@@ -132,7 +141,12 @@ export function createAstraGitCommitClient(
   }
 }
 
-type ProposalBinding = Readonly<{ proposalID: string; proposalDigest: string }>
+type ProposalBinding = Readonly<{
+  proposalID: string
+  proposalDigest: string
+  baselineSnapshotDigest: `sha256:${string}`
+}>
+
 type Method = "git-commit.prepare" | "git-commit.decide"
 type ExchangeInput<Result> = Readonly<{
   method: Method

@@ -93,6 +93,7 @@ export type DurableGitCommitResult = Readonly<{
   lastCursor: number
   receiptID: string | null
   observation: GitCommitObservation | null
+  snapshotDigest: string | null
 }>
 
 export class GitCommitCoordinationError extends Error {
@@ -360,7 +361,9 @@ export async function verifyDurableGitCommit(
     if (!durable.operation || !durable.dispatch?.receipt) {
       throw new GitCommitCoordinationError("recovery_unavailable", "No observed Git receipt is available")
     }
-    if (durable.verification) return durableResult(durable.operation, durable.dispatch.receipt)
+    if (durable.verification) {
+      return durableResult(durable.operation, durable.dispatch.receipt, durable.verification.evidence.snapshotDigest)
+    }
     if (
       durable.operation.state !== "effect_observed" ||
       durable.dispatch.receipt.observation.kind !== "effect_observed" ||
@@ -380,6 +383,7 @@ export async function verifyDurableGitCommit(
       verification.verification === "independent_commit_bytes_and_repository_state" &&
       verification.proposalDigest === facts.preview.proposalDigest &&
       verification.commitOID === observation.afterOID &&
+      /^sha256:[0-9a-f]{64}$/.test(verification.snapshotDigest) &&
       canonicalJson(verification.limitations) === canonicalJson(facts.preview.limitations)
     const evidence = requireEvidence({
       evidenceID: facts.evidenceID,
@@ -387,7 +391,7 @@ export async function verifyDurableGitCommit(
       receiptID: facts.receiptID,
       verificationPlanID: facts.verificationPlanID,
       verifier: { identity: gitCommitVerifier, version: "1", digest: gitCommitVerifierDigest },
-      snapshotDigest: verified ? facts.inventory.commitObject.contentDigest : digest(canonicalJson(verification)),
+      snapshotDigest: verified ? verification.snapshotDigest : digest(canonicalJson(verification)),
       observedAt: new Date().toISOString(),
       criteria: [
         {
@@ -422,7 +426,7 @@ export async function verifyDurableGitCommit(
         })
       }),
     )
-    return durableResult(ingested.operation, durable.dispatch.receipt)
+    return durableResult(ingested.operation, durable.dispatch.receipt, ingested.evidence.snapshotDigest)
   } catch (cause) {
     if (cause instanceof GitCommitCoordinationError) throw cause
     throw new GitCommitCoordinationError(
@@ -661,7 +665,11 @@ function receiptObservation(receipt: OperationReceipt, facts?: ReturnType<typeof
   return parsed.value
 }
 
-function durableResult(operation: OperationRecord, receipt: OperationReceipt | null): DurableGitCommitResult {
+function durableResult(
+  operation: OperationRecord,
+  receipt: OperationReceipt | null,
+  snapshotDigest: string | null = null,
+): DurableGitCommitResult {
   if (
     operation.state !== "denied" &&
     operation.state !== "effect_observed" &&
@@ -692,6 +700,7 @@ function durableResult(operation: OperationRecord, receipt: OperationReceipt | n
     lastCursor: operation.lastCursor,
     receiptID: receipt?.receiptID ?? null,
     observation: receipt?.observation.kind === "effect_observed" ? receiptObservation(receipt) : null,
+    snapshotDigest,
   }
 }
 

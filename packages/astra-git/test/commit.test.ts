@@ -4,10 +4,7 @@ import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, write
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { GitCommitDecision } from "@astra/domain/git-commit-mutation"
-import {
-  computeGitCommitInventoryDigest,
-  computeGitCommitProposalDigest,
-} from "@astra/domain/git-commit-mutation"
+import { computeGitCommitInventoryDigest, computeGitCommitProposalDigest } from "@astra/domain/git-commit-mutation"
 import { captureGitRepositoryBaseline } from "../src/baseline"
 import {
   executeGitCommitLocal,
@@ -189,14 +186,17 @@ describe("governed local Git commit adapter", () => {
     expect(digest(await readFile(join(fixture.root, ".git", "index")))).toBe(indexBefore)
     expect(await readFile(join(fixture.root, "tracked.txt"), "utf8")).toBe(worktreeBefore)
     if (executed.status !== "effect_observed") return
-    expect(
-      await verifyGitCommitLocal({
-        preview: prepared.preview,
-        inventory: prepared.inventory,
-        expectedBaseline: prepared.baseline,
-        observation: executed.observation,
-      }),
-    ).toMatchObject({ status: "verified", verification: "independent_commit_bytes_and_repository_state" })
+    const verified = await verifyGitCommitLocal({
+      preview: prepared.preview,
+      inventory: prepared.inventory,
+      expectedBaseline: prepared.baseline,
+      observation: executed.observation,
+    })
+    expect(verified).toMatchObject({
+      status: "verified",
+      verification: "independent_commit_bytes_and_repository_state",
+      snapshotDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+    })
   })
 
   test("handles an unchanged subtree whose tree object already exists in the repository", async () => {
@@ -235,7 +235,11 @@ describe("governed local Git commit adapter", () => {
       await executeGitCommitLocal(operationInput(prepared, "approved"), {
         claimProposal: async () => claimAuthority(prepared),
       }),
-    ).toMatchObject({ status: "blocked_without_effect", verification: "not_verified", reason: "native_helper_unavailable" })
+    ).toMatchObject({
+      status: "blocked_without_effect",
+      verification: "not_verified",
+      reason: "native_helper_unavailable",
+    })
     expect((await git(fixture.root, ["rev-parse", "HEAD"])).trim()).toBe(prepared.preview.expectedOldOID)
   })
 

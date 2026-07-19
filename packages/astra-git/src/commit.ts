@@ -103,6 +103,7 @@ export type GitCommitVerificationResult =
       verification: "independent_commit_bytes_and_repository_state"
       proposalDigest: `sha256:${string}`
       commitOID: string
+      snapshotDigest: `sha256:${string}`
       limitations: typeof gitCommitLimitations
     }>
   | Readonly<{
@@ -388,7 +389,9 @@ export async function executeGitCommitLocal(
     if (published.status === "no_effect") {
       if (!(await cleanupScratch(parsed.preview.runtimeScratch))) return reconciliation("cleanup_failed")
       scratchCreated = false
-      return blockedWithoutEffect(published.detail === 5 || published.detail === 6 ? "baseline_stale" : "native_helper_unavailable")
+      return blockedWithoutEffect(
+        published.detail === 5 || published.detail === 6 ? "baseline_stale" : "native_helper_unavailable",
+      )
     }
     if (published.status === "objects_installed") return reconciliation("ref_race_or_orphan_objects")
     if (published.status === "uncertain") return reconciliation("ref_update_unknown")
@@ -510,6 +513,7 @@ export async function verifyGitCommitLocal(
     verification: "independent_commit_bytes_and_repository_state",
     proposalDigest: preview.value.proposalDigest,
     commitOID: preview.value.commitOID,
+    snapshotDigest: post.snapshot.snapshotDigest,
     limitations: gitCommitLimitations,
   }
 }
@@ -1163,7 +1167,8 @@ async function snapshotNativeHelper(scratch: string, expected: GitCommitHelperId
   const observed = await inspectNativeHelper(expected.canonicalPath)
   if (!observed || JSON.stringify(observed) !== JSON.stringify(expected)) return null
   const content = await readFile(expected.canonicalPath).catch(() => null)
-  if (!content || content.byteLength !== expected.byteLength || digestBytes(content) !== expected.contentDigest) return null
+  if (!content || content.byteLength !== expected.byteLength || digestBytes(content) !== expected.contentDigest)
+    return null
   const destination = join(scratch, "astra-git-commit")
   await writeFile(destination, content, { flag: "wx", mode: 0o500 }).catch(() => null)
   await chmod(destination, 0o500).catch(() => null)

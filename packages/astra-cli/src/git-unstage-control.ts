@@ -22,6 +22,7 @@ import {
   type GitUnstageAdapter,
 } from "@astra/runtime/git-unstage-coordinator"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
+import { advanceAstraGitSessionAuthority, type AstraGitSessionAuthority } from "./git-session-authority"
 
 const maximumPreparedOperations = 32
 
@@ -64,6 +65,7 @@ export function createAstraGitUnstageControl(
   session: OpenedWorkspace,
   state: Readonly<{ ledgerFilename: string; spoolFilename: string }>,
   dependencies: AstraGitUnstageControlDependencies = defaultDependencies(),
+  sessionAuthority?: AstraGitSessionAuthority,
 ): AstraGitUnstageControl {
   let pending: PendingProposal | undefined
   const consumed = new Set<string>()
@@ -72,8 +74,11 @@ export function createAstraGitUnstageControl(
   return {
     async prepare(requestId) {
       if (session.mode !== "activate-once") return blockedPrepare(requestId, "read_only")
-      if (!session.repositoryBaseline) return blockedPrepare(requestId, "git_baseline_required")
-      if (!session.repositoryInspection) return blockedPrepare(requestId, "git_inspection_required")
+      if (!sessionAuthority && !session.repositoryBaseline) return blockedPrepare(requestId, "git_baseline_required")
+      if (!sessionAuthority && !session.repositoryInspection)
+        return blockedPrepare(requestId, "git_inspection_required")
+      const repository = currentRepositoryAuthority(session, sessionAuthority)
+      if (!repository) return blockedPrepare(requestId, "git_authority_unavailable")
       if (pending) {
         if (Date.parse(pending.preview.authority.expiresAt) > dependencies.now()) {
           return blockedPrepare(requestId, "control_busy")
@@ -84,7 +89,7 @@ export function createAstraGitUnstageControl(
       if (prepared >= maximumPreparedOperations) return blockedPrepare(requestId, "control_limit_reached")
 
       const result = await dependencies
-        .prepare(session.report.root, session.repositoryBaseline, session.repositoryInspection)
+        .prepare(session.report.root, repository.baseline, repository.inspection)
         .catch(() => null)
       if (!result || result.status !== "ready") {
         return blockedPrepare(requestId, result?.status === "blocked" ? result.reason : "preparation_unavailable")
@@ -93,9 +98,9 @@ export function createAstraGitUnstageControl(
       if (
         !authority.ok ||
         authority.value.workspaceRoot !== session.report.root ||
-        authority.value.baseline.snapshotDigest !== session.repositoryBaseline.snapshotDigest ||
-        authority.value.inspection.observationDigest !== session.repositoryInspection.outputDigest ||
-        authority.value.inspection.reportDigest !== session.repositoryInspection.reportDigest ||
+        authority.value.baseline.snapshotDigest !== repository.baseline.snapshotDigest ||
+        authority.value.inspection.observationDigest !== repository.inspection.outputDigest ||
+        authority.value.inspection.reportDigest !== repository.inspection.reportDigest ||
         Date.parse(authority.value.expiresAt) <= dependencies.now()
       ) {
         return blockedPrepare(requestId, "preparation_unavailable")
@@ -108,7 +113,7 @@ export function createAstraGitUnstageControl(
         proposalID,
         authority: authority.value,
       } as const satisfies GitUnstageControlPreview)
-      pending = Object.freeze({ proposalID, preview, baseline: session.repositoryBaseline })
+      pending = Object.freeze({ proposalID, preview, baseline: repository.baseline })
       prepared++
       return { schemaVersion: 1, requestId, status: "prepared", preview }
     },
@@ -201,6 +206,11 @@ export function createAstraGitUnstageControl(
       ) {
         return reconciliation(binding, executed.operationID, "verification_unknown")
       }
+      await advanceAstraGitSessionAuthority(
+        sessionAuthority,
+        proposal.baseline.snapshotDigest,
+        verified.observation.afterSnapshotDigest,
+      )
       return {
         ...binding,
         status: "verified",
@@ -211,6 +221,12 @@ export function createAstraGitUnstageControl(
       }
     },
   }
+}
+
+function currentRepositoryAuthority(session: OpenedWorkspace, authority: AstraGitSessionAuthority | undefined) {
+  if (authority) return authority.current()
+  if (!session.repositoryBaseline || !session.repositoryInspection) return null
+  return { baseline: session.repositoryBaseline, inspection: session.repositoryInspection }
 }
 
 function defaultDependencies(): AstraGitUnstageControlDependencies {

@@ -33,6 +33,7 @@ import {
   type GitStageAdapter,
 } from "../../astra-runtime/src/git-stage-coordinator"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
+import { advanceAstraGitSessionAuthority, type AstraGitSessionAuthority } from "./git-session-authority"
 
 const maximumInventories = 32
 const inventoryLifetimeMilliseconds = 5 * 60 * 1_000
@@ -88,6 +89,7 @@ export function createAstraGitStageControl(
   session: OpenedWorkspace,
   state: Readonly<{ ledgerFilename: string; spoolFilename: string }>,
   dependencies: AstraGitStageControlDependencies = defaultDependencies(),
+  sessionAuthority?: AstraGitSessionAuthority,
 ): AstraGitStageControl {
   let pendingInventory: PendingInventory | undefined
   let pendingProposal: PendingProposal | undefined
@@ -98,8 +100,11 @@ export function createAstraGitStageControl(
   return {
     async inventory(requestId) {
       if (session.mode !== "activate-once") return blockedInventory(requestId, "read_only")
-      if (!session.repositoryBaseline) return blockedInventory(requestId, "git_baseline_required")
-      if (!session.repositoryInspection) return blockedInventory(requestId, "git_inspection_required")
+      if (!sessionAuthority && !session.repositoryBaseline) return blockedInventory(requestId, "git_baseline_required")
+      if (!sessionAuthority && !session.repositoryInspection)
+        return blockedInventory(requestId, "git_inspection_required")
+      const repository = currentRepositoryAuthority(session, sessionAuthority)
+      if (!repository) return blockedInventory(requestId, "git_authority_unavailable")
       if (pendingProposal && Date.parse(pendingProposal.preview.authority.expiresAt) > dependencies.now()) {
         return blockedInventory(requestId, "control_busy")
       }
@@ -113,7 +118,7 @@ export function createAstraGitStageControl(
       if (inventoryCount >= maximumInventories) return blockedInventory(requestId, "control_limit_reached")
 
       const captured = await dependencies
-        .captureInventory(session.report.root, session.repositoryBaseline, session.repositoryInspection)
+        .captureInventory(session.report.root, repository.baseline, repository.inspection)
         .catch(() => null)
       if (!captured || captured.status !== "ready") {
         return blockedInventory(requestId, captured?.status === "blocked" ? captured.reason : "inventory_unavailable")
@@ -122,9 +127,9 @@ export function createAstraGitStageControl(
       if (
         !authority.ok ||
         authority.value.workspaceRoot !== session.report.root ||
-        authority.value.baselineSnapshotDigest !== session.repositoryBaseline.snapshotDigest ||
-        authority.value.inspectionObservationDigest !== session.repositoryInspection.outputDigest ||
-        authority.value.inspectionReportDigest !== session.repositoryInspection.reportDigest
+        authority.value.baselineSnapshotDigest !== repository.baseline.snapshotDigest ||
+        authority.value.inspectionObservationDigest !== repository.inspection.outputDigest ||
+        authority.value.inspectionReportDigest !== repository.inspection.reportDigest
       ) {
         return blockedInventory(requestId, "inventory_unavailable")
       }
@@ -159,7 +164,7 @@ export function createAstraGitStageControl(
         expiresAt,
         authority: authority.value,
         publicInventory,
-        baseline: session.repositoryBaseline,
+        baseline: repository.baseline,
       })
       inventoryCount++
       return { schemaVersion: 1, requestId, status: "inventory", inventory: publicInventory }
@@ -304,6 +309,11 @@ export function createAstraGitStageControl(
       ) {
         return reconciliation(binding, executed.operationID, "verification_unknown")
       }
+      await advanceAstraGitSessionAuthority(
+        sessionAuthority,
+        proposal.baseline.snapshotDigest,
+        verified.observation.afterSnapshotDigest,
+      )
       return {
         ...binding,
         status: "verified",
@@ -314,6 +324,12 @@ export function createAstraGitStageControl(
       }
     },
   }
+}
+
+function currentRepositoryAuthority(session: OpenedWorkspace, authority: AstraGitSessionAuthority | undefined) {
+  if (authority) return authority.current()
+  if (!session.repositoryBaseline || !session.repositoryInspection) return null
+  return { baseline: session.repositoryBaseline, inspection: session.repositoryInspection }
 }
 
 function exactSelectedCandidates(preview: GitStageControlPreview["authority"], inventory: GitStageInventory) {

@@ -56,6 +56,7 @@ export type GitCommitDecisionResult =
         operationID: string
         receiptID: string
         commitOID: string
+        snapshotDigest: `sha256:${string}`
       }>)
   | (GitCommitDecisionBinding &
       Readonly<{ status: "reconciliation_required"; operationID: string | null; reason: string }>)
@@ -229,11 +230,20 @@ export function parseGitCommitDecisionResult(input: unknown): GitCommitControlPa
   }
   if (
     broad.status !== "verified" ||
-    !exact(input, [...decisionKeys, "status", "verification", "operationID", "receiptID", "commitOID"]) ||
+    !exact(input, [
+      ...decisionKeys,
+      "status",
+      "verification",
+      "operationID",
+      "receiptID",
+      "commitOID",
+      "snapshotDigest",
+    ]) ||
     broad.verification !== "independent_commit_bytes_and_repository_state" ||
     !uuid(broad.operationID) ||
     !uuid(broad.receiptID) ||
-    !objectID(broad.commitOID)
+    !objectID(broad.commitOID) ||
+    !digest(broad.snapshotDigest)
   )
     return rejected("invalid_decision_result")
   return accepted({
@@ -243,6 +253,7 @@ export function parseGitCommitDecisionResult(input: unknown): GitCommitControlPa
     operationID: broad.operationID,
     receiptID: broad.receiptID,
     commitOID: broad.commitOID,
+    snapshotDigest: broad.snapshotDigest,
   })
 }
 

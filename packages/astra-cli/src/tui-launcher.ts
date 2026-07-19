@@ -19,6 +19,7 @@ import { createAstraSkillActivationControl, type AstraSkillActivationControl } f
 import { createAstraGitUnstageControl } from "./git-unstage-control"
 import { createAstraGitStageControl } from "./git-stage-control"
 import { createAstraGitCommitControl } from "./git-commit-control"
+import { createAstraGitSessionAuthority } from "./git-session-authority"
 import { createAstraOperationViewControl } from "./operation-view-control"
 import { createAstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
 import { createAstraExtensionInventoryControl } from "./extension-inventory-control"
@@ -133,6 +134,7 @@ export function astraChildEnvironment(
 
 export async function launchAstraTui(session: OpenedWorkspace) {
   const authority = await createAstraSessionAuthorityFile(session)
+  const gitAuthority = createAstraGitSessionAuthority(session)
   let control: AstraTuiControlServer | undefined
   let provider: AstraProviderControlServer | undefined
   let authReader: ParentAnthropicAuthReaderHandle | undefined
@@ -179,19 +181,34 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),
       }),
-      gitStageControl: createAstraGitStageControl(session, {
-        ledgerFilename: operationLedgerPath(),
-        spoolFilename: receiptSpoolPath(),
-      }),
-      gitCommitControl: createAstraGitCommitControl(session, {
-        ledgerFilename: operationLedgerPath(),
-        spoolFilename: receiptSpoolPath(),
-      }),
+      gitStageControl: createAstraGitStageControl(
+        session,
+        {
+          ledgerFilename: operationLedgerPath(),
+          spoolFilename: receiptSpoolPath(),
+        },
+        undefined,
+        gitAuthority,
+      ),
+      gitCommitControl: createAstraGitCommitControl(
+        session,
+        {
+          ledgerFilename: operationLedgerPath(),
+          spoolFilename: receiptSpoolPath(),
+        },
+        undefined,
+        gitAuthority,
+      ),
       operationViewControl: createAstraOperationViewControl({ ledgerFilename: operationLedgerPath() }),
-      gitUnstageControl: createAstraGitUnstageControl(session, {
-        ledgerFilename: operationLedgerPath(),
-        spoolFilename: receiptSpoolPath(),
-      }),
+      gitUnstageControl: createAstraGitUnstageControl(
+        session,
+        {
+          ledgerFilename: operationLedgerPath(),
+          spoolFilename: receiptSpoolPath(),
+        },
+        undefined,
+        gitAuthority,
+      ),
       governedWorkspaceSearchControl: createAstraGovernedWorkspaceSearchControl(session, {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),

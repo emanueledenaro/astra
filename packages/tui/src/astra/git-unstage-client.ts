@@ -10,6 +10,7 @@ import {
   type GitUnstageProgress,
 } from "@astra/domain/git-unstage-control"
 import { AstraControlClientError } from "./control-client"
+import { matchesAstraGitClientAuthority, type AstraGitClientAuthority } from "./git-client-authority"
 
 const responseLimitBytes = 64 * 1024
 const defaultResponseTimeoutMs = 65_000
@@ -39,6 +40,7 @@ export function createAstraGitUnstageClient(
     responseTimeoutMs?: number
     expectedWorkspaceRoot?: string
     expectedBaselineSnapshotDigest?: string
+    baselineAuthority?: AstraGitClientAuthority
   }> = {},
 ): AstraGitUnstageClient {
   const socketPath = environment.ASTRA_CONTROL_SOCKET
@@ -87,14 +89,18 @@ export function createAstraGitUnstageClient(
           if (
             (options.expectedWorkspaceRoot !== undefined &&
               result.preview.authority.workspaceRoot !== options.expectedWorkspaceRoot) ||
-            (options.expectedBaselineSnapshotDigest !== undefined &&
-              result.preview.authority.baseline.snapshotDigest !== options.expectedBaselineSnapshotDigest)
+            !matchesAstraGitClientAuthority(
+              options.baselineAuthority,
+              options.expectedBaselineSnapshotDigest,
+              result.preview.authority.baseline.snapshotDigest,
+            )
           ) {
             throw new AstraControlClientError("protocol_invalid")
           }
           prepared.set(result.preview.proposalID, {
             proposalID: result.preview.proposalID,
             proposalDigest: result.preview.authority.proposalDigest,
+            baselineSnapshotDigest: result.preview.authority.baseline.snapshotDigest,
           })
         }
         return result
@@ -116,7 +122,14 @@ export function createAstraGitUnstageClient(
           return parsed.value
         },
         ...requestOptions,
-      }).finally(() => prepared.delete(proposalID))
+      })
+        .then((result) => {
+          if (result.status === "verified" && options.baselineAuthority) {
+            options.baselineAuthority.advance(binding.baselineSnapshotDigest, result.snapshotDigest)
+          }
+          return result
+        })
+        .finally(() => prepared.delete(proposalID))
     },
     dispose() {
       const active = activeRequest
@@ -126,7 +139,11 @@ export function createAstraGitUnstageClient(
   }
 }
 
-type PreparedBinding = Readonly<{ proposalID: string; proposalDigest: string }>
+type PreparedBinding = Readonly<{
+  proposalID: string
+  proposalDigest: string
+  baselineSnapshotDigest: `sha256:${string}`
+}>
 
 type ExchangeInput<Result> = Readonly<{
   method: "git-unstage.prepare" | "git-unstage.decide"

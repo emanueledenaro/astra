@@ -26,6 +26,7 @@ import {
   type GitCommitAdapter,
 } from "../../astra-runtime/src/git-commit-coordinator"
 import type { AstraWorkspaceSessionResult } from "./workspace-session"
+import { advanceAstraGitSessionAuthority, type AstraGitSessionAuthority } from "./git-session-authority"
 
 const maximumProposals = 32
 
@@ -67,6 +68,7 @@ export function createAstraGitCommitControl(
   session: OpenedWorkspace,
   state: Readonly<{ ledgerFilename: string; spoolFilename: string }>,
   dependencies: AstraGitCommitControlDependencies = defaultDependencies(),
+  sessionAuthority?: AstraGitSessionAuthority,
 ): AstraGitCommitControl {
   let pendingProposal: PendingProposal | undefined
   let proposalCount = 0
@@ -77,7 +79,9 @@ export function createAstraGitCommitControl(
       if (session.mode !== "activate-once") return blockedPrepare(requestId, "read_only")
       const parsedMessage = parseGitCommitMessage(message)
       if (!parsedMessage.ok) return blockedPrepare(requestId, "invalid_commit_message")
-      if (!session.repositoryBaseline) return blockedPrepare(requestId, "git_baseline_required")
+      if (!sessionAuthority && !session.repositoryBaseline) return blockedPrepare(requestId, "git_baseline_required")
+      const repository = currentRepositoryAuthority(session, sessionAuthority)
+      if (!repository) return blockedPrepare(requestId, "git_authority_unavailable")
       if (pendingProposal && Date.parse(pendingProposal.preview.authority.expiresAt) > dependencies.now()) {
         return blockedPrepare(requestId, "control_busy")
       }
@@ -86,16 +90,16 @@ export function createAstraGitCommitControl(
       if (proposalCount >= maximumProposals) return blockedPrepare(requestId, "control_limit_reached")
 
       const prepared = await dependencies
-        .prepare(session.report.root, session.repositoryBaseline, parsedMessage.value, dependencies.now())
+        .prepare(session.report.root, repository.baseline, parsedMessage.value, dependencies.now())
         .catch(() => null)
       if (!prepared) return blockedPrepare(requestId, "preparation_unavailable")
       if (prepared.status !== "ready") return blockedPrepare(requestId, prepared.reason)
       if (
         prepared.preview.workspaceRoot !== session.report.root ||
-        prepared.preview.baselineSnapshotDigest !== session.repositoryBaseline.snapshotDigest ||
+        prepared.preview.baselineSnapshotDigest !== repository.baseline.snapshotDigest ||
         prepared.preview.message !== parsedMessage.value ||
         prepared.inventory.inventoryDigest !== prepared.preview.inventoryDigest ||
-        prepared.baseline.snapshotDigest !== session.repositoryBaseline.snapshotDigest ||
+        prepared.baseline.snapshotDigest !== repository.baseline.snapshotDigest ||
         Date.parse(prepared.preview.expiresAt) <= dependencies.now()
       ) {
         return blockedPrepare(requestId, "preparation_unavailable")
@@ -201,10 +205,12 @@ export function createAstraGitCommitControl(
         verified.status !== "verified" ||
         verified.operationID !== executed.operationID ||
         verified.receiptID !== executed.receiptID ||
+        !isSnapshotDigest(verified.snapshotDigest) ||
         verified.observation?.afterOID !== executed.observation.afterOID
       ) {
         return reconciliation(binding, executed.operationID, "verification_unknown")
       }
+      await advanceAstraGitSessionAuthority(sessionAuthority, proposal.baseline.snapshotDigest, verified.snapshotDigest)
       return {
         ...binding,
         status: "verified",
@@ -212,9 +218,20 @@ export function createAstraGitCommitControl(
         operationID: verified.operationID,
         receiptID: verified.receiptID,
         commitOID: verified.observation.afterOID,
+        snapshotDigest: verified.snapshotDigest,
       }
     },
   }
+}
+
+function isSnapshotDigest(input: string | null): input is `sha256:${string}` {
+  return typeof input === "string" && /^sha256:[0-9a-f]{64}$/.test(input)
+}
+
+function currentRepositoryAuthority(session: OpenedWorkspace, authority: AstraGitSessionAuthority | undefined) {
+  const current = authority?.current()
+  if (authority) return current
+  return session.repositoryBaseline ? { baseline: session.repositoryBaseline } : null
 }
 
 function defaultDependencies(): AstraGitCommitControlDependencies {

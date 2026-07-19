@@ -24,6 +24,7 @@ import { createAstraExtensionInventoryClient, type AstraExtensionInventoryClient
 import { createAstraMcpActivationClient, type AstraMcpActivationClient } from "./mcp-activation-client"
 import { createAstraOperationViewClient, type AstraOperationViewClient } from "./operation-view-client"
 import { registerAstraOperations } from "../feature-plugins/system/astra-operations"
+import { createAstraGitClientAuthority } from "./git-client-authority"
 
 /** Registers built-in Astra surfaces from the authority validated at process admission. */
 export function registerAstraAppFeatures(
@@ -41,6 +42,7 @@ export function registerAstraAppFeatures(
   gitCommitClient?: AstraGitCommitClient,
   operationViewClient?: AstraOperationViewClient,
 ) {
+  const gitAuthority = createAstraGitClientAuthority(authority.repositoryBaseline?.snapshotDigest)
   registerAstraChat(api, authority, providerClient)
   registerAstraGitControlPlane(
     api,
@@ -63,9 +65,7 @@ export function registerAstraAppFeatures(
     gitUnstageClient ??
       createAstraGitUnstageClient(process.env, authority.sessionID, {
         expectedWorkspaceRoot: authority.workspace.root,
-        ...(authority.repositoryBaseline
-          ? { expectedBaselineSnapshotDigest: authority.repositoryBaseline.snapshotDigest }
-          : {}),
+        baselineAuthority: gitAuthority,
       }),
   )
   registerAstraGitStage(
@@ -74,9 +74,7 @@ export function registerAstraAppFeatures(
     gitStageClient ??
       createAstraGitStageClient(process.env, authority.sessionID, {
         expectedWorkspaceRoot: authority.workspace.root,
-        ...(authority.repositoryBaseline
-          ? { expectedBaselineSnapshotDigest: authority.repositoryBaseline.snapshotDigest }
-          : {}),
+        baselineAuthority: gitAuthority,
       }),
   )
   registerAstraGitCommit(
@@ -85,9 +83,7 @@ export function registerAstraAppFeatures(
     gitCommitClient ??
       createAstraGitCommitClient(process.env, authority.sessionID, {
         expectedWorkspaceRoot: authority.workspace.root,
-        ...(authority.repositoryBaseline
-          ? { expectedBaselineSnapshotDigest: authority.repositoryBaseline.snapshotDigest }
-          : {}),
+        baselineAuthority: gitAuthority,
       }),
   )
   registerAstraGovernedWorkspaceSearch(

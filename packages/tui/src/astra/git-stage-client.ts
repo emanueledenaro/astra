@@ -15,6 +15,7 @@ import {
   type GitStageProgress,
 } from "../../../astra-domain/src/git-stage-control"
 import { AstraControlClientError } from "./control-client"
+import { matchesAstraGitClientAuthority, type AstraGitClientAuthority } from "./git-client-authority"
 
 export type {
   GitStageControlPreview,
@@ -54,6 +55,7 @@ export function createAstraGitStageClient(
     responseTimeoutMs?: number
     expectedWorkspaceRoot?: string
     expectedBaselineSnapshotDigest?: string
+    baselineAuthority?: AstraGitClientAuthority
     now?: () => Date
   }> = {},
 ): AstraGitStageClient {
@@ -98,8 +100,11 @@ export function createAstraGitStageClient(
         (result) => {
           if (result.status !== "inventory") return result
           if (
-            options.expectedBaselineSnapshotDigest !== undefined &&
-            result.inventory.baselineSnapshotDigest !== options.expectedBaselineSnapshotDigest
+            !matchesAstraGitClientAuthority(
+              options.baselineAuthority,
+              options.expectedBaselineSnapshotDigest,
+              result.inventory.baselineSnapshotDigest,
+            )
           ) {
             throw new AstraControlClientError("protocol_invalid")
           }
@@ -163,6 +168,7 @@ export function createAstraGitStageClient(
         proposals.set(result.preview.proposalID, {
           proposalID: result.preview.proposalID,
           proposalDigest: authority.proposalDigest,
+          baselineSnapshotDigest: authority.baselineSnapshotDigest,
         })
         return result
       })
@@ -182,6 +188,9 @@ export function createAstraGitStageClient(
       }).then((result) => {
         proposals.delete(proposalID)
         attemptedProposals.delete(proposalID)
+        if (result.status === "verified" && options.baselineAuthority) {
+          options.baselineAuthority.advance(binding.baselineSnapshotDigest, result.snapshotDigest)
+        }
         return result
       })
     },
@@ -200,7 +209,11 @@ type InventoryBinding = Readonly<{
   expiresAt: string
   candidates: ReadonlyMap<string, GitStageControlCandidate>
 }>
-type ProposalBinding = Readonly<{ proposalID: string; proposalDigest: string }>
+type ProposalBinding = Readonly<{
+  proposalID: string
+  proposalDigest: string
+  baselineSnapshotDigest: `sha256:${string}`
+}>
 type Method = "git-stage.inventory" | "git-stage.prepare" | "git-stage.decide"
 type ExchangeInput<Result> = Readonly<{
   method: Method

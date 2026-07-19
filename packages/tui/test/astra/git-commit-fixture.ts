@@ -19,6 +19,7 @@ const workspaceRoot = "/Users/example/astra-project"
 const oldOID = "1".repeat(40)
 const treeOID = "2".repeat(40)
 export const commitOID = "3".repeat(40)
+export const snapshotDigest = digest("f")
 
 const previewAuthority = {
   schemaVersion: 1,
@@ -112,6 +113,7 @@ export function verifiedResult(requestId = "b0000000-0000-4000-8000-00000000000b
     operationID,
     receiptID,
     commitOID,
+    snapshotDigest,
   }
 }
 

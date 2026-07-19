@@ -65,8 +65,17 @@ describe("durable local Git commit coordinator", () => {
       state: "effect_observed",
     })
     expect(executions).toBe(1)
-    expect(await verifyDurableGitCommit(input, adapter)).toMatchObject({ state: "succeeded", status: "verified" })
-    expect(await verifyDurableGitCommit(input, adapter)).toMatchObject({ state: "succeeded", status: "verified" })
+    const verified = await verifyDurableGitCommit(input, adapter)
+    expect(verified).toMatchObject({
+      state: "succeeded",
+      status: "verified",
+      snapshotDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+    })
+    expect(await verifyDurableGitCommit(input, adapter)).toMatchObject({
+      state: "succeeded",
+      status: "verified",
+      snapshotDigest: verified.snapshotDigest,
+    })
     expect(verifications).toBe(1)
   })
 
