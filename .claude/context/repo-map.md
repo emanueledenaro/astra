@@ -1,26 +1,19 @@
 # Repo map & branch topology
 
-Updated: 2026-07-19 (during the round-2 audit).
+Updated: 2026-07-19 (after PR #4 merged the recovered line into the mainline).
 
 ## Branches (origin)
 
-- `astra` — protected fork mainline. **Currently far behind**: holds only the first
-  2 foundation commits (`ee661ea`, `8fafb9f`).
-- `astra-foundation` — +10 commits: durable denial ledger, dispatch claims, receipt
-  recovery, command-contract docs.
-- `durable-coordinator` — the real integration line: +55 commits over `astra-foundation`
-  (safe-start TUI integration, provider credential broker, governed chat/MCP/skills,
-  git stage/unstage, Lynx, docs/astra/STATUS.md + ROADMAP.md).
-- `local-recovery` — `durable-coordinator` + commit `b0fd520` "chore: recover local
-  work": the recovered in-flight Git commit slice (git-commit-mutation, astra-git
-  commit.ts, coordinator, native C helper, ADR-0002). **Does not typecheck** (3 known
-  errors) — recovered mid-flight, preserved intentionally with `--no-verify`.
-- `claude/project-audit-04u7l4` — audit branch (AUDIT.md + this scaffolding).
+- `astra` — protected fork mainline, **now current**: full recovered development line
+  (durable kernel, safe-start TUI integration, governed chat/MCP/skills/git-stage,
+  git commit slice) plus the round-2 audit fixes, merged via PR #4 (`78e455e`).
+  All seven astra packages typecheck clean; cross-platform suites 190/190 green.
+- `local-recovery`, `durable-coordinator`, `astra-foundation` — historical lines now
+  contained in `astra`; safe to delete after a settling period.
+- `claude/project-audit-04u7l4` — audit branch (AUDIT.md + this scaffolding), rebased
+  onto the merged mainline.
 - Hundreds of `origin/*` branches/tags are upstream opencode noise accidentally pushed
-  by `git push --all`; cleanup pending. Ignore them.
-
-Consolidation plan: PR `local-recovery` → `astra` (protected branch requires a PR),
-after fixing the 3 type errors. Then delete the noise branches.
+  by `git push --all`; cleanup pending (owner task — bulk deletion needs human hands).
 
 ## Where things live
 
