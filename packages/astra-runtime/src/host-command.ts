@@ -78,6 +78,7 @@ export type HostCommandFaultPoint = (typeof hostCommandFaultPoints)[number]
 export type HostCommandCoordinatorDependencies = Readonly<{
   injectFault?: (point: HostCommandFaultPoint) => Promise<void>
   now?: () => number
+  onProcessEntered?: () => void
 }>
 
 export type HostCommandRequest =
@@ -277,7 +278,7 @@ export async function executeHostCommand(
     const startedAt = new Date(now()).toISOString()
     const observation =
       boundaryBaseline.matched && executable && authority?.allowed
-        ? await runBoundedHostCommand(facts.preview)
+        ? await runAuthorizedHostCommand(facts.preview, dependencies.onProcessEntered)
         : notStartedObservation(
             !boundaryBaseline.matched
               ? boundaryBaseline.reason
@@ -312,6 +313,11 @@ export async function executeHostCommand(
       cause,
     )
   }
+}
+
+async function runAuthorizedHostCommand(preview: HostCommandPreview, onProcessEntered?: () => void) {
+  onProcessEntered?.()
+  return runBoundedHostCommand(preview)
 }
 
 /** Recovers receipts or marks an expired claim uncertain without rerunning the command. */
@@ -1271,7 +1277,8 @@ function requireHostCommandInput(input: ProposeHostCommandInput) {
       bytes === 0 ||
       bytes > maximumShellScriptBytes ||
       input.request.scriptBytes !== bytes ||
-      input.request.script.includes("\0")
+      input.request.script.includes("\0") ||
+      /\p{C}/u.test(input.request.script.replaceAll("\n", "").replaceAll("\t", ""))
     ) {
       throw new TypeError("The shell script request is invalid")
     }

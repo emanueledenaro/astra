@@ -488,7 +488,7 @@ function script(input: unknown): input is string {
     input.trim().length > 0 &&
     Buffer.byteLength(input) <= maximumScriptBytes &&
     !input.includes("\0") &&
-    !/[\p{Cc}&&[^\n\t]]/v.test(input)
+    !/\p{C}/u.test(input.replaceAll("\n", "").replaceAll("\t", ""))
   )
 }
 

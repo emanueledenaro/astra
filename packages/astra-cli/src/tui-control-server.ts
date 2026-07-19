@@ -14,6 +14,7 @@ import {
   parseWorkspaceSearchControlRequest,
   type WorkspaceSearchControlRequest,
 } from "@astra/domain/governed-workspace-search-control"
+import { parseHostCommandControlRequest, type HostCommandControlRequest } from "@astra/domain/host-command-control"
 import {
   parseExtensionInventoryControlRequest,
   type ExtensionInventoryControlRequest,
@@ -68,6 +69,9 @@ import { serveAstraGitCommitControlRequest } from "./git-commit-control-server-h
 import type { AstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
 import { createAstraGovernedWorkspaceSearchControlHandler } from "./governed-workspace-search-control-handler"
 import { serveAstraGovernedWorkspaceSearchControlRequest } from "./governed-workspace-search-control-server-hook"
+import type { AstraHostCommandControl } from "./host-command-control"
+import { createAstraHostCommandControlHandler } from "./host-command-control-handler"
+import { serveAstraHostCommandControlRequest } from "./host-command-control-server-hook"
 import type { AstraExtensionInventoryControl } from "./extension-inventory-control"
 import { createAstraExtensionInventoryControlHandler } from "./extension-inventory-control-handler"
 import { serveAstraExtensionInventoryControlRequest } from "./extension-inventory-control-server-hook"
@@ -109,6 +113,7 @@ type ControlRequest =
   | GitCommitControlRequest
   | GitUnstageControlRequest
   | WorkspaceSearchControlRequest
+  | HostCommandControlRequest
   | ControlledWritePrepareRequest
   | ControlledWriteDecisionRequest
   | SkillControlRequest
@@ -133,6 +138,7 @@ export type AstraTuiControlServerInput = Readonly<{
   gitUnstageControl?: AstraGitUnstageControl
   skillActivationControl?: AstraSkillActivationControl
   governedWorkspaceSearchControl?: AstraGovernedWorkspaceSearchControl
+  hostCommandControl?: AstraHostCommandControl
   extensionInventoryControl?: AstraExtensionInventoryControl
   mcpActivationControl?: AstraMcpActivationControl
   operationViewControl?: AstraOperationViewControl
@@ -191,6 +197,13 @@ export async function startAstraTuiControlServer(
         control: input.governedWorkspaceSearchControl,
       })
     : undefined
+  const hostCommandHandler = input.hostCommandControl
+    ? createAstraHostCommandControlHandler({
+        sessionID: input.sessionID,
+        token,
+        control: input.hostCommandControl,
+      })
+    : undefined
   const extensionInventoryHandler = input.extensionInventoryControl
     ? createAstraExtensionInventoryControlHandler({
         sessionID: input.sessionID,
@@ -237,6 +250,15 @@ export async function startAstraTuiControlServer(
           }
           socket.setTimeout(0)
           await serveAstraGovernedWorkspaceSearchControlRequest(socket, request, workspaceSearchHandler)
+          return
+        }
+        if (isHostCommandRequest(request)) {
+          if (!hostCommandHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraHostCommandControlRequest(socket, request, hostCommandHandler)
           return
         }
         if (isGitUnstageRequest(request)) {
@@ -435,6 +457,8 @@ function parseRequest(input: string): ControlRequest | null {
     if (gitCommit.ok) return gitCommit.value
     const workspaceSearch = parseWorkspaceSearchControlRequest(value)
     if (workspaceSearch.ok) return workspaceSearch.value
+    const hostCommand = parseHostCommandControlRequest(value)
+    if (hostCommand.ok) return hostCommand.value
     const extensionInventory = parseExtensionInventoryControlRequest(value)
     if (extensionInventory.ok) return extensionInventory.value
     const mcpActivation = parseMcpActivationControlRequest(value)
@@ -499,12 +523,20 @@ function isWorkspaceSearchRequest(request: ControlRequest): request is Workspace
   return request.method === "search.prepare" || request.method === "search.decide"
 }
 
+function isHostCommandRequest(request: ControlRequest): request is HostCommandControlRequest {
+  return request.method === "host-command.prepare" || request.method === "host-command.decide"
+}
+
 function isExtensionInventoryRequest(request: ControlRequest): request is ExtensionInventoryControlRequest {
   return request.method === "extension-inventory.prepare" || request.method === "extension-inventory.decide"
 }
 
 function isMcpActivationRequest(request: ControlRequest): request is McpActivationControlRequest {
-  return request.method === "mcp-activation.prepare" || request.method === "mcp-activation.decide" || request.method === "mcp-activation.stop"
+  return (
+    request.method === "mcp-activation.prepare" ||
+    request.method === "mcp-activation.decide" ||
+    request.method === "mcp-activation.stop"
+  )
 }
 
 function isOperationViewRequest(request: ControlRequest): request is OperationViewControlRequest {
@@ -1060,6 +1092,7 @@ function encodeSkillTerminal(
 function encodeBlockedTerminal(request: ControlRequest, reason: string) {
   if (isWorkspaceSearchRequest(request))
     throw new Error("Workspace search requests are owned by their dedicated handler")
+  if (isHostCommandRequest(request)) throw new Error("Host command requests are owned by their dedicated handler")
   if (isGitUnstageRequest(request)) throw new Error("Git Unstage requests are owned by their dedicated handler")
   if (isGitStageRequest(request)) throw new Error("Git Stage requests are owned by their dedicated handler")
   if (isGitCommitRequest(request)) throw new Error("Git Commit requests are owned by their dedicated handler")

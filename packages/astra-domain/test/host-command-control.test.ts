@@ -25,6 +25,16 @@ describe("host command control contract", () => {
       ok: true,
       value: { schemaVersion: 1, method: "host-command.prepare", requestId: requestID, sessionID, token, script },
     })
+    expect(
+      parseHostCommandControlRequest({
+        schemaVersion: 1,
+        method: "host-command.prepare",
+        requestId: requestID,
+        sessionID,
+        token,
+        script: "printf safe\u202Etxt",
+      }),
+    ).toEqual({ ok: false, reason: "invalid_prepare_request" })
   })
 
   test("parses an exact unrestricted-host preview and rejects authority expansion", () => {

@@ -25,6 +25,8 @@ import { createAstraMcpActivationClient, type AstraMcpActivationClient } from ".
 import { createAstraOperationViewClient, type AstraOperationViewClient } from "./operation-view-client"
 import { registerAstraOperations } from "../feature-plugins/system/astra-operations"
 import { createAstraGitClientAuthority } from "./git-client-authority"
+import { createAstraHostCommandClient, type AstraHostCommandClient } from "./host-command-client"
+import { registerAstraHostCommand } from "../feature-plugins/system/astra-host-command"
 
 /** Registers built-in Astra surfaces from the authority validated at process admission. */
 export function registerAstraAppFeatures(
@@ -41,6 +43,7 @@ export function registerAstraAppFeatures(
   mcpActivationClient?: AstraMcpActivationClient,
   gitCommitClient?: AstraGitCommitClient,
   operationViewClient?: AstraOperationViewClient,
+  hostCommandClient?: AstraHostCommandClient,
 ) {
   const gitAuthority = createAstraGitClientAuthority(authority.repositoryBaseline?.snapshotDigest)
   registerAstraChat(api, authority, providerClient)
@@ -91,6 +94,14 @@ export function registerAstraAppFeatures(
     authority,
     governedWorkspaceSearchClient ??
       createAstraGovernedWorkspaceSearchClient(process.env, authority.sessionID, {
+        expectedWorkspaceRoot: authority.workspace.root,
+      }),
+  )
+  registerAstraHostCommand(
+    api,
+    authority,
+    hostCommandClient ??
+      createAstraHostCommandClient(process.env, authority.sessionID, {
         expectedWorkspaceRoot: authority.workspace.root,
       }),
   )

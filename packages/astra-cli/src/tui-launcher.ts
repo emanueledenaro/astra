@@ -22,6 +22,7 @@ import { createAstraGitCommitControl } from "./git-commit-control"
 import { createAstraGitSessionAuthority } from "./git-session-authority"
 import { createAstraOperationViewControl } from "./operation-view-control"
 import { createAstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
+import { createAstraHostCommandControl } from "./host-command-control"
 import { createAstraExtensionInventoryControl } from "./extension-inventory-control"
 import {
   createParentPrivateMcpRegistry,
@@ -210,6 +211,10 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         gitAuthority,
       ),
       governedWorkspaceSearchControl: createAstraGovernedWorkspaceSearchControl(session, {
+        ledgerFilename: operationLedgerPath(),
+        spoolFilename: receiptSpoolPath(),
+      }),
+      hostCommandControl: createAstraHostCommandControl(session, {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),
       }),

@@ -164,6 +164,14 @@ describe("governed host command", () => {
     } as const
 
     expect(proposeHostCommand(input)).rejects.toThrow("The shell script request is invalid")
+    const deceptiveScript = "printf safe\u202Etxt"
+    expect(
+      proposeHostCommand({
+        ...input,
+        operationID: crypto.randomUUID(),
+        request: { command: "shell", script: deceptiveScript, scriptBytes: Buffer.byteLength(deceptiveScript) },
+      }),
+    ).rejects.toThrow("The shell script request is invalid")
   })
 
   test("classifies any observed nonzero process exit as effect unknown", () => {

@@ -56,6 +56,7 @@
     "./astra/git-stage-client": "./src/astra/git-stage-client.ts",
     "./astra/git-commit-client": "./src/astra/git-commit-client.ts",
     "./astra/governed-workspace-search-client": "./src/astra/governed-workspace-search-client.ts",
+    "./astra/host-command-client": "./src/astra/host-command-client.ts",
     "./astra/mcp-activation-client": "./src/astra/mcp-activation-client.ts"
   },
   "dependencies": {
