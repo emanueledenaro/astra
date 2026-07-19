@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
 import {
   computeProviderSkillContextBindingDigest,
+  providerConversationRetentionLabel,
   providerHostExecutionBoundaryLabel,
   providerNetworkExecutionBoundaryLabel,
   providerObservedCompletionLabel,
@@ -14,11 +15,14 @@ import {
   type ProviderTurnProgress,
 } from "@astra/domain/provider-control"
 import {
+  anthropicOneTurnMaximumConversationBytes,
+  anthropicOneTurnMaximumConversationTurns,
   buildAnthropicOneTurnRequest,
   createAnthropicCatalogAuthority,
   parseAnthropicOneTurnResponse,
   sealValidatedAnthropicModelCatalog,
   type AnthropicCatalogAuthority,
+  type AnthropicConversationTurn,
   type AnthropicOneTurnRequest,
   type ValidatedAnthropicModelCatalog,
 } from "@astra/runtime/anthropic-one-turn"
@@ -44,7 +48,7 @@ import type {
   TrustedPromptSkillBundle,
 } from "./skill-activation-control"
 
-const maximumPreparedOperations = 4
+const maximumPreparedOperations = 16
 const requestTimeoutMilliseconds = 30_000
 const maximumResponseBytes = 1_048_576
 const maxTokens = 1_024
@@ -63,6 +67,7 @@ type PendingTurn = Readonly<{
   grant: ProviderCredentialGrant
   preview: ProviderTurnPreview
   skillBundle: TrustedPromptSkillBundle | null
+  userText: string
 }>
 
 export type AstraProviderControl = Readonly<{
@@ -102,6 +107,8 @@ export function createAstraProviderControl(
   const execute = dependencies.execute ?? executeProviderTurnWithTrustedObservedTransport
   const catalogAuthority = (dependencies.createCatalogAuthority ?? createAnthropicCatalogAuthority)()
   const consumed = new Set<string>()
+  /** Consented prior exchanges for this activation. Parent memory only; never persisted. */
+  const conversation: Array<AnthropicConversationTurn> = []
   let pending: PendingTurn | undefined
   let availableSkill: TrustedPromptSkillBundle | undefined
   let prepared = 0
@@ -120,6 +127,13 @@ export function createAstraProviderControl(
     const result = dependencies.readCatalog()
     if (!result.ok) return blockedPrepare("catalog_unavailable")
     if (!result.catalog.models.some((model) => model.id === modelID)) return blockedPrepare("model_rejected")
+    const historyBytes = conversationHistoryBytes(conversation)
+    if (
+      conversation.length >= anthropicOneTurnMaximumConversationTurns ||
+      historyBytes + Buffer.byteLength(userText, "utf8") > anthropicOneTurnMaximumConversationBytes
+    ) {
+      return blockedPrepare("conversation_limit_reached")
+    }
 
     const validatedCatalog = validatedModelCatalog(catalogAuthority, result)
     const skill = await takeAvailableSkill(dependencies.skillBundleSource, availableSkill)
@@ -130,7 +144,7 @@ export function createAstraProviderControl(
       availableSkill = undefined
       return blockedPrepare("skill_context_unavailable")
     }
-    const request = buildRequest(catalogAuthority, validatedCatalog, modelID, userText, skillBundle)
+    const request = buildRequest(catalogAuthority, validatedCatalog, modelID, userText, skillBundle, [...conversation])
     if (!request) return blockedPrepare("input_rejected")
     const credential = await dependencies.credentialBroker.issueForSession(sessionID)
     if (!credential.ok) return blockedPrepare("credential_unavailable")
@@ -158,6 +172,11 @@ export function createAstraProviderControl(
           bytes: request.evidence.requestBytes,
           contextBindingDigest,
         },
+        conversation: {
+          priorTurns: conversation.length,
+          historyBytes,
+          retention: providerConversationRetentionLabel,
+        },
         providerCapabilityDigest,
         skillContext,
         headerNames: [...facts.plan.wireRequest.headerNames],
@@ -170,7 +189,7 @@ export function createAstraProviderControl(
         networkBoundaryLabel: providerNetworkExecutionBoundaryLabel,
         assurance: "NOT VERIFIED",
       })
-      pending = { proposalID, operationID, facts, request, grant: credential.grant, preview, skillBundle }
+      pending = { proposalID, operationID, facts, request, grant: credential.grant, preview, skillBundle, userText }
       if (skillBundle) availableSkill = undefined
       prepared += 1
       return { status: "prepared", preview }
@@ -240,6 +259,7 @@ export function createAstraProviderControl(
       )
       if (result.status === "response_observed_not_verified" && result.response && result.receiptID) {
         if (!responseObserved) return reconciliation(proposal, result.receiptID)
+        conversation.push({ userText: proposal.userText, assistantText: result.response.assistantText })
         progress("receipt_acknowledged")
       }
       if (result.status === "denied_without_effect") prepared -= 1
@@ -278,12 +298,20 @@ function validatedModelCatalog(
   })
 }
 
+function conversationHistoryBytes(turns: ReadonlyArray<AnthropicConversationTurn>) {
+  return turns.reduce(
+    (bytes, turn) => bytes + Buffer.byteLength(turn.userText, "utf8") + Buffer.byteLength(turn.assistantText, "utf8"),
+    0,
+  )
+}
+
 function buildRequest(
   authority: AnthropicCatalogAuthority,
   catalog: ValidatedAnthropicModelCatalog,
   modelID: string,
   userText: string,
   skillBundle: TrustedPromptSkillBundle | null,
+  conversationTurns: ReadonlyArray<AnthropicConversationTurn>,
 ) {
   try {
     return buildAnthropicOneTurnRequest({
@@ -292,6 +320,7 @@ function buildRequest(
       modelID,
       userText,
       maxTokens,
+      conversationTurns,
       ...(skillBundle
         ? {
             skillContext: {

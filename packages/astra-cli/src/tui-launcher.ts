@@ -18,6 +18,8 @@ import { createParentProviderCredentialBroker, type ParentProviderCredentialBrok
 import { createAstraSkillActivationControl, type AstraSkillActivationControl } from "./skill-activation-control"
 import { createAstraGitUnstageControl } from "./git-unstage-control"
 import { createAstraGitStageControl } from "./git-stage-control"
+import { createAstraGitCommitControl } from "./git-commit-control"
+import { createAstraOperationViewControl } from "./operation-view-control"
 import { createAstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
 import { createAstraExtensionInventoryControl } from "./extension-inventory-control"
 import {
@@ -181,6 +183,11 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),
       }),
+      gitCommitControl: createAstraGitCommitControl(session, {
+        ledgerFilename: operationLedgerPath(),
+        spoolFilename: receiptSpoolPath(),
+      }),
+      operationViewControl: createAstraOperationViewControl({ ledgerFilename: operationLedgerPath() }),
       gitUnstageControl: createAstraGitUnstageControl(session, {
         ledgerFilename: operationLedgerPath(),
         spoolFilename: receiptSpoolPath(),

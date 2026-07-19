@@ -399,6 +399,211 @@ describe("parent provider control", () => {
   })
 })
 
+describe("consented multi-turn conversation", () => {
+  test("sends parent-held history with each approved turn and previews its exact size", async () => {
+    const fixture = await makeFixture("activate-once")
+    let issues = 0
+    let takes = 0
+    let turns = 0
+    const bodies: Array<string> = []
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker: broker({ onIssue: () => issues++, onTake: () => takes++ }),
+      randomUUID: uuidSequence(),
+      execute: async (input, resolveWire, parse, dependencies) => {
+        expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("approve")
+        const wire = await resolveWire()
+        bodies.push(new TextDecoder().decode(wire.body))
+        turns += 1
+        const completion = parse({
+          statusCode: 200,
+          headers: [["content-type", "text/event-stream"]],
+          body: validSse(`Answer ${turns}`),
+        })
+        return completed(input.plan.operationID, completion)
+      },
+    })
+
+    const first = await control.prepare(modelID, "First user question")
+    if (first.status !== "prepared") throw new Error(first.reason)
+    expect(first.preview.conversation).toEqual({
+      priorTurns: 0,
+      historyBytes: 0,
+      retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED",
+    })
+    expect(await control.decide(first.preview.proposalID, "approve", () => {})).toMatchObject({
+      status: "response_observed_not_verified",
+      response: { assistantText: "Answer 1" },
+    })
+
+    const second = await control.prepare(modelID, "Second user question")
+    if (second.status !== "prepared") throw new Error(second.reason)
+    expect(second.preview.conversation).toEqual({
+      priorTurns: 1,
+      historyBytes: Buffer.byteLength("First user question") + Buffer.byteLength("Answer 1"),
+      retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED",
+    })
+    expect(second.preview.logicalPayload.bytes).toBeGreaterThan(first.preview.logicalPayload.bytes)
+    expect(await control.decide(second.preview.proposalID, "approve", () => {})).toMatchObject({
+      status: "response_observed_not_verified",
+      response: { assistantText: "Answer 2" },
+    })
+
+    expect(issues).toBe(2)
+    expect(takes).toBe(2)
+    const secondBody = JSON.parse(bodies[1]!)
+    expect(secondBody.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "First user question" }] },
+      { role: "assistant", content: [{ type: "text", text: "Answer 1" }] },
+      { role: "user", content: [{ type: "text", text: "Second user question" }] },
+    ])
+    expect(second.preview.logicalPayload.bytes).toBe(Buffer.byteLength(bodies[1]!))
+  })
+
+  test("keeps the conversation intact after a mid-conversation denial with zero dispatch", async () => {
+    const fixture = await makeFixture("activate-once")
+    let takes = 0
+    const bodies: Array<string> = []
+    const decisions: Array<"approve" | "reject"> = []
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker: broker({ onTake: () => takes++ }),
+      randomUUID: uuidSequence(),
+      execute: async (input, resolveWire, parse, dependencies) => {
+        const decision = await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)
+        decisions.push(decision)
+        if (decision === "reject") return denied(input.plan.operationID)
+        const wire = await resolveWire()
+        bodies.push(new TextDecoder().decode(wire.body))
+        const completion = parse({
+          statusCode: 200,
+          headers: [["content-type", "text/event-stream"]],
+          body: validSse("Kept answer"),
+        })
+        return completed(input.plan.operationID, completion)
+      },
+    })
+
+    const first = await control.prepare(modelID, "Kept question")
+    if (first.status !== "prepared") throw new Error(first.reason)
+    expect(await control.decide(first.preview.proposalID, "approve", () => {})).toMatchObject({
+      status: "response_observed_not_verified",
+    })
+
+    const deniedTurn = await control.prepare(modelID, "Denied question never sent")
+    if (deniedTurn.status !== "prepared") throw new Error(deniedTurn.reason)
+    expect(deniedTurn.preview.conversation.priorTurns).toBe(1)
+    expect(await control.decide(deniedTurn.preview.proposalID, "reject", () => {})).toMatchObject({
+      status: "denied_without_effect",
+      receiptID: null,
+    })
+    expect(takes).toBe(1)
+
+    const third = await control.prepare(modelID, "Third question after denial")
+    if (third.status !== "prepared") throw new Error(third.reason)
+    expect(third.preview.conversation).toMatchObject({
+      priorTurns: 1,
+      historyBytes: Buffer.byteLength("Kept question") + Buffer.byteLength("Kept answer"),
+    })
+    expect(await control.decide(third.preview.proposalID, "approve", () => {})).toMatchObject({
+      status: "response_observed_not_verified",
+    })
+    const thirdBody = JSON.parse(bodies[1]!)
+    expect(JSON.stringify(thirdBody)).not.toContain("Denied question never sent")
+    expect(thirdBody.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "Kept question" }] },
+      { role: "assistant", content: [{ type: "text", text: "Kept answer" }] },
+      { role: "user", content: [{ type: "text", text: "Third question after denial" }] },
+    ])
+    expect(decisions).toEqual(["approve", "reject", "approve"])
+  })
+
+  test("refuses a turn beyond the history byte cap without credentials, transport, or truncation", async () => {
+    const fixture = await makeFixture("activate-once")
+    let issues = 0
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker: broker({ onIssue: () => issues++ }),
+      randomUUID: uuidSequence(),
+      execute: async (input, resolveWire, parse, dependencies) => {
+        expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("approve")
+        await resolveWire()
+        const completion = parse({
+          statusCode: 200,
+          headers: [["content-type", "text/event-stream"]],
+          body: validSse("y".repeat(30_000)),
+        })
+        return completed(input.plan.operationID, completion)
+      },
+    })
+
+    const first = await control.prepare(modelID, "x".repeat(30_000))
+    if (first.status !== "prepared") throw new Error(first.reason)
+    expect(await control.decide(first.preview.proposalID, "approve", () => {})).toMatchObject({
+      status: "response_observed_not_verified",
+    })
+    expect(issues).toBe(1)
+
+    expect(await control.prepare(modelID, "z".repeat(10_000))).toEqual({
+      status: "blocked",
+      reason: "conversation_limit_reached",
+    })
+    expect(issues).toBe(1)
+
+    const small = await control.prepare(modelID, "small follow-up")
+    if (small.status !== "prepared") throw new Error(small.reason)
+    expect(small.preview.conversation).toMatchObject({ priorTurns: 1, historyBytes: 60_000 })
+    expect(issues).toBe(2)
+  })
+
+  test("issues a distinct one-shot grant per turn that is dead after its own turn", async () => {
+    const fixture = await makeFixture("activate-once")
+    const issued: Array<Readonly<{ credentialHandle: string; sessionID: string }>> = []
+    const parentBroker = createParentProviderCredentialBroker({
+      auth: { get: async () => ({ type: "api", key: "sk-ant-one-shot-per-turn" }) },
+    })
+    const credentialBroker: ParentProviderCredentialBroker = {
+      async issueForSession(sessionID) {
+        const result = await parentBroker.issueForSession(sessionID)
+        if (result.ok) issued.push(result.grant)
+        return result
+      },
+      revoke: parentBroker.revoke,
+      takeForParentTransport: parentBroker.takeForParentTransport,
+    }
+    let turns = 0
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker,
+      randomUUID: uuidSequence(),
+      execute: async (input, resolveWire, parse, dependencies) => {
+        expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("approve")
+        await resolveWire()
+        turns += 1
+        const completion = parse({
+          statusCode: 200,
+          headers: [["content-type", "text/event-stream"]],
+          body: validSse(`Grant answer ${turns}`),
+        })
+        return completed(input.plan.operationID, completion)
+      },
+    })
+
+    for (let turn = 0; turn < 3; turn++) {
+      const prepared = await control.prepare(modelID, `Turn ${turn}`)
+      if (prepared.status !== "prepared") throw new Error(prepared.reason)
+      expect(prepared.preview.conversation.priorTurns).toBe(turn)
+      expect(await control.decide(prepared.preview.proposalID, "approve", () => {})).toMatchObject({
+        status: "response_observed_not_verified",
+      })
+      const grant = issued.at(-1)
+      if (!grant) throw new Error("Expected an issued credential grant")
+      expect(parentBroker.takeForParentTransport(grant)).toMatchObject({ ok: false })
+    }
+    expect(new Set(issued.map((grant) => grant.credentialHandle)).size).toBe(3)
+  })
+})
+
 const modelID = "claude-sonnet-4-5-20250929"
 
 async function makeFixture(mode: "read-only" | "activate-once") {

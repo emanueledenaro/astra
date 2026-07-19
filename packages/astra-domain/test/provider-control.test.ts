@@ -45,6 +45,27 @@ describe("provider control skill preview", () => {
         ...base,
         preview: { ...base.preview, skillContext: { ...skillContext(), instructionsDigest: "sha256:invalid" } },
       },
+      {
+        ...base,
+        preview: {
+          ...base.preview,
+          conversation: { priorTurns: 0, historyBytes: 0, retention: "PERSISTED TO DISK" },
+        },
+      },
+      {
+        ...base,
+        preview: {
+          ...base.preview,
+          conversation: { priorTurns: 2, historyBytes: 0, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
+        },
+      },
+      {
+        ...base,
+        preview: {
+          ...base.preview,
+          conversation: { priorTurns: -1, historyBytes: 64, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
+        },
+      },
     ]
 
     for (const variant of variants) expect(parseProviderTurnPrepareResult(variant)).toBeNull()
@@ -134,6 +155,7 @@ function prepared() {
         bytes: 512,
         contextBindingDigest: computeProviderSkillContextBindingDigest(skillContext()),
       },
+      conversation: { priorTurns: 0, historyBytes: 0, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
       providerCapabilityDigest: digest("b"),
       skillContext: skillContext(),
       headerNames: ["anthropic-version", "content-type", "x-api-key"],

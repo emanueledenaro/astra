@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Astra Lynx — verified state">
+  <style>
+    .paw-l { animation: type 0.46s ease-in-out infinite; }
+    .paw-r { animation: type 0.46s ease-in-out infinite; animation-delay: 0.23s; }
+    .head { animation: bob 2.2s ease-in-out infinite; } .badge{animation:pop .5s ease-out; transform-origin: 392px 368px;} @keyframes pop{0%{transform:scale(.6);opacity:0}100%{transform:scale(1);opacity:1}}
+    .glow  { animation: pulse 0.92s ease-in-out infinite; }
+    .rim   { animation: rimpulse 0.92s ease-in-out infinite; }
+    .ear-r { animation: twitch 5.5s ease-in-out infinite; transform-origin: 305px 112px; }
+    @keyframes type     { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+    @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(3px); } }
+    @keyframes pulse    { 0%,100% { opacity: 0.7; } 50% { opacity: 1; } }
+    @keyframes rimpulse { 0%,100% { opacity: 0.40; } 50% { opacity: 0.75; } }
+    @keyframes twitch   { 0%,88%,94%,100% { transform: rotate(0); } 91% { transform: rotate(-4deg); } }
+    @media (prefers-reduced-motion: reduce) { .paw-l,.paw-r,.head,.glow,.rim,.ear-r { animation: none; } }
+  </style>
+
+  <!-- ground -->
+  <rect width="512" height="512" rx="36" fill="#0E1C30"/>
+  <g fill="#16294A" opacity="0.55">
+    <rect x="44" y="52" width="8" height="56" rx="4"/>
+    <rect x="62" y="76" width="8" height="32" rx="4"/>
+    <rect x="460" y="52" width="8" height="56" rx="4"/>
+    <rect x="442" y="76" width="8" height="32" rx="4"/>
+    <circle cx="48" cy="132" r="4"/>
+    <circle cx="464" cy="132" r="4"/>
+  </g>
+
+  <!-- screen light spill -->
+  <defs>
+    <radialGradient id="spill" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#39C0FF" stop-opacity="0.28"/>
+      <stop offset="60%" stop-color="#39C0FF" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#39C0FF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <ellipse class="glow" cx="256" cy="310" rx="190" ry="90" fill="url(#spill)"/>
+
+  <!-- torso / hoodie -->
+  <path d="M168 356 Q170 272 256 266 Q342 272 344 356 Z" fill="#1B3A5C"/>
+  <path d="M226 276 Q256 300 286 276 L286 356 L226 356 Z" fill="#22456B"/>
+  <path d="M204 270 Q256 304 308 270 Q290 286 256 288 Q222 286 204 270 Z" fill="#14304E"/>
+  <path d="M214 274 Q256 304 298 274" stroke="#39C0FF" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <line x1="240" y1="294" x2="240" y2="316" stroke="#39C0FF" stroke-width="3" stroke-linecap="round"/>
+  <line x1="272" y1="294" x2="272" y2="316" stroke="#39C0FF" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="240" cy="320" r="3" fill="#39C0FF"/>
+  <circle cx="272" cy="320" r="3" fill="#39C0FF"/>
+
+  <!-- sleeves -->
+  <path d="M162 318 Q140 352 172 372 Q198 378 206 362 Q198 336 184 324 Z" fill="#1B3A5C"/>
+  <path d="M350 318 Q372 352 340 372 Q314 378 306 362 Q314 336 328 324 Z" fill="#1B3A5C"/>
+
+  <!-- paws -->
+  <g class="paw-static">
+    <rect x="176" y="350" width="42" height="28" rx="14" fill="#D99A4E"/>
+    <line x1="190" y1="355" x2="190" y2="364" stroke="#A86A2E" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="203" y1="355" x2="203" y2="364" stroke="#A86A2E" stroke-width="2.5" stroke-linecap="round"/>
+  </g>
+  <g class="paw-static">
+    <rect x="294" y="350" width="42" height="28" rx="14" fill="#D99A4E"/>
+    <line x1="308" y1="355" x2="308" y2="364" stroke="#A86A2E" stroke-width="2.5" stroke-linecap="round"/>
+    <line x1="321" y1="355" x2="321" y2="364" stroke="#A86A2E" stroke-width="2.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- head -->
+  <g class="head">
+    <g>
+      <path d="M198 132 L176 62 L242 102 Z" fill="#D99A4E"/>
+      <path d="M201 122 L189 82 L226 104 Z" fill="#F2E3C6"/>
+      <path d="M179 66 L167 36 L192 58 Z" fill="#1A1A1A"/>
+    </g>
+    <g class="ear-r">
+      <path d="M314 132 L336 62 L270 102 Z" fill="#D99A4E"/>
+      <path d="M311 122 L323 82 L286 104 Z" fill="#F2E3C6"/>
+      <path d="M333 66 L345 36 L320 58 Z" fill="#1A1A1A"/>
+    </g>
+    <circle cx="256" cy="186" r="76" fill="#D99A4E"/>
+    <path d="M184 196 L152 232 L198 242 Z" fill="#D99A4E"/>
+    <path d="M328 196 L360 232 L314 242 Z" fill="#D99A4E"/>
+    <path d="M198 240 L186 262 L214 252 Z" fill="#C8883C"/>
+    <path d="M314 240 L326 262 L298 252 Z" fill="#C8883C"/>
+    <g fill="#A86A2E">
+      <circle cx="237" cy="130" r="3.5"/>
+      <circle cx="256" cy="122" r="3.5"/>
+      <circle cx="275" cy="130" r="3.5"/>
+      <circle cx="246" cy="142" r="3"/>
+      <circle cx="266" cy="142" r="3"/>
+      <circle cx="203" cy="206" r="3"/>
+      <circle cx="211" cy="218" r="3"/>
+      <circle cx="309" cy="206" r="3"/>
+      <circle cx="301" cy="218" r="3"/>
+    </g>
+    <path d="M204 168 Q222 158 242 166" stroke="#A86A2E" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M308 168 Q290 158 270 166" stroke="#A86A2E" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <g class="eyes">
+      <path d="M211 182 Q227 170 243 182" stroke="#0F2C29" stroke-width="5" fill="none" stroke-linecap="round"/>
+      <path d="M269 182 Q285 170 301 182" stroke="#0F2C29" stroke-width="5" fill="none" stroke-linecap="round"/>
+    </g>
+    <ellipse cx="256" cy="217" rx="34" ry="24" fill="#F2E3C6"/>
+    <path d="M249 206 Q256 201 263 206 Q260 215 256 215 Q252 215 249 206 Z" fill="#3A2B22"/>
+    <path d="M256 215 Q256 225 246 228" stroke="#3A2B22" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+    <path d="M256 215 Q256 225 266 228" stroke="#3A2B22" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  </g>
+
+  <!-- laptop lid -->
+  <rect x="150" y="366" width="212" height="94" rx="14" fill="#222F3D"/>
+  <rect class="rim" x="150" y="366" width="212" height="5" rx="2.5" fill="#4ECF94" opacity="0.5"/>
+  <circle cx="256" cy="412" r="9" fill="none" stroke="#39C0FF" stroke-width="2.5" opacity="0.85"/>
+  <circle cx="256" cy="412" r="2.5" fill="#39C0FF"/>
+
+  <ellipse cx="256" cy="468" rx="150" ry="11" fill="#08111F" opacity="0.6"/><g class="badge"><circle cx="392" cy="368" r="26" fill="#14352A" stroke="#4ECF94" stroke-width="3"/><path d="M380 368 L389 377 L405 358" stroke="#4ECF94" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>
+</svg>
+

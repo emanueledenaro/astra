@@ -9,6 +9,7 @@ import {
 } from "@astra/domain/git-control-inspection"
 import { parseGitUnstageControlRequest, type GitUnstageControlRequest } from "@astra/domain/git-unstage-control"
 import { parseGitStageControlRequest, type GitStageControlRequest } from "@astra/domain/git-stage-control"
+import { parseGitCommitControlRequest, type GitCommitControlRequest } from "@astra/domain/git-commit-control"
 import {
   parseWorkspaceSearchControlRequest,
   type WorkspaceSearchControlRequest,
@@ -61,6 +62,9 @@ import { serveAstraGitUnstageControlRequest } from "./git-unstage-control-server
 import type { AstraGitStageControl } from "./git-stage-control"
 import { createAstraGitStageControlHandler } from "./git-stage-control-handler"
 import { serveAstraGitStageControlRequest } from "./git-stage-control-server-hook"
+import type { AstraGitCommitControl } from "./git-commit-control"
+import { createAstraGitCommitControlHandler } from "./git-commit-control-handler"
+import { serveAstraGitCommitControlRequest } from "./git-commit-control-server-hook"
 import type { AstraGovernedWorkspaceSearchControl } from "./governed-workspace-search-control"
 import { createAstraGovernedWorkspaceSearchControlHandler } from "./governed-workspace-search-control-handler"
 import { serveAstraGovernedWorkspaceSearchControlRequest } from "./governed-workspace-search-control-server-hook"
@@ -70,6 +74,13 @@ import { serveAstraExtensionInventoryControlRequest } from "./extension-inventor
 import type { AstraMcpActivationControl } from "./mcp-activation-control"
 import { createAstraMcpActivationControlHandler } from "./mcp-activation-control-handler"
 import { serveAstraMcpActivationControlRequest } from "./mcp-activation-control-server-hook"
+import {
+  parseOperationViewControlRequest,
+  type OperationViewControlRequest,
+} from "@astra/domain/operation-view-control"
+import type { AstraOperationViewControl } from "./operation-view-control"
+import { createAstraOperationViewControlHandler } from "./operation-view-control-handler"
+import { serveAstraOperationViewControlRequest } from "./operation-view-control-server-hook"
 
 const requestLimitBytes = 32 * 1_024
 const maximumRequestsPerSession = 1_024
@@ -78,6 +89,7 @@ const defaultInspectionTimeoutMs = 30_000
 const defaultControlledWriteTimeoutMs = 60_000
 const defaultSkillActivationTimeoutMs = 60_000
 const defaultExtensionInventoryTimeoutMs = 10_000
+const defaultOperationViewTimeoutMs = 10_000
 const socketFilename = "control.sock"
 const tokenPattern = /^[A-Za-z0-9_-]{43}$/
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -94,6 +106,7 @@ type GitInspectRequest = Readonly<{
 type ControlRequest =
   | GitInspectRequest
   | GitStageControlRequest
+  | GitCommitControlRequest
   | GitUnstageControlRequest
   | WorkspaceSearchControlRequest
   | ControlledWritePrepareRequest
@@ -101,6 +114,7 @@ type ControlRequest =
   | SkillControlRequest
   | ExtensionInventoryControlRequest
   | McpActivationControlRequest
+  | OperationViewControlRequest
 
 export type AstraTuiControlServer = Readonly<{
   socketPath: string
@@ -115,11 +129,13 @@ export type AstraTuiControlServerInput = Readonly<{
   sessionID: string
   controlledWriteControl?: AstraControlledWriteControl
   gitStageControl?: AstraGitStageControl
+  gitCommitControl?: AstraGitCommitControl
   gitUnstageControl?: AstraGitUnstageControl
   skillActivationControl?: AstraSkillActivationControl
   governedWorkspaceSearchControl?: AstraGovernedWorkspaceSearchControl
   extensionInventoryControl?: AstraExtensionInventoryControl
   mcpActivationControl?: AstraMcpActivationControl
+  operationViewControl?: AstraOperationViewControl
 }>
 
 export type AstraTuiControlServerDependencies = Readonly<{
@@ -128,6 +144,7 @@ export type AstraTuiControlServerDependencies = Readonly<{
   controlledWriteTimeoutMs?: number
   skillActivationTimeoutMs?: number
   extensionInventoryTimeoutMs?: number
+  operationViewTimeoutMs?: number
 }>
 
 /**
@@ -164,6 +181,9 @@ export async function startAstraTuiControlServer(
   const gitStageHandler = input.gitStageControl
     ? createAstraGitStageControlHandler({ sessionID: input.sessionID, token, control: input.gitStageControl })
     : undefined
+  const gitCommitHandler = input.gitCommitControl
+    ? createAstraGitCommitControlHandler({ sessionID: input.sessionID, token, control: input.gitCommitControl })
+    : undefined
   const workspaceSearchHandler = input.governedWorkspaceSearchControl
     ? createAstraGovernedWorkspaceSearchControlHandler({
         sessionID: input.sessionID,
@@ -184,6 +204,14 @@ export async function startAstraTuiControlServer(
         sessionID: input.sessionID,
         token,
         control: input.mcpActivationControl,
+      })
+    : undefined
+  const operationViewHandler = input.operationViewControl
+    ? createAstraOperationViewControlHandler({
+        sessionID: input.sessionID,
+        token,
+        control: input.operationViewControl,
+        timeoutMs: dependencies.operationViewTimeoutMs ?? defaultOperationViewTimeoutMs,
       })
     : undefined
   let activeRequestID: string | undefined
@@ -229,6 +257,15 @@ export async function startAstraTuiControlServer(
           await serveAstraGitStageControlRequest(socket, request, gitStageHandler)
           return
         }
+        if (isGitCommitRequest(request)) {
+          if (!gitCommitHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraGitCommitControlRequest(socket, request, gitCommitHandler)
+          return
+        }
         if (isExtensionInventoryRequest(request)) {
           if (!extensionInventoryHandler) {
             socket.end()
@@ -245,6 +282,15 @@ export async function startAstraTuiControlServer(
           }
           socket.setTimeout(0)
           await serveAstraMcpActivationControlRequest(socket, request, mcpActivationHandler)
+          return
+        }
+        if (isOperationViewRequest(request)) {
+          if (!operationViewHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraOperationViewControlRequest(socket, request, operationViewHandler)
           return
         }
         if (!authorized(request, input.sessionID, token)) {
@@ -385,12 +431,16 @@ function parseRequest(input: string): ControlRequest | null {
     const value: unknown = JSON.parse(input.slice(0, -1))
     const gitStage = parseGitStageControlRequest(value)
     if (gitStage.ok) return gitStage.value
+    const gitCommit = parseGitCommitControlRequest(value)
+    if (gitCommit.ok) return gitCommit.value
     const workspaceSearch = parseWorkspaceSearchControlRequest(value)
     if (workspaceSearch.ok) return workspaceSearch.value
     const extensionInventory = parseExtensionInventoryControlRequest(value)
     if (extensionInventory.ok) return extensionInventory.value
     const mcpActivation = parseMcpActivationControlRequest(value)
     if (mcpActivation.ok) return mcpActivation.value
+    const operationView = parseOperationViewControlRequest(value)
+    if (operationView.ok) return operationView.value
     const gitUnstage = parseGitUnstageControlRequest(value)
     if (gitUnstage.ok) return gitUnstage.value
     const prepare = parseControlledWritePrepareRequest(value)
@@ -441,6 +491,10 @@ function isGitStageRequest(request: ControlRequest): request is GitStageControlR
   )
 }
 
+function isGitCommitRequest(request: ControlRequest): request is GitCommitControlRequest {
+  return request.method === "git-commit.prepare" || request.method === "git-commit.decide"
+}
+
 function isWorkspaceSearchRequest(request: ControlRequest): request is WorkspaceSearchControlRequest {
   return request.method === "search.prepare" || request.method === "search.decide"
 }
@@ -451,6 +505,14 @@ function isExtensionInventoryRequest(request: ControlRequest): request is Extens
 
 function isMcpActivationRequest(request: ControlRequest): request is McpActivationControlRequest {
   return request.method === "mcp-activation.prepare" || request.method === "mcp-activation.decide" || request.method === "mcp-activation.stop"
+}
+
+function isOperationViewRequest(request: ControlRequest): request is OperationViewControlRequest {
+  return (
+    request.method === "operation-view.list" ||
+    request.method === "operation-view.detail" ||
+    request.method === "operation-view.recovery"
+  )
 }
 
 function isSkillRequest(request: ControlRequest): request is SkillControlRequest {
@@ -1000,11 +1062,15 @@ function encodeBlockedTerminal(request: ControlRequest, reason: string) {
     throw new Error("Workspace search requests are owned by their dedicated handler")
   if (isGitUnstageRequest(request)) throw new Error("Git Unstage requests are owned by their dedicated handler")
   if (isGitStageRequest(request)) throw new Error("Git Stage requests are owned by their dedicated handler")
+  if (isGitCommitRequest(request)) throw new Error("Git Commit requests are owned by their dedicated handler")
   if (isExtensionInventoryRequest(request)) {
     throw new Error("Extension inventory requests are owned by their dedicated handler")
   }
   if (isMcpActivationRequest(request)) {
     throw new Error("MCP activation requests are owned by their dedicated handler")
+  }
+  if (isOperationViewRequest(request)) {
+    throw new Error("Operation view requests are owned by their dedicated handler")
   }
   if (request.method === "git.inspect") return encodeTerminal(request.requestId, blocked(mapControlBlockReason(reason)))
   if (isSkillRequest(request)) return encodeSkillTerminal(request.requestId, blockedSkillResult(request, reason))

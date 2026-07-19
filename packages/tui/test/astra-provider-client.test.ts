@@ -202,6 +202,7 @@ function prepareResult(requestId: string) {
       modelID,
       destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
       logicalPayload: { digest: digest("private body"), bytes: 128, contextBindingDigest: null },
+      conversation: { priorTurns: 0, historyBytes: 0, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
       providerCapabilityDigest: digest("provider capability"),
       skillContext: null,
       headerNames: ["anthropic-version", "content-type", "x-api-key"],

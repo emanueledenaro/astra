@@ -13,6 +13,8 @@ import { createAstraGitUnstageClient, type AstraGitUnstageClient } from "./git-u
 import { registerAstraGitUnstage } from "../feature-plugins/system/astra-git-unstage"
 import { createAstraGitStageClient, type AstraGitStageClient } from "./git-stage-client"
 import { registerAstraGitStage } from "../feature-plugins/system/astra-git-stage"
+import { createAstraGitCommitClient, type AstraGitCommitClient } from "./git-commit-client"
+import { registerAstraGitCommit } from "../feature-plugins/system/astra-git-commit"
 import {
   createAstraGovernedWorkspaceSearchClient,
   type AstraGovernedWorkspaceSearchClient,
@@ -20,6 +22,8 @@ import {
 import { registerAstraGovernedWorkspaceSearch } from "../feature-plugins/system/astra-governed-workspace-search"
 import { createAstraExtensionInventoryClient, type AstraExtensionInventoryClient } from "./extension-inventory-client"
 import { createAstraMcpActivationClient, type AstraMcpActivationClient } from "./mcp-activation-client"
+import { createAstraOperationViewClient, type AstraOperationViewClient } from "./operation-view-client"
+import { registerAstraOperations } from "../feature-plugins/system/astra-operations"
 
 /** Registers built-in Astra surfaces from the authority validated at process admission. */
 export function registerAstraAppFeatures(
@@ -34,6 +38,8 @@ export function registerAstraAppFeatures(
   extensionInventoryClient?: AstraExtensionInventoryClient,
   gitStageClient?: AstraGitStageClient,
   mcpActivationClient?: AstraMcpActivationClient,
+  gitCommitClient?: AstraGitCommitClient,
+  operationViewClient?: AstraOperationViewClient,
 ) {
   registerAstraChat(api, authority, providerClient)
   registerAstraGitControlPlane(
@@ -73,6 +79,17 @@ export function registerAstraAppFeatures(
           : {}),
       }),
   )
+  registerAstraGitCommit(
+    api,
+    authority,
+    gitCommitClient ??
+      createAstraGitCommitClient(process.env, authority.sessionID, {
+        expectedWorkspaceRoot: authority.workspace.root,
+        ...(authority.repositoryBaseline
+          ? { expectedBaselineSnapshotDigest: authority.repositoryBaseline.snapshotDigest }
+          : {}),
+      }),
+  )
   registerAstraGovernedWorkspaceSearch(
     api,
     authority,
@@ -80,6 +97,11 @@ export function registerAstraAppFeatures(
       createAstraGovernedWorkspaceSearchClient(process.env, authority.sessionID, {
         expectedWorkspaceRoot: authority.workspace.root,
       }),
+  )
+  registerAstraOperations(
+    api,
+    authority,
+    operationViewClient ?? createAstraOperationViewClient(process.env, authority.sessionID),
   )
   registerAstraExtensions(
     api,
