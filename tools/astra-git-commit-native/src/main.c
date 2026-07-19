@@ -113,7 +113,7 @@ static int read_request(request_t *request) {
     if (count == 0) break;
     length += (size_t)count;
   }
-  if (length > MAX_REQUEST || length < 20U || memcmp(bytes, "ASTRGC01", 8U) != 0 ||
+  if (length > MAX_REQUEST || length < 22U || memcmp(bytes, "ASTRGC01", 8U) != 0 ||
       be16(bytes + 8U) != 1U || bytes[13] != 0U) return -1;
   request->flags = be16(bytes + 10U);
   request->format = bytes[12];
@@ -123,7 +123,7 @@ static int read_request(request_t *request) {
   request->branch_length = be16(bytes + 16U);
   request->actor_length = be16(bytes + 18U);
   request->message_length = be16(bytes + 20U);
-  if (length < 22U || request->object_count > MAX_OBJECTS || request->branch_length == 0U ||
+  if (request->object_count > MAX_OBJECTS || request->branch_length == 0U ||
       request->branch_length > MAX_BRANCH || request->actor_length > MAX_ACTOR || request->message_length > MAX_MESSAGE) return -1;
   const size_t expected = 22U + (2U + request->object_count) * request->oid_length +
     request->branch_length + request->actor_length + request->message_length;
@@ -163,7 +163,8 @@ static int install_object(const request_t *request, const uint8_t *oid, int *cre
   if (source_dir < 0) return DETAIL_CORRUPT_OBJECT;
   const int source = openat(source_dir, leaf, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
   if (source < 0 || verify_loose_object(source, request, oid, 0) != 0) {
-    if (source >= 0) close(source); close(source_dir); return DETAIL_CORRUPT_OBJECT;
+    if (source >= 0) close(source);
+    close(source_dir); return DETAIL_CORRUPT_OBJECT;
   }
   int fanout_created = 0;
   if (mkdirat(OBJECTS_FD, fanout, 0777) == 0) fanout_created = 1;
@@ -183,9 +184,11 @@ static int install_object(const request_t *request, const uint8_t *oid, int *cre
   const int output = openat(destination_dir, temporary, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0444);
   if (output < 0) { close(destination_dir); close(source); close(source_dir); return DETAIL_IO_NO_EFFECT; }
   if (lseek(source, 0, SEEK_SET) < 0 || copy_all(source, output) != 0 || fsync(output) != 0 ||
-      verify_loose_object(output, request, oid, 0) != 0 || close(output) != 0 ||
-      linkat(destination_dir, temporary, destination_dir, leaf, 0) != 0) {
+      verify_loose_object(output, request, oid, 0) != 0) {
     close(output); unlinkat(destination_dir, temporary, 0); close(destination_dir); close(source); close(source_dir); return DETAIL_IO_NO_EFFECT;
+  }
+  if (close(output) != 0 || linkat(destination_dir, temporary, destination_dir, leaf, 0) != 0) {
+    unlinkat(destination_dir, temporary, 0); close(destination_dir); close(source); close(source_dir); return DETAIL_IO_NO_EFFECT;
   }
   *created = 1;
   if (unlinkat(destination_dir, temporary, 0) != 0 || fsync(destination_dir) != 0 ||
@@ -226,7 +229,8 @@ static int update_ref(const request_t *request) {
       memcmp(parsed, request->old_oid, request->oid_length) != 0) { result = DETAIL_REF_MISMATCH; goto cleanup; }
   char new_hex[65]; oid_hex(request->new_oid, request->oid_length, new_hex);
   if (write(lock_fd, new_hex, request->oid_length * 2U) != (ssize_t)(request->oid_length * 2U) ||
-      write(lock_fd, "\n", 1U) != 1 || fsync(lock_fd) != 0 || close(lock_fd) != 0) { goto cleanup_closed; }
+      write(lock_fd, "\n", 1U) != 1 || fsync(lock_fd) != 0) { goto cleanup; }
+  if (close(lock_fd) != 0) { goto cleanup_closed; }
 
   if ((request->flags & FLAG_REFLOG) != 0U) {
     const int log_result = publish_reflog(request);

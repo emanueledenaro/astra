@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { closeSync, constants, openSync } from "node:fs"
 import { chmod, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { spawn } from "node:child_process"
-import { dirname, join, resolve } from "node:path"
+import { join, resolve } from "node:path"
 import {
   computeGitCommitInventoryDigest,
   computeGitCommitProposalDigest,
@@ -23,7 +23,7 @@ import {
   type GitCommitObservation,
   type GitCommitPreview,
   type GitCommitPreviewAuthority,
-} from "../../astra-domain/src/git-commit-mutation"
+} from "@astra/domain/git-commit-mutation"
 import {
   parseGitRepositoryBaselineSnapshot,
   type GitRepositoryBaselineSnapshot,
@@ -49,6 +49,7 @@ export type GitCommitBlockReason =
   | "alternates_unsupported"
   | "promisor_unsupported"
   | "ref_storage_unsupported"
+  | "packed_ref_unsupported"
   | "conflicts_present"
   | "submodule_unsupported"
   | "split_index_unsupported"
@@ -133,7 +134,7 @@ export type GitCommitInvocation = Readonly<{
   arguments: ReadonlyArray<string>
   environment: Readonly<Record<string, string>>
   stdin: Uint8Array | "ignore"
-  limits: typeof commandLimits
+  limits: Readonly<{ timeoutMs: number; maxStdoutBytes: number; maxStderrBytes: number }>
 }>
 
 export type GitCommitProcessObservation =
@@ -214,6 +215,7 @@ export async function prepareGitCommitLocal(
   if (await exists(join(workspaceRoot, ".git", "objects", "info", "alternates"))) {
     return blocked("alternates_unsupported")
   }
+  if (await packedRefUnsupported(workspaceRoot, headRef)) return blocked("packed_ref_unsupported")
 
   const repository = await observeRepository(workspaceRoot, headRef, baseline.value.head.oid, deps)
   if (!repository.ok) return blocked(repository.reason)
@@ -1315,6 +1317,16 @@ async function blockingLock(workspaceRoot: string, ref: string) {
     join(workspaceRoot, ".git", "HEAD.lock"),
   ]
   return (await Promise.all(refLocks.map(exists))).some(Boolean) ? ("ref" as const) : null
+}
+
+/** The native helper compare-and-swaps the loose ref file only, so a branch
+ * whose current value lives in packed-refs (for example after `git gc` or
+ * `git pack-refs`) must block at prepare time instead of orphaning objects. */
+async function packedRefUnsupported(workspaceRoot: string, ref: `refs/heads/${string}`) {
+  if (!(await exists(join(workspaceRoot, ".git", ref)))) return true
+  const packed = await readFile(join(workspaceRoot, ".git", "packed-refs"), "utf8").catch(() => null)
+  if (packed === null) return false
+  return packed.split("\n").some((line) => line.endsWith(` ${ref}`))
 }
 
 async function exists(path: string) {

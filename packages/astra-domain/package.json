@@ -15,6 +15,7 @@
     "./extension-inventory-operation": "./src/extension-inventory-operation.ts",
     "./git-control-inspection": "./src/git-control-inspection.ts",
     "./git-control-mutation": "./src/git-control-mutation.ts",
+    "./git-commit-mutation": "./src/git-commit-mutation.ts",
     "./git-stage-control": "./src/git-stage-control.ts",
     "./git-stage-mutation": "./src/git-stage-mutation.ts",
     "./git-unstage-control": "./src/git-unstage-control.ts",

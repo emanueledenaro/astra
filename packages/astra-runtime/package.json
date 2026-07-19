@@ -18,6 +18,8 @@
     "./git-stage-coordinator": "./src/git-stage-coordinator.ts",
     "./git-stage-operation-facts": "./src/git-stage-operation-facts.ts",
     "./git-unstage-coordinator": "./src/git-unstage-coordinator.ts",
+    "./git-commit-coordinator": "./src/git-commit-coordinator.ts",
+    "./git-commit-operation-facts": "./src/git-commit-operation-facts.ts",
     "./extension-inventory-operation": "./src/extension-inventory-operation.ts",
     "./governed-workspace-search": "./src/governed-workspace-search.ts",
     "./mcp-pinned-fetch": "./src/mcp-pinned-fetch.ts",

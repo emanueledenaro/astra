@@ -4,7 +4,7 @@ import {
   type GitCommitInventory,
   type GitCommitObservation,
   type GitCommitPreview,
-} from "../../astra-domain/src/git-commit-mutation"
+} from "@astra/domain/git-commit-mutation"
 import type { GitRepositoryBaselineSnapshot } from "@astra/domain/git-repository-baseline"
 import {
   parseOperationEffectUncertainty,

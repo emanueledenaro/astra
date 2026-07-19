@@ -380,6 +380,7 @@ function previewAuthority(input: Readonly<Record<string, unknown>>): GitCommitPr
     !timestamp(input.createdAt) ||
     !timestamp(input.expiresAt) ||
     Date.parse(input.expiresAt) <= Date.parse(input.createdAt) ||
+    typeof input.runtimeScratch !== "string" ||
     input.runtimeScratch !== join("/private/tmp", `astra-git-commit-${input.nonce}`) ||
     !digestValue(input.baselineSnapshotDigest) ||
     !digestValue(input.inventoryDigest) ||
@@ -417,6 +418,10 @@ function previewAuthority(input: Readonly<Record<string, unknown>>): GitCommitPr
   ) {
     return null
   }
+  const scratchWrite = scratch[0]
+  if (typeof scratchWrite !== "string") {
+    return null
+  }
   return {
     schemaVersion: 1,
     operation: "git_commit_local",
@@ -444,7 +449,7 @@ function previewAuthority(input: Readonly<Record<string, unknown>>): GitCommitPr
     treeObjects: trees.map(({ oid, byteLength, contentDigest }) => ({ oid, byteLength, contentDigest })),
     commitObject: commit,
     repositoryWrites: writes,
-    scratchWrites: [scratch[0]],
+    scratchWrites: [scratchWrite],
     reflog: input.reflog,
     hooks: "disabled",
     editor: "disabled",

@@ -5,7 +5,7 @@ import {
   type GitCommitDecision,
   type GitCommitInventory,
   type GitCommitPreview,
-} from "../../astra-domain/src/git-commit-mutation"
+} from "@astra/domain/git-commit-mutation"
 import {
   parseGitRepositoryBaselineSnapshot,
   type GitRepositoryBaselineSnapshot,

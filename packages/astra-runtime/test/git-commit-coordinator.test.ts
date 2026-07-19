@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { GitCommitDecision } from "../../astra-domain/src/git-commit-mutation"
+import type { GitCommitDecision } from "@astra/domain/git-commit-mutation"
 import {
   captureGitRepositoryBaseline,
   executeGitCommitLocal,

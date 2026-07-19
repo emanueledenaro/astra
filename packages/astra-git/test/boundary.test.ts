@@ -1,18 +1,28 @@
 import { describe, expect, test } from "bun:test"
 
 describe("Git capability boundary", () => {
-  test("exports only bounded inspection, baseline, and unstage surfaces", async () => {
+  test("exports only bounded inspection, baseline, stage, unstage, and commit surfaces", async () => {
     const api = await import("../src")
 
     expect(Object.keys(api).sort()).toEqual([
+      "GitEphemeralCleanupError",
       "buildGitUnstageAllInvocation",
       "captureGitRepositoryBaseline",
+      "captureGitStageInventory",
       "defaultGitInspectionLimits",
       "defaultGitRepositoryBaselineLimits",
+      "executeClaimedGitStageSelected",
+      "executeClaimedGitUnstageAll",
+      "executeGitCommitLocal",
+      "executeGitStageSelected",
       "executeGitUnstageAll",
       "inspectGitWorkspace",
+      "prepareGitCommitLocal",
+      "prepareGitStageSelected",
       "prepareGitUnstageAll",
       "revalidateGitRepositoryBaseline",
+      "verifyGitCommitLocal",
+      "verifyGitStageSelected",
       "verifyGitUnstageAll",
     ])
   })

@@ -3,11 +3,11 @@ import { createHash } from "node:crypto"
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import type { GitCommitDecision } from "../../astra-domain/src/git-commit-mutation"
+import type { GitCommitDecision } from "@astra/domain/git-commit-mutation"
 import {
   computeGitCommitInventoryDigest,
   computeGitCommitProposalDigest,
-} from "../../astra-domain/src/git-commit-mutation"
+} from "@astra/domain/git-commit-mutation"
 import { captureGitRepositoryBaseline } from "../src/baseline"
 import {
   executeGitCommitLocal,
@@ -430,6 +430,20 @@ describe("governed local Git commit adapter", () => {
     const locked = await repository()
     await writeFile(join(locked.root, ".git", "index.lock"), "held")
     expect(await prepare(locked.root)).toMatchObject({ status: "blocked", reason: "index_lock_present" })
+  })
+
+  test("blocks a packed branch ref before any object computation", async () => {
+    const packed = await repository()
+    await git(packed.root, ["pack-refs", "--all", "--prune"])
+    expect(await prepare(packed.root)).toMatchObject({ status: "blocked", reason: "packed_ref_unsupported" })
+
+    const packedWithLoose = await repository()
+    await git(packedWithLoose.root, ["pack-refs", "--all"])
+    await writeFile(join(packedWithLoose.root, ".git", "refs", "heads", "main"), `${packedWithLoose.initialOID}\n`)
+    expect(await prepare(packedWithLoose.root)).toMatchObject({
+      status: "blocked",
+      reason: "packed_ref_unsupported",
+    })
   })
 })
 
