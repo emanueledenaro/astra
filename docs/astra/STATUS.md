@@ -109,26 +109,54 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Latest integration evidence
 
-- `astra system` was run from a hostile cwd containing `.env`, `bunfig.toml`, a preload canary, and a package script. The real PTY showed the exact deny-all status, `Q` exited with code 0, all four file SHA-256 values were unchanged, no Astra data directory appeared, and no child remained.
-- Toolchain: Bun `1.3.14`; frozen install succeeds.
-- Domain: 50 tests, 1,979 expectations; typecheck passes.
-- Ledger: 47 tests, 181 expectations; typecheck passes.
-- Runtime: 54 tests, 209 expectations; typecheck passes.
-- Executor: 7 tests, 22 expectations; typecheck passes.
-- CLI: 57 tests, 270 expectations; typecheck passes.
-- Core provider catalog: 10 tests, 28 expectations; typecheck passes.
-- OpenCode safe-boundary, Git, shell, extension, and MCP subset: 245 tests, 549 expectations; typecheck passes.
-- OpenCode snapshot regression suite: 56 pass, 1 platform skip, 737 expectations.
-- TUI: 216 pass, 1 skip, 558 expectations; typecheck passes. Existing KV fixture warnings are noisy but non-failing.
-- Latest working-product integration gate: 742 passing tests, 2 skipped tests, and 4,533 expectations.
-- The preserved sandbox prototype has 12 passing tests and 59 expectations, but is excluded from the working-product gate until its open timeout and cleanup findings are resolved during hardening.
-- `git diff --check` passes; changed files pass Prettier after formatting.
-- The developer demo matrix was rerun after integration: hostile read-only open produced zero effects, denial was durable with no dispatch, one approved create-only host effect reached independent exact verification, the network canary received zero requests during that fixture, and no trust was persisted.
-- The capability preview truthfully reported that host network access was not isolated and that create-only scope was application-enforced.
-- Real fixture: `G -> A` opened `ACTIVE ONCE • EFFECTS BLOCKED`; typed input did not submit; the complete fixture fingerprint stayed `a9fb1d24358e0d08776d051f2e63fd12b81d292b2e98d4147cc9d767bacc5f28`; no workspace file or authority directory remained.
-- Real large-repository diagnosis proved that the earlier false `STALE` result was a timeout. With realistic bounded limits, two captures produced the same digest.
-- Independent security review confirmed closure of the three safe-opening P1 findings: inherited project/Git startup, child authority replacement, and nested-symlink read escape.
-- The latest independent review also confirmed closure of workspace Bun startup execution and generic safe-start Git process bypasses; no P0/P1 remains in the reviewed host checkpoint.
+- macOS owner-side run on `d3039866f` used Bun `1.3.14`; `bun install` completed with
+  `Checked 2427 installs across 2712 packages (no changes)`.
+- Both native helpers built. `astra-git-commit-native` sanitizer tests: 13 pass,
+  0 fail, 54 expectations. The additional `astra-extension-inventory-native`
+  sanitizer run: 11 pass, 0 fail, 422 expectations.
+- Package results: domain 119/0 (2,442 expectations), executor 8/0 (24), sandbox
+  12/0 (59), runtime 207/0 (914), and TUI 297 pass/0 fail/1 skip (965) are green.
+  Typecheck passes for those five packages and for ledger and git.
+- Ledger is red: 53 pass, 1 fail, 427 expectations. The failing test is
+  `snapshot-consistent ledger reads under a concurrent committed writer > keeps paired read statements on one snapshot instead of reporting spurious corruption`;
+  SQLite returned `database is locked`, `errno: 261`,
+  `code: "SQLITE_BUSY_RECOVERY"` at `PRAGMA journal_mode = WAL;`.
+- Git is red: 95 pass, 1 fail, 1 error, 361 expectations. Test
+  `governed local Git commit adapter > blocks detached, unborn, empty staged state, conflicts, submodules, split index and locks`
+  timed out after 5,000 ms; the subsequent unhandled assertion expected
+  `reason: "index_lock_present"` and received `reason: "baseline_stale"`.
+- CLI is red: 175 pass, 2 fail, 1 error, 910 expectations. The TUI control test
+  failed with `error: The Astra control socket path is too long`; the operations
+  view test failed to load `@effect/sql-sqlite-bun`. CLI typecheck is also red:
+  `TS2307` for `@effect/sql-sqlite-bun`, `effect`, and
+  `effect/unstable/sql/SqlClient` in `test/operation-view-control.test.ts`.
+- Combined package observation: 966 passing tests, 4 failing tests, 2 reported
+  unhandled errors, 1 skip, and 6,102 expectations. This is not a green gate.
+- `verify:demo` is green and ended with `DEMO MATRIX PASS`: read-only produced zero
+  workspace effects, rejection was durable without dispatch or marker, one approved
+  create-only marker reached independent verification, the network canary received
+  zero requests, and no trust was persisted.
+- Real `astra system` PTY smoke displayed
+  `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED` and `Q` exited with code 0. With
+  fresh HOME/XDG roots it created no Astra config, data, or authority state; Bun did
+  create four transpiler-cache `.pile` files under the isolated cache root.
+- Real `astra .` PTY smoke reached gate, current Git baseline, Activate once, and the
+  globally visible `HOST EXECUTION — NO SANDBOX` boundary. A governed stage of
+  `smoke.txt` reached `VERIFIED • SELECTED INDEX + PRESERVATION` and appeared with
+  its receipt in `/operations`.
+- The immediate same-session commit is red: its preview was blocked with
+  `REASON baseline stale` and no effect was claimed. After exiting, reopening the
+  fixture, recapturing the baseline, and activating once, the governed commit reached
+  `VERIFIED • COMMIT BYTES + REPOSITORY STATE`; `/operations` showed the verified
+  `git_commit_local` event and ingested receipt. The resulting fixture commit is
+  `72d0ff4` by `Astra macOS Verification <astra-verification@local.invalid>`.
+- Commit-message entry did not preserve the requested text in the PTY smoke: the
+  requested `test: verify macOS product smoke` was committed as `oke`.
+- Astra Chat loaded the trusted Anthropic catalog and model `claude-fable-5`, but no
+  turn could be dispatched: the exact blocker was `credential unavailable`, followed
+  by `Add an Anthropic API key with the existing OpenCode authentication flow.` The
+  required multi-turn, per-turn approval, and history-byte checks were therefore not
+  executable.
 
 ## Remaining release-candidate work
 
