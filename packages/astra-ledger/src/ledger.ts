@@ -439,8 +439,12 @@ function initialize(db: Database): Effect.Effect<void, OperationLedgerError> {
     `)
     yield* db.run(sql`INSERT OR IGNORE INTO ledger_meta (singleton, schema_version, last_cursor) VALUES (1, 1, 0)`)
     yield* db.transaction((tx) => migrateStorage(tx), { behavior: "immediate" })
-    const meta = yield* requireInitialized(db)
-    yield* verifyLedgerIntegrity(db, meta)
+    yield* readSnapshotTransaction(db, (tx) =>
+      Effect.gen(function* () {
+        const meta = yield* requireInitialized(tx)
+        yield* verifyLedgerIntegrity(tx, meta)
+      }),
+    )
   }).pipe(Effect.mapError(mapStorageError("Failed to initialize the operation ledger")))
 }
 
@@ -1479,12 +1483,16 @@ function getVerification(
         new OperationEventValidationError("Invalid operation ID", parsed.issue.path, parsed.issue.reason),
       )
     }
-    const meta = yield* requireInitialized(db)
-    yield* verifyLedgerIntegrity(db, meta)
-    const rows = yield* db.all<EvidenceRow>(sql`
-      SELECT * FROM operation_evidence WHERE operation_id = ${parsed.value} LIMIT 1
-    `)
-    return rows[0] ? yield* decodeVerificationRecord(db, rows[0]) : null
+    return yield* readSnapshotTransaction(db, (tx) =>
+      Effect.gen(function* () {
+        const meta = yield* requireInitialized(tx)
+        yield* verifyLedgerIntegrity(tx, meta)
+        const rows = yield* tx.all<EvidenceRow>(sql`
+          SELECT * FROM operation_evidence WHERE operation_id = ${parsed.value} LIMIT 1
+        `)
+        return rows[0] ? yield* decodeVerificationRecord(tx, rows[0]) : null
+      }),
+    )
   }).pipe(Effect.mapError(mapStorageError("Failed to read verification evidence")))
 }
 
@@ -1682,10 +1690,14 @@ function getDispatchSnapshot(
         new OperationEventValidationError("Invalid dispatch request ID", parsedID.issue.path, parsedID.issue.reason),
       )
     }
-    const meta = yield* requireInitialized(db)
-    yield* verifyLedgerIntegrity(db, meta)
-    const rows = yield* readDispatchRows(db, parsedID.value)
-    return rows[0] ? yield* decodeDispatchSnapshot(rows[0]) : null
+    return yield* readSnapshotTransaction(db, (tx) =>
+      Effect.gen(function* () {
+        const meta = yield* requireInitialized(tx)
+        yield* verifyLedgerIntegrity(tx, meta)
+        const rows = yield* readDispatchRows(tx, parsedID.value)
+        return rows[0] ? yield* decodeDispatchSnapshot(rows[0]) : null
+      }),
+    )
   }).pipe(Effect.mapError(mapStorageError("Failed to read the dispatch snapshot")))
 }
 
@@ -1764,10 +1776,11 @@ function listRecoveryCandidates(
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximumReadEvents) {
     return Effect.fail(new LedgerReadLimitError(limit))
   }
-  return Effect.gen(function* () {
-    const meta = yield* requireInitialized(db)
-    yield* verifyLedgerIntegrity(db, meta)
-    const rows = yield* db.all<DispatchJoinRow>(sql`
+  return readSnapshotTransaction(db, (tx) =>
+    Effect.gen(function* () {
+      const meta = yield* requireInitialized(tx)
+      yield* verifyLedgerIntegrity(tx, meta)
+      const rows = yield* tx.all<DispatchJoinRow>(sql`
       SELECT
         dispatch_outbox.*,
         executor_claim.executor_claim_id,
@@ -1791,20 +1804,23 @@ function listRecoveryCandidates(
       ORDER BY dispatch_outbox.created_cursor ASC
       LIMIT ${limit}
     `)
-    const snapshots: Array<RecoveryCandidate> = []
-    for (const row of rows) snapshots.push(yield* decodeDispatchSnapshot(row))
-    return snapshots
-  }).pipe(Effect.mapError(mapStorageError("Failed to list dispatch recovery candidates")))
+      const snapshots: Array<RecoveryCandidate> = []
+      for (const row of rows) snapshots.push(yield* decodeDispatchSnapshot(row))
+      return snapshots
+    }),
+  ).pipe(Effect.mapError(mapStorageError("Failed to list dispatch recovery candidates")))
 }
 
 function getOperation(
   db: Database,
   operationID: OperationID,
 ): Effect.Effect<OperationRecord | null, OperationLedgerError> {
-  return Effect.gen(function* () {
-    yield* requireInitialized(db)
-    return (yield* loadAndVerifyOperation(db, operationID, maximumReadEvents))?.operation ?? null
-  }).pipe(Effect.mapError(mapStorageError("Failed to read the operation")))
+  return readSnapshotTransaction(db, (tx) =>
+    Effect.gen(function* () {
+      yield* requireInitialized(tx)
+      return (yield* loadAndVerifyOperation(tx, operationID, maximumReadEvents))?.operation ?? null
+    }),
+  ).pipe(Effect.mapError(mapStorageError("Failed to read the operation")))
 }
 
 function readEvents(
@@ -1815,14 +1831,16 @@ function readEvents(
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximumReadEvents) {
     return Effect.fail(new LedgerReadLimitError(limit))
   }
-  return Effect.gen(function* () {
-    yield* requireInitialized(db)
-    return (yield* loadAndVerifyOperation(db, operationID, limit))?.events ?? []
-  }).pipe(Effect.mapError(mapStorageError("Failed to read operation events")))
+  return readSnapshotTransaction(db, (tx) =>
+    Effect.gen(function* () {
+      yield* requireInitialized(tx)
+      return (yield* loadAndVerifyOperation(tx, operationID, limit))?.events ?? []
+    }),
+  ).pipe(Effect.mapError(mapStorageError("Failed to read operation events")))
 }
 
 function readGlobalCursor(db: Database): Effect.Effect<number, OperationLedgerError> {
-  return requireInitialized(db).pipe(
+  return readSnapshotTransaction(db, (tx) => requireInitialized(tx)).pipe(
     Effect.map((meta) => meta.last_cursor),
     Effect.mapError(mapStorageError("Failed to read the global ledger cursor")),
   )
@@ -1830,7 +1848,7 @@ function readGlobalCursor(db: Database): Effect.Effect<number, OperationLedgerEr
 
 function readDurability(db: Database): Effect.Effect<LedgerDurability, OperationLedgerError> {
   return Effect.gen(function* () {
-    yield* requireInitialized(db)
+    yield* readSnapshotTransaction(db, (tx) => requireInitialized(tx))
     const journal = yield* db.all<{ journal_mode: string }>(sql`PRAGMA journal_mode`)
     const foreignKeys = yield* db.all<{ foreign_keys: number }>(sql`PRAGMA foreign_keys`)
     const busyTimeout = yield* db.all<{ timeout: number }>(sql`PRAGMA busy_timeout`)
@@ -1847,6 +1865,20 @@ function readDurability(db: Database): Effect.Effect<LedgerDurability, Operation
       synchronous: synchronousName,
     }
   }).pipe(Effect.mapError(mapStorageError("Failed to read ledger durability")))
+}
+
+/**
+ * Runs paired read statements inside one deferred read transaction so they
+ * observe a single committed snapshot. Without this, a concurrent committed
+ * write between two autocommit reads yields a false LedgerCorruptionError.
+ */
+function readSnapshotTransaction<A, E>(
+  db: Database,
+  use: (tx: QueryExecutor) => Effect.Effect<A, E>,
+): Effect.Effect<A, OperationLedgerError> {
+  return db
+    .transaction((tx) => use(tx), { behavior: "deferred" })
+    .pipe(Effect.mapError(mapStorageError("Failed to read a consistent ledger snapshot")))
 }
 
 function requireInitialized(db: QueryExecutor): Effect.Effect<MetaRow, OperationLedgerError> {

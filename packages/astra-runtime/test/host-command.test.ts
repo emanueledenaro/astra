@@ -12,8 +12,10 @@ import {
   recoverHostCommand,
   type ExecuteHostCommandInput,
 } from "../src/host-command"
-import { runWithLedger } from "../src/operation-storage"
+import { runWithLedger, runWithReceiptSpool } from "../src/operation-storage"
 import { scanWorkspace } from "../src/workspace-preflight"
+import { deterministicUUID, digest } from "../src/controlled-write-authority"
+import { parseDispatchRequestID, parseOperationReceipt, parseReceiptID } from "@astra/domain/operation-contract"
 
 const roots: Array<string> = []
 
@@ -140,6 +142,156 @@ describe("governed host command", () => {
     expect(await executeHostCommand(input)).toMatchObject({ state: "completed", output: null })
     expect(await eventNames(input)).toEqual(before)
   })
+
+  test("completes a crashed pending outbox exactly once on re-run instead of wedging", async () => {
+    const input = await commandInput("approved")
+    expect(
+      executeHostCommand(input, {
+        injectFault: async (point) => {
+          if (point === "after_batch_before_claim") throw new Error("injected crash between batch and claim")
+        },
+      }),
+    ).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(await eventNames(input)).toEqual([
+      "operation.admitted",
+      "policy.ask",
+      "approval.granted",
+      "dispatch.requested",
+    ])
+
+    const result = await executeHostCommand(input)
+    expect(result).toMatchObject({
+      state: "completed",
+      status: "completed_observed_not_verified",
+      output: { stdout: "/\n", stderr: "", exitCode: 0 },
+    })
+    expect(await eventNames(input)).toEqual([
+      "operation.admitted",
+      "policy.ask",
+      "approval.granted",
+      "dispatch.requested",
+      "executor.accepted",
+      "effect.completed",
+    ])
+  })
+
+  test("converts an effect that stalled past its claim lease into durable uncertainty before spooling", async () => {
+    const input = await commandInput("approved")
+    let clockNow = Date.parse(input.recordingStartedAt) + 100
+    const result = await executeHostCommand(input, {
+      now: () => clockNow,
+      injectFault: async (point) => {
+        if (point === "after_claim_before_effect") clockNow += 120_000
+      },
+    })
+    expect(result).toMatchObject({
+      state: "reconciliation_required",
+      status: "effect_unknown",
+      receiptID: null,
+    })
+    expect(await exists(input.spoolFilename)).toBeFalse()
+    expect(await eventNames(input)).toEqual([
+      "operation.admitted",
+      "policy.ask",
+      "approval.granted",
+      "dispatch.requested",
+      "executor.accepted",
+      "effect.unknown",
+    ])
+
+    const replayed = await executeHostCommand(input)
+    expect(replayed).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    expect(JSON.stringify(replayed)).not.toContain("completed")
+  })
+
+  test("recovers past a poisoned spool by retiring the stale receipt against durable uncertainty", async () => {
+    const input = await commandInput("approved")
+    expect(
+      executeHostCommand(input, {
+        injectFault: async (point) => {
+          if (point === "after_claim_before_effect") throw new Error("injected crash between claim and effect")
+        },
+      }),
+    ).rejects.toMatchObject({ code: "state_unavailable" })
+
+    const dispatchRequestID = requireDispatchRequestID(deterministicUUID(input.operationID, "dispatch:1"))
+    const claim = await runWithLedger(input.ledgerFilename, (ledger) =>
+      Effect.gen(function* () {
+        yield* ledger.initialize()
+        return (yield* ledger.getDispatchSnapshot(dispatchRequestID))?.claim ?? null
+      }),
+    )
+    expect(claim).not.toBeNull()
+    const staleReceipt = requireStaleReceipt({
+      receiptID: deterministicUUID(input.operationID, "receipt:1"),
+      operationID: input.operationID,
+      attemptID: deterministicUUID(input.operationID, "attempt:1"),
+      dispatchRequestID,
+      executorClaimID: deterministicUUID(input.operationID, "claim:1"),
+      capabilityGrantID: deterministicUUID(input.operationID, "capability:1"),
+      capabilityDigest: input.proposal.capability.capabilityDigest,
+      fencingToken: claim!.fencingToken,
+      adapter: {
+        identity: "astra-executor:allowlisted-host-command",
+        version: "1",
+        digest: digest("astra-runtime:host-command:direct-host-process:v1"),
+      },
+      effectClass: "host_command",
+      resources: input.proposal.preview.resources,
+      startedAt: claim!.acceptedAt,
+      endedAt: new Date(Date.parse(claim!.claimExpiresAt) + 7_200_000).toISOString(),
+      observation: { kind: "effect_unknown", observationDigest: digest("stalled beyond claim lease") },
+      verificationContext: {
+        admittedBaselineDigest: digest("legacy admitted baseline"),
+        postEffectWorkspaceDigest: null,
+        workspaceIdentity: input.report.identity!,
+        targetIdentity: null,
+        preflightLimits: input.report.limits,
+        activationGuard: "allowed",
+      },
+      output: { digest: digest("stalled beyond claim lease"), bytes: 0, preview: "EFFECT UNKNOWN: stalled" },
+    })
+    await runWithReceiptSpool(input.spoolFilename, (spool) =>
+      Effect.gen(function* () {
+        yield* spool.initialize()
+        yield* spool.put(staleReceipt)
+      }),
+    )
+
+    const later = Date.parse(claim!.claimExpiresAt) + 10_800_000
+    const recovered = await recoverHostCommand(input, { now: () => later })
+    expect(recovered).toMatchObject({ state: "reconciliation_required", status: "effect_unknown", receiptID: null })
+    expect(await eventNames(input)).toEqual([
+      "operation.admitted",
+      "policy.ask",
+      "approval.granted",
+      "dispatch.requested",
+      "executor.accepted",
+      "effect.unknown",
+    ])
+
+    const entry = await runWithReceiptSpool(input.spoolFilename, (spool) =>
+      Effect.gen(function* () {
+        yield* spool.initialize()
+        return yield* spool.get(requireReceiptID(staleReceipt.receiptID))
+      }),
+    )
+    expect(entry?.acknowledgement).toMatchObject({
+      ledgerEventID: deterministicUUID(input.operationID, "event:uncertainty"),
+    })
+    const pendingAfter = await runWithReceiptSpool(input.spoolFilename, (spool) =>
+      Effect.gen(function* () {
+        yield* spool.initialize()
+        return yield* spool.listPending({ limit: 2 })
+      }),
+    )
+    expect(pendingAfter).toHaveLength(0)
+
+    expect(await recoverHostCommand(input, { now: () => later })).toMatchObject({
+      state: "reconciliation_required",
+      status: "effect_unknown",
+    })
+  })
 })
 
 async function commandInput(decision: "approved" | "rejected"): Promise<ExecuteHostCommandInput> {
@@ -193,6 +345,24 @@ async function receiptPreview(input: ExecuteHostCommandInput) {
 function requireOperationID(input: string) {
   const parsed = parseOperationID(input)
   if (!parsed.ok) throw new Error("Invalid test Operation ID")
+  return parsed.value
+}
+
+function requireDispatchRequestID(input: string) {
+  const parsed = parseDispatchRequestID(input)
+  if (!parsed.ok) throw new Error("Invalid test dispatch request ID")
+  return parsed.value
+}
+
+function requireStaleReceipt(input: unknown) {
+  const parsed = parseOperationReceipt(input)
+  if (!parsed.ok) throw new Error(`Invalid test receipt at ${parsed.issue.path}`)
+  return parsed.value
+}
+
+function requireReceiptID(input: string) {
+  const parsed = parseReceiptID(input, "$.receiptID")
+  if (!parsed.ok) throw new Error("Invalid test receipt ID")
   return parsed.value
 }
 

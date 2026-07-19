@@ -61,6 +61,21 @@ const hostCommandExecutor = "astra-executor:allowlisted-host-command"
 
 export const hostExecutionBoundaryLabel = "HOST EXECUTION — NO SANDBOX"
 
+export const hostCommandFaultPoints = [
+  "after_batch_before_claim",
+  "after_claim_before_effect",
+  "after_effect_before_spool",
+  "after_spool_before_ledger",
+  "after_ledger_before_ack",
+] as const
+
+export type HostCommandFaultPoint = (typeof hostCommandFaultPoints)[number]
+
+export type HostCommandCoordinatorDependencies = Readonly<{
+  injectFault?: (point: HostCommandFaultPoint) => Promise<void>
+  now?: () => number
+}>
+
 export type HostCommandPreview = Readonly<{
   command: "pwd"
   boundary: "host_no_sandbox"
@@ -152,7 +167,10 @@ export async function proposeHostCommand(input: ProposeHostCommandInput): Promis
  * Records consent and executes one exact allowlisted process after a durable
  * claim. Exact retries recover state and never start the process again.
  */
-export async function executeHostCommand(input: ExecuteHostCommandInput): Promise<DurableHostCommandResult> {
+export async function executeHostCommand(
+  input: ExecuteHostCommandInput,
+  dependencies: HostCommandCoordinatorDependencies = {},
+): Promise<DurableHostCommandResult> {
   try {
     const facts = makeHostCommandFacts(input)
     await prepareOperationStateFiles(facts.report.root, input.ledgerFilename, input.spoolFilename)
@@ -160,17 +178,25 @@ export async function executeHostCommand(input: ExecuteHostCommandInput): Promis
 
     if (await exists(input.ledgerFilename)) {
       const existing = await readExistingDispatch(input, facts)
-      if (existing) return recoverHostCommand(input)
+      if (existing?.claim) return recoverHostCommand(input, dependencies)
     }
 
     const baseline = await revalidateBaseline(facts, facts.repositorySnapshotDigest)
     if (!baseline.matched) throw new HostCommandCoordinationError("invalid_input", baseline.reason)
 
-    const claimStartedAt = Date.now()
-    const claimed = await runWithLedger(input.ledgerFilename, (ledger) =>
+    const now = dependencies.now ?? Date.now
+    await runWithLedger(input.ledgerFilename, (ledger) =>
       Effect.gen(function* () {
         yield* ledger.initialize()
         yield* ledger.appendBatch(facts.commands)
+      }),
+    )
+    await dependencies.injectFault?.("after_batch_before_claim")
+
+    const claimStartedAt = now()
+    const claimed = await runWithLedger(input.ledgerFilename, (ledger) =>
+      Effect.gen(function* () {
+        yield* ledger.initialize()
         const existing = yield* ledger.getDispatchSnapshot(facts.dispatchRequestID)
         if (existing?.claim) return { kind: "existing_claim" as const }
         return yield* ledger.claimDispatch({
@@ -195,8 +221,9 @@ export async function executeHostCommand(input: ExecuteHostCommandInput): Promis
       }),
     )
     if (claimed.kind === "existing_claim" || claimed.kind === "replayed") {
-      return recoverHostCommand(input)
+      return recoverHostCommand(input, dependencies)
     }
+    await dependencies.injectFault?.("after_claim_before_effect")
 
     const boundaryBaseline = await revalidateBaseline(facts, facts.repositorySnapshotDigest)
     const executable = boundaryBaseline.matched ? await revalidateExecutable(facts.preview.executable) : null
@@ -225,7 +252,7 @@ export async function executeHostCommand(input: ExecuteHostCommandInput): Promis
           )
         : null
 
-    const startedAt = new Date().toISOString()
+    const startedAt = new Date(now()).toISOString()
     const observation =
       boundaryBaseline.matched && executable && authority?.allowed
         ? await runBoundedHostCommand(facts.preview)
@@ -236,7 +263,13 @@ export async function executeHostCommand(input: ExecuteHostCommandInput): Promis
                 ? "executable_identity_changed"
                 : `effect_authority_${authority && !authority.allowed ? authority.reason : "unavailable"}`,
           )
-    const endedAt = new Date().toISOString()
+    const endedAt = new Date(now()).toISOString()
+    await dependencies.injectFault?.("after_effect_before_spool")
+
+    if (Date.parse(endedAt) > Date.parse(claimed.claim.claimExpiresAt)) {
+      return recordUncertainty(input, facts, claimed.claim.fencingToken, endedAt)
+    }
+
     const receipt = await makeHostCommandReceipt(facts, claimed.claim.fencingToken, startedAt, endedAt, observation)
     await runWithReceiptSpool(input.spoolFilename, (spool) =>
       Effect.gen(function* () {
@@ -244,7 +277,9 @@ export async function executeHostCommand(input: ExecuteHostCommandInput): Promis
         yield* spool.put(receipt)
       }),
     )
+    await dependencies.injectFault?.("after_spool_before_ledger")
     const ingested = await ingestReceipt(input, facts, receipt)
+    await dependencies.injectFault?.("after_ledger_before_ack")
     await acknowledgeReceipt(input.spoolFilename, receipt, ingested.event.eventID, ingested.event.digest)
     return durableResult(ingested.operation, receipt, observation)
   } catch (cause) {
@@ -258,14 +293,17 @@ export async function executeHostCommand(input: ExecuteHostCommandInput): Promis
 }
 
 /** Recovers receipts or marks an expired claim uncertain without rerunning the command. */
-export async function recoverHostCommand(input: ExecuteHostCommandInput): Promise<DurableHostCommandResult> {
+export async function recoverHostCommand(
+  input: ExecuteHostCommandInput,
+  dependencies: Pick<HostCommandCoordinatorDependencies, "now"> = {},
+): Promise<DurableHostCommandResult> {
   try {
     if (input.consent.decision !== "approved") {
       throw new HostCommandCoordinationError("recovery_unavailable", "A denied command has no executor claim")
     }
     const facts = makeHostCommandFacts(input)
     await prepareOperationStateFiles(facts.report.root, input.ledgerFilename, input.spoolFilename)
-    if (await exists(input.spoolFilename)) await ingestPendingReceipt(input, facts)
+    if (await exists(input.spoolFilename)) await ingestPendingReceipt(input, facts, dependencies)
     const snapshot = await runWithLedger(input.ledgerFilename, (ledger) =>
       Effect.gen(function* () {
         yield* ledger.initialize()
@@ -279,7 +317,7 @@ export async function recoverHostCommand(input: ExecuteHostCommandInput): Promis
       throw new HostCommandCoordinationError("recovery_unavailable", "No durable host command is available")
     }
     if (snapshot.dispatch.recoveryStatus === "claimed_no_receipt") {
-      const now = Date.now()
+      const now = dependencies.now?.() ?? Date.now()
       if (now < Date.parse(snapshot.dispatch.claim!.claimExpiresAt)) {
         throw new HostCommandCoordinationError(
           "operation_in_progress",
@@ -642,7 +680,11 @@ async function ingestReceipt(
   )
 }
 
-async function ingestPendingReceipt(input: ExecuteHostCommandInput, facts: ReturnType<typeof makeHostCommandFacts>) {
+async function ingestPendingReceipt(
+  input: ExecuteHostCommandInput,
+  facts: ReturnType<typeof makeHostCommandFacts>,
+  dependencies: Pick<HostCommandCoordinatorDependencies, "now"> = {},
+) {
   const pending = await runWithReceiptSpool(input.spoolFilename, (spool) =>
     Effect.gen(function* () {
       yield* spool.initialize()
@@ -661,8 +703,59 @@ async function ingestPendingReceipt(input: ExecuteHostCommandInput, facts: Retur
   ) {
     throw new HostCommandCoordinationError("recovery_unavailable", "The pending receipt is not bound to this command")
   }
+  const dispatch = await readExistingDispatch(input, facts)
+  if (dispatch?.claim && dispatch.recoveryStatus === "claim_uncertain") {
+    return quarantineReceiptAgainstRecordedUncertainty(input, facts, entry.receipt)
+  }
+  if (dispatch?.claim && Date.parse(entry.receipt.endedAt) > Date.parse(dispatch.claim.claimExpiresAt)) {
+    return quarantineStaleClaimReceipt(input, facts, dispatch.claim, entry.receipt, dependencies)
+  }
   const ingested = await ingestReceipt(input, facts, entry.receipt)
   await acknowledgeReceipt(input.spoolFilename, entry.receipt, ingested.event.eventID, ingested.event.digest)
+}
+
+/**
+ * A spooled receipt whose effect outlived its claim lease can never be
+ * ingested (the ledger proves it stale forever). Recovery must not wedge on
+ * it: record durable uncertainty for the claim, then acknowledge the receipt
+ * against that uncertainty event so it is retired explicitly, never as
+ * success and never silently.
+ */
+async function quarantineStaleClaimReceipt(
+  input: ExecuteHostCommandInput,
+  facts: ReturnType<typeof makeHostCommandFacts>,
+  claim: Readonly<{ claimExpiresAt: string; fencingToken: number }>,
+  receipt: OperationReceipt,
+  dependencies: Pick<HostCommandCoordinatorDependencies, "now">,
+) {
+  const now = dependencies.now?.() ?? Date.now()
+  if (now < Date.parse(claim.claimExpiresAt)) {
+    throw new HostCommandCoordinationError(
+      "operation_in_progress",
+      "The one-shot claim is active; recovery will not retire its receipt yet",
+    )
+  }
+  const recorded = await appendClaimUncertainty(input, facts, claim.fencingToken, new Date(now).toISOString())
+  await acknowledgeReceipt(input.spoolFilename, receipt, recorded.event.eventID, recorded.event.digest)
+}
+
+/** Retires a pending receipt whose claim is already durably uncertain by binding it to the recorded uncertainty event. */
+async function quarantineReceiptAgainstRecordedUncertainty(
+  input: ExecuteHostCommandInput,
+  facts: ReturnType<typeof makeHostCommandFacts>,
+  receipt: OperationReceipt,
+) {
+  const events = await runWithLedger(input.ledgerFilename, (ledger) =>
+    Effect.gen(function* () {
+      yield* ledger.initialize()
+      return yield* ledger.readEvents(facts.operationID, { limit: 16 })
+    }),
+  )
+  const uncertaintyEvent = events.find((event) => event.eventID === facts.eventIDs.uncertainty)
+  if (!uncertaintyEvent) {
+    throw new HostCommandCoordinationError("recovery_unavailable", "The recorded uncertainty event is unavailable")
+  }
+  await acknowledgeReceipt(input.spoolFilename, receipt, uncertaintyEvent.eventID, uncertaintyEvent.digest)
 }
 
 async function acknowledgeReceipt(
@@ -680,6 +773,16 @@ async function acknowledgeReceipt(
 }
 
 async function recordUncertainty(
+  input: ExecuteHostCommandInput,
+  facts: ReturnType<typeof makeHostCommandFacts>,
+  fencingToken: number,
+  observedAt: string,
+) {
+  const recorded = await appendClaimUncertainty(input, facts, fencingToken, observedAt)
+  return durableResult(recorded.operation, null, null)
+}
+
+async function appendClaimUncertainty(
   input: ExecuteHostCommandInput,
   facts: ReturnType<typeof makeHostCommandFacts>,
   fencingToken: number,
@@ -724,7 +827,7 @@ async function recordUncertainty(
       }),
     () => observedAt,
   )
-  return durableResult(recorded.operation, null, null)
+  return recorded
 }
 
 async function makeHostCommandReceipt(
