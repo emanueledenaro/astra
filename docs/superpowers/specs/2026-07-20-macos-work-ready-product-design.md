@@ -22,7 +22,7 @@ The first delivery target is a work-ready macOS core. Plugin and MCP hardening, 
 - `astra` opens the Launchpad.
 - `astra .` proposes the current directory as a workspace.
 - `astra /absolute/path` proposes the specified directory.
-- `astra system` opens the inert system surface without a workspace.
+- `astra system` opens the global Astra Control Center without a workspace.
 
 ## Launchpad
 
@@ -31,11 +31,23 @@ When no project is open, Astra shows a keyboard-first launch surface with one pr
 1. Create a new project.
 2. Open an existing workspace.
 3. Continue a recent local session.
-4. Exit or open System Mode.
+4. Exit or open the global Control Center.
 
 Creating a project is guided. Astra collects the project name, location, and desired outcome; proposes the stack, files, commands, and Git initialization; previews each effect; and executes only approved operations. Dependency installation and remote repository creation are separate decisions. Astra never creates a GitHub repository or pushes automatically.
 
 Visual reference: [Launchpad](../../astra/design/launchpad-reference.png). This image defines hierarchy and identity, not literal implementation dimensions.
+
+## Global Control Center
+
+`astra system` is the useful workspace-independent control surface for Astra. It shows and manages:
+
+- provider and model connections, including credential presence without exposing secrets;
+- installed skills, plugins, and MCP servers with their activation and health state;
+- Manual Review and Auto Review defaults for the current session;
+- Astra version, diagnostics, update availability, and execution-backend status;
+- recent sessions and global operation receipts.
+
+The Control Center cannot read or mutate project files because no workspace authority exists. Global configuration changes still show an exact preview, require the appropriate approval, and cross the Operation Kernel through a dedicated global-configuration authority. Credentials, publishing, and other high-risk actions always remain manual.
 
 ## Workspace admission
 
@@ -173,20 +185,21 @@ Important operations use explicit states such as `proposed`, `awaiting_approval`
 The product milestone is complete only when the real TUI demonstrates:
 
 1. Launchpad and guided local project creation.
-2. Safe admission of an existing workspace with no automatic effects.
-3. Real Anthropic and OpenAI/Codex connection paths.
-4. Multi-turn chat with bounded provider egress.
-5. Plan review and approval.
-6. Visible automatic subagents with no direct effect authority.
-7. Complete Review Mode for a candidate patch.
-8. Rejection without effects.
-9. Controlled patch application.
-10. Accurate test state without false verification.
-11. Automatic commit-message proposal.
-12. Governed local stage and commit.
-13. Durable restart recovery.
-14. Correct wide, medium, and compact terminal behavior.
-15. Separate manual approval for push and every prohibited external action.
+2. A useful global Control Center with no implicit workspace authority.
+3. Safe admission of an existing workspace with no automatic effects.
+4. Real Anthropic and OpenAI/Codex connection paths.
+5. Multi-turn chat with bounded provider egress.
+6. Plan review and approval.
+7. Visible automatic subagents with no direct effect authority.
+8. Complete Review Mode for a candidate patch.
+9. Rejection without effects.
+10. Controlled patch application.
+11. Accurate test state without false verification.
+12. Automatic commit-message proposal.
+13. Governed local stage and commit.
+14. Durable restart recovery.
+15. Correct wide, medium, and compact terminal behavior.
+16. Separate manual approval for push and every prohibited external action.
 
 The milestone requires focused tests, negative effect tests, package typechecks, a real macOS smoke, and one independent code review with no open blocker.
 
