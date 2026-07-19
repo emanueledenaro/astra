@@ -206,16 +206,16 @@ async function executeRequest(
       if (destination.protocol === "https:") {
         const tls = await import("node:tls")
         if (settled || signal?.aborted) return fail()
+        const pinnedTlsOptions: import("node:tls").ConnectionOptions = {
+          host: destination.selectedAddress.address,
+          port: destination.port,
+          servername: destination.hostname,
+          rejectUnauthorized: true,
+          minVersion: "TLSv1.2",
+          ALPNProtocols: ["http/1.1"],
+        }
         const secure = tls.connect(
-          {
-            host: destination.selectedAddress.address,
-            port: destination.port,
-            family: destination.selectedAddress.family,
-            servername: destination.hostname,
-            rejectUnauthorized: true,
-            minVersion: "TLSv1.2",
-            ALPNProtocols: ["http/1.1"],
-          },
+          pinnedTlsOptions,
           () => {
             if (!secure.authorized || secure.authorizationError) return fail()
             ready(secure)
