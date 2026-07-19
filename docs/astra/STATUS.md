@@ -52,7 +52,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 | `astra .`           | Opens the current directory through the real Workspace Gate                 |
 | `astra /path`       | Opens an explicit path; safe intermediate aliases become canonical          |
 | `astra open <path>` | Compatibility alias                                                         |
-| `astra`             | No Workspace mode planned; currently prints help                            |
+| `astra`             | Opens inert No Workspace mode in a TTY; prints help without a TTY           |
 | `astra system`      | Opens inert System Mode; no workspace authority, control socket, or effects |
 | `R`                 | Opens TUI with `READ ONLY • EFFECTS DENIED`                                 |
 | `G`                 | Runs bounded sandboxed Git inspection with visible progress                 |
@@ -113,6 +113,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 ## Latest integration evidence
 
 - Toolchain: Bun `1.3.14`; frozen install succeeds.
+- The linked `astra` command was run with no arguments from `/tmp`; the real PTY displayed `NO WORKSPACE • EFFECTS DENIED`, stated that no directory was scanned, and exited locally with `Q`.
 - Domain: 119 tests, 2,442 expectations; typecheck passes.
 - Ledger: 54 tests, 506 expectations; typecheck passes.
 - Runtime: 207 tests, 914 expectations; typecheck passes.
