@@ -32,4 +32,10 @@ Astra may execute directly on the host before the general sandbox is ready, but 
 
 ## Current checkpoint
 
-The Workspace Gate, safe OpenCode TUI, read-only Git observer, capability-bound host verification effect, durable ledger, receipt spool, recovery, and independent verification are working locally on macOS. The user-facing prompt and general effect bridge remain locked until the next slice connects real chat safely.
+Updated 2026-07-19. The Workspace Gate, safe OpenCode TUI, read-only Git observer,
+durable ledger, receipt spool, recovery, and independent verification are consolidated
+on the `astra` mainline, now joined by governed multi-turn chat (per-turn consent),
+git stage/unstage/commit in the TUI, and read-only operation/evidence/recovery views.
+Next from section 1: shell and file effects through the kernel, MCP tool invocation
+with capability grants, the remaining TUI views, then hardening. macOS re-verification
+of the consolidated line is pending (docs/astra/macos-verification.md).

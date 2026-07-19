@@ -1,6 +1,26 @@
 # Astra Delivery Status
 
-Updated: 2026-07-18
+Updated: 2026-07-19 (post-consolidation; see AUDIT.md on the audit branch for the
+independently verified assessment of everything below)
+
+## 2026-07-19 delta
+
+- The recovered development line plus audit fixes merged into the protected `astra`
+  mainline (PR #4); the day's product slices merged next (PR #5).
+- All recovered typecheck errors are fixed: every astra package and `packages/tui`
+  compile clean.
+- Kernel recovery liveness wedges (stale receipt, pending outbox, spurious corruption
+  reads) are closed with fault-injection tests; packed branch refs are now blocked at
+  commit prepare time instead of failing mid-effect.
+- New product surfaces, each parent-side behind per-operation approval: governed local
+  git commit in the TUI, read-only operation/evidence/recovery views, and consented
+  multi-turn chat (history in parent memory only, per-turn approval and grant).
+- Lynx v2 illustrated identity (flat-vector SVG states + logo, checksummed manifest)
+  replaces the pixel-art direction.
+- Linux verification: domain 119, ledger 54, executor 8, sandbox 12, TUI astra suites
+  128 — all green; astra-git/runtime/cli fail only at their macOS platform gates
+  (fail-closed). Full macOS re-verification is the next owner-side step
+  (docs/astra/macos-verification.md).
 
 ## Objective
 
@@ -112,17 +132,17 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Remaining release-candidate work
 
-| Area                        | State and next dependency                                                                          |
-| --------------------------- | -------------------------------------------------------------------------------------------------- |
-| General effect bridge       | Next; route provider, shell, and file effects through the Operation Kernel                         |
-| macOS sandbox               | Deferred to hardening; prototype preserved and backend boundary remains injectable                 |
-| Git Control Plane mutations | Missing; add typed stage/unstage, commit, branch, fetch, merge/rebase, recovery                    |
-| Providers and credentials   | Next; provider registry is preserved, but usable governed chat and credential handling are missing |
-| Plugins, skills, and MCP    | Safe-start disabled; manifest, quarantine, capability grants, and isolation missing                |
-| Complete TUI/CLI            | Agent queue, operation evidence, recovery, Git, provider, and extension views missing              |
-| Upstream compatibility      | Intake workflow, drift gates, parity, and rehearsal missing                                        |
-| Hardening                   | Full E2E, hostile fixtures, scans, SBOM, performance, accessibility, Linux/Windows matrix missing  |
-| Local release candidate     | Package, version, changelog, checksums, provenance, recovery manual, and final demo missing        |
+| Area                        | State and next dependency                                                                           |
+| --------------------------- | --------------------------------------------------------------------------------------------------- |
+| General effect bridge       | Partial: chat, controlled write, git stage/unstage/commit, search are governed; shell effects next   |
+| macOS sandbox               | Deferred to hardening; prototype preserved and backend boundary remains injectable                  |
+| Git Control Plane mutations | Stage/unstage/commit shipped (commit is macOS-only, packed refs blocked at prepare); branch, fetch, merge/rebase, recovery actions missing |
+| Providers and credentials   | Governed multi-turn chat shipped (per-turn consent, parent-only history); persistence, streaming, and non-Anthropic providers missing |
+| Plugins, skills, and MCP    | Inventory, quarantine, skill activation, and observed remote MCP activation shipped; MCP tool invocation, plugin containment, and capability grants for extensions missing |
+| Complete TUI/CLI            | Operation/evidence/recovery views shipped (dispatched operations only — ledger list API pending); agent queue and richer provider/extension views missing |
+| Upstream compatibility      | Intake workflow, drift gates, parity, and rehearsal missing                                         |
+| Hardening                   | Full E2E, hostile fixtures, scans, SBOM, performance, accessibility, Linux/Windows matrix missing   |
+| Local release candidate     | Package, version, changelog, checksums, provenance, recovery manual, and final demo missing         |
 
 ## Safety invariants
 
