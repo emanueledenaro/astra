@@ -106,8 +106,10 @@
         "opencode": "workspace:*",
       },
       "devDependencies": {
+        "@effect/sql-sqlite-bun": "catalog:",
         "@types/bun": "catalog:",
         "@typescript/native-preview": "catalog:",
+        "effect": "catalog:",
       },
     },
     "packages/astra-domain": {

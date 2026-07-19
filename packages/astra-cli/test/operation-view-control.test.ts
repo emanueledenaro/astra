@@ -135,7 +135,9 @@ afterAll(async () => {
 
 async function seedLedger(name: string, scenario: "verified" | "observed" | "reconciliation") {
   const filename = join(directory, `${name}.sqlite`)
-  await Effect.runPromise(withLedger(scenario).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped))
+  await Effect.runPromise(
+    withLedger(scenario).pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped),
+  )
   return filename
 }
 

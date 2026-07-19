@@ -434,11 +434,7 @@ describe("snapshot-consistent ledger reads under a concurrent committed writer",
     const directory = await mkdtemp(join(tmpdir(), "astra-ledger-concurrent-"))
     const filename = join(directory, "operations.sqlite")
     const withWalDatabase = <A, E>(effect: Effect.Effect<A, E, SqlClientService>) =>
-      Effect.runPromise(effect.pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped))
-    const writer = Bun.spawn(
-      [process.execPath, join(import.meta.dir, "concurrent-writer.fixture.ts"), filename, "150"],
-      { stdout: "ignore", stderr: "pipe" },
-    )
+      Effect.runPromise(effect.pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped))
     try {
       await withWalDatabase(
         Effect.gen(function* () {
@@ -446,30 +442,39 @@ describe("snapshot-consistent ledger reads under a concurrent committed writer",
           yield* ledger.initialize()
         }),
       )
-      let reads = 0
-      while (writer.exitCode === null) {
-        const cursor = await withWalDatabase(
-          Effect.gen(function* () {
-            const ledger = yield* makeOperationLedgerWithClock(() => new Date().toISOString())
-            return yield* ledger.readGlobalCursor()
-          }),
-        )
-        expect(cursor).toBeGreaterThanOrEqual(0)
-        reads += 1
-        await Bun.sleep(0)
+      const writer = Bun.spawn(
+        [process.execPath, join(import.meta.dir, "concurrent-writer.fixture.ts"), filename, "150"],
+        { stdout: "ignore", stderr: "pipe" },
+      )
+      try {
+        let reads = 0
+        while (writer.exitCode === null) {
+          const cursor = await withWalDatabase(
+            Effect.gen(function* () {
+              const ledger = yield* makeOperationLedgerWithClock(() => new Date().toISOString())
+              yield* ledger.initialize()
+              return yield* ledger.readGlobalCursor()
+            }),
+          )
+          expect(cursor).toBeGreaterThanOrEqual(0)
+          reads += 1
+          await Bun.sleep(0)
+        }
+        expect(await writer.exited).toBe(0)
+        expect(reads).toBeGreaterThan(0)
+      } finally {
+        writer.kill()
+        await writer.exited
       }
-      expect(await writer.exited).toBe(0)
-      expect(reads).toBeGreaterThan(0)
       const finalCursor = await withWalDatabase(
         Effect.gen(function* () {
           const ledger = yield* makeOperationLedgerWithClock(() => new Date().toISOString())
+          yield* ledger.initialize()
           return yield* ledger.readGlobalCursor()
         }),
       )
       expect(finalCursor).toBe(150)
     } finally {
-      writer.kill()
-      await writer.exited
       await rm(directory, { recursive: true, force: true })
     }
   }, 60_000)

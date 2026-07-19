@@ -19,7 +19,7 @@ if (!filename || !Number.isSafeInteger(appends) || appends < 1) {
 }
 
 const withDatabase = <A, E>(effect: Effect.Effect<A, E, SqlClientService>) =>
-  Effect.runPromise(effect.pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped))
+  Effect.runPromise(effect.pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped))
 
 for (let index = 0; index < appends; index++) {
   const id = crypto.randomUUID()
@@ -29,6 +29,7 @@ for (let index = 0; index < appends; index++) {
   await withDatabase(
     Effect.gen(function* () {
       const ledger = yield* makeOperationLedgerWithClock(() => new Date().toISOString())
+      yield* ledger.initialize()
       yield* ledger.append(
         appendCommand({
           operationID: parsed.value,

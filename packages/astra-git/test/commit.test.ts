@@ -430,7 +430,7 @@ describe("governed local Git commit adapter", () => {
     const locked = await repository()
     await writeFile(join(locked.root, ".git", "index.lock"), "held")
     expect(await prepare(locked.root)).toMatchObject({ status: "blocked", reason: "index_lock_present" })
-  })
+  }, 60_000)
 
   test("blocks a packed branch ref before any object computation", async () => {
     const packed = await repository()

@@ -437,7 +437,7 @@ function runWithLedger<A, E>(
   const layer =
     mode === "read-only"
       ? SqliteClient.layer({ filename, readonly: true, readwrite: false, create: false, disableWAL: true })
-      : SqliteClient.layer({ filename })
+      : SqliteClient.layer({ filename, disableWAL: true })
   return Effect.runPromise(
     Effect.gen(function* () {
       const ledger = yield* makeOperationLedger()

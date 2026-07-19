@@ -129,9 +129,9 @@ function publicReceiptSpool(spool: CoordinatorReceiptSpool): ReceiptSpool {
 
 function initialize(db: Database): Effect.Effect<void, ReceiptSpoolError> {
   return Effect.gen(function* () {
+    yield* db.run(sql`PRAGMA busy_timeout = 5000`)
     yield* db.run(sql`PRAGMA journal_mode = WAL`)
     yield* db.run(sql`PRAGMA foreign_keys = ON`)
-    yield* db.run(sql`PRAGMA busy_timeout = 5000`)
     yield* db.run(sql`PRAGMA synchronous = FULL`)
     yield* db.run(sql`
       CREATE TABLE IF NOT EXISTS receipt_spool (

@@ -72,7 +72,7 @@ export function runWithLedger<A, E>(filename: string, use: (ledger: OperationLed
     Effect.gen(function* () {
       const ledger = yield* makeOperationLedger()
       return yield* use(ledger)
-    }).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped),
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped),
   )
 }
 
@@ -85,7 +85,7 @@ export function runWithCoordinatorLedger<A, E>(
     Effect.gen(function* () {
       const ledger = yield* makeCoordinatorLedger(clock)
       return yield* use(ledger)
-    }).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped),
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped),
   )
 }
 
@@ -97,7 +97,7 @@ export function runWithVerificationLedger<A, E>(
     Effect.gen(function* () {
       const ledger = yield* makeVerificationLedger()
       return yield* use(ledger)
-    }).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped),
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped),
   )
 }
 
@@ -106,7 +106,7 @@ export function runWithReceiptSpool<A, E>(filename: string, use: (spool: Receipt
     Effect.gen(function* () {
       const spool = yield* makeReceiptSpool()
       return yield* use(spool)
-    }).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped),
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped),
   )
 }
 
@@ -118,7 +118,7 @@ export function runWithCoordinatorReceiptSpool<A, E>(
     Effect.gen(function* () {
       const spool = yield* makeCoordinatorReceiptSpool()
       return yield* use(spool)
-    }).pipe(Effect.provide(SqliteClient.layer({ filename })), Effect.scoped),
+    }).pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped),
   )
 }
 
