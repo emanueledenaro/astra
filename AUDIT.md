@@ -1,4 +1,95 @@
-# Astra Project Audit — 2026-07-18
+# Astra Project Audit
+
+## Round 2 — 2026-07-19 (after local-work recovery)
+
+**Context.** After round 1, ~65 commits of local work were recovered from the original
+development machine and pushed: `astra-foundation` (+10), `durable-coordinator` (+55),
+`local-recovery` (= coordinator + one recovery commit with in-flight work). Total new
+surface: ~91k lines across 383 files, including packages `astra-git`, `astra-ledger`,
+`astra-executor`, `astra-sandbox`, the safe-start TUI integration, `docs/astra/STATUS.md`
++ `ROADMAP.md`, and `docs/adr/ADR-0002`. Round 1's "the house is yet to be built"
+assessment is superseded: the house is half-built, and well.
+
+**Verdict.** Three deep audits (durable kernel; safe-start integration; recovered Git
+commit slice) found no integrity-breaking defect. STATUS.md's substantive claims are
+accurate against the code (its test counts are stale — the tree is ahead of the doc).
+
+### Kernel (astra-ledger / astra-executor / astra-runtime)
+
+Append-only SQLite ledger with per-event hash chain, CAS'd projections, immutable
+outbox, one-shot capability claims with fencing tokens, separate receipt spool,
+uncertainty records, verifier-gated `VERIFIED`. No false-success or double-effect path
+found; fault-injection tests cover every crash seam. Open defects (all fail-closed,
+liveness not integrity): **M-1** late receipt (endedAt past lease) permanently wedges
+recovery in `host-command.ts` (missing the guard `controlled-write-coordinator.ts:197`
+has); **M-2** fencing token not enforced at the resource (suspended process can produce
+a zombie effect after lease expiry; small blast radius, create-only `O_EXCL`);
+**M-3** crash between event batch and claim leaves host-command permanently
+`dispatch_pending`; **M-4** non-transactional read pairs can report spurious
+`LedgerCorruptionError` under concurrency. Low: verifier gate is module privacy, not a
+privilege boundary; hash chain has no secret (fine for local single-user threat model —
+document it); per-mutation full integrity scan is quadratic (documented bound).
+
+### Safe-start integration (inherited opencode + TUI)
+
+All four STATUS.md fail-closed claims verified TRUE: synthetic deny-all config,
+18-entry child env allowlist, independent guards on provider/VCS/MCP/shell/write paths,
+locked prompt. Governed effects (chat, writes, git stage, MCP) run in the parent behind
+per-operation approval and private authenticated sockets; the child cannot self-initiate.
+Authority-file handoff resists forge/swap (0700 dir + 0600 `wx` file, fd-based
+revalidation, digest via env, freshness). Changes to inherited code are surgical
+(~45 files, additive `ASTRA_SAFE_START` guards) — upstream merges stay tractable.
+Low findings: `Config.loadGlobal()` and `Auth.get` are unguarded in safe start (inert
+today, defense-in-depth gap); one `yield*` without `return` in `worktree/index.ts:276`.
+
+### Recovered Git commit slice (in-flight work, commit b0fd520)
+
+Governed macOS-only local `git commit`: TS-computed objects, quarantine install, native
+C helper with pinned-FD authority (no argv, no env paths), CAS ref update, byte-exact
+independent verification. Well-designed and well-tested, but recovered mid-flight:
+**does not typecheck** (3 located errors: `git-commit-mutation.ts:430` unnarrowed
+`unknown`, `:447` `noUncheckedIndexedAccess` on `scratch[0]`,
+`astra-git/src/commit.ts:1020` literal-type `limits` override), has no product wiring,
+missing package-exports entries (interim relative cross-package imports), and a stale
+`boundary.test.ts`. Functional defects: **M1** packed-refs repositories (any repo after
+`git gc`) can never commit and always orphan objects — must become a prepare-time block;
+**M2** uninitialized stack read in the helper's frame parser (`main.c:122`); **M3**
+prepare-time git runs unsandboxed honoring repo-local config (`core.fsmonitor` not
+neutralized — inert today, brittle); **M4** reflog published before ref CAS. No shell,
+no injection path, no false-success path found.
+
+### Empirical verification (Linux container; macOS surfaces platform-gated)
+
+| Suite | Result |
+|---|---|
+| astra-domain | 116 pass / 0 fail |
+| astra-ledger | 53 pass / 0 fail |
+| astra-executor | 8 pass / 0 fail |
+| astra-sandbox | 12 pass / 0 fail |
+| astra-runtime | 118 pass / 73 fail — failures are `unsupported_platform` / missing `xcrun` (macOS-only surfaces failing closed) |
+| astra-cli | 114 pass / 47 fail — same platform causes |
+| astra-git | 18 pass / 77 fail — same, plus unbuilt native helper and the known-stale boundary test |
+
+Cross-platform core: 189/189 green. STATUS.md's 742-test green gate is a macOS number;
+Linux runs confirm the fail-closed platform gating rather than contradicting it.
+
+### Round-2 recommended actions (priority order)
+
+1. Fix the 3 type errors; add the missing exports-map entries; update `boundary.test.ts`.
+2. Block packed-refs at prepare (Git M1); reorder the helper length check (M2).
+3. Close the kernel liveness wedges (M-1, M-3) and add the missing lease guard.
+4. Open PR `local-recovery` → `astra` (protected) so the mainline reflects reality.
+5. Delete the hundreds of upstream branches/tags accidentally pushed by `git push --all`.
+6. Then the round-1 items that still stand: CI wiring (turbo `test` task + branch
+   triggers), disable inherited scheduled workflows. UPSTREAM.md items are resolved
+   (baseline tag now on origin; `upstream` remote remains per-machine config).
+
+---
+
+# Round 1 — 2026-07-18 (pre-recovery baseline)
+
+> Note: superseded in scope by round 2 above — at the time of this audit only the first
+> 2 commits existed on the remote. Findings below remain valid for the base slice.
 
 Independent audit of the repository state after the initial foundation work (commits `ee661ea` and `8fafb9f`, 2026-07-17). Method: full read of the three `astra-*` packages (~2,800 new lines), docs/spec provenance review, monorepo integration review, and empirical verification (tests, demo matrix, typecheck) executed in an isolated environment.
 
