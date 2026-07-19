@@ -41,8 +41,11 @@ The current macOS checkpoint includes:
 - an explicitly labelled bounded host-process backend for the current create-only verification effect;
 - a private, digest-bound session authority that is revalidated again inside the TUI process;
 - a fail-closed OpenCode safe-start that skips project persistence and automatic Git, provider, plugin, skill, MCP, LSP, and formatter initialization;
-- clear `READ ONLY • EFFECTS DENIED` and `ACTIVE ONCE • EFFECTS BLOCKED` states;
-- a locked prompt until provider and general host effects are connected to Astra's Operation Kernel.
+- clear `READ ONLY • EFFECTS DENIED` and `ACTIVE ONCE • GOVERNED EFFECTS ONLY` states;
+- an inherited prompt that stays disabled while `ctrl+p` opens the governed action surface;
+- parent-governed Anthropic chat with per-turn consent and parent-only in-memory history;
+- governed Git stage, unstage, and exact local commit in one activated session;
+- governed literal workspace search, controlled create-only write, extension inventory and quarantine, skill activation, MCP activation, and read-only operation evidence.
 
 From this repository:
 
@@ -65,7 +68,7 @@ bun run --cwd packages/astra-cli verify:demo
 ```
 
 > [!IMPORTANT]
-> Astra is not yet a release candidate. `Activate once` currently activates only the inspected workspace identity; it does not enable AI, shell, general writes, provider traffic, plugin execution, MCP, LSP, or formatter effects in the product TUI. The developer verification path can perform one separately approved create-only host write and always labels it `HOST EXECUTION — NO SANDBOX`. Its preview also states that host network access is not isolated and filesystem scope is application-enforced. General macOS sandboxing is preserved as future work and deferred to hardening so it does not block the usable product slice. The inherited OpenCode documentation below describes the compatibility baseline, not a released Astra product.
+> Astra is not yet a work-ready release candidate. `Activate once` enables only parent-governed actions with an exact preview and explicit consent; the inherited OpenCode prompt, general shell, general file editing, LSP, formatters, arbitrary plugin code, MCP tool invocation, and destructive or remote Git actions remain blocked. Current chat is Anthropic-only and requires an API credential configured through OpenCode. Every connected host effect is labelled `HOST EXECUTION — NO SANDBOX`; previews state when network access is not isolated and filesystem scope is application-enforced. General sandboxing is preserved as future work and deferred to hardening. The inherited OpenCode documentation below describes the compatibility baseline, not a released Astra product.
 
 See [UPSTREAM.md](UPSTREAM.md) for the exact source baseline, license provenance, and remote policy.
 See [docs/astra/ROADMAP.md](docs/astra/ROADMAP.md) for the current product sequence.
