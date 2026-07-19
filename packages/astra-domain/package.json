@@ -23,6 +23,7 @@
     "./git-unstage-control": "./src/git-unstage-control.ts",
     "./governed-workspace-search": "./src/governed-workspace-search.ts",
     "./governed-workspace-search-control": "./src/governed-workspace-search-control.ts",
+    "./host-command-control": "./src/host-command-control.ts",
     "./git-repository-baseline": "./src/git-repository-baseline.ts",
     "./mcp-activation": "./src/mcp-activation.ts",
     "./mcp-activation-control": "./src/mcp-activation-control.ts",
