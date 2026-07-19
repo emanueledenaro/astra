@@ -1,3 +1,4 @@
+import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import { render, TimeToFirstDraw, useRenderer, useTerminalDimensions } from "@opentui/solid"
 import { registerOpencodeSpinner } from "./component/register-spinner"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
@@ -86,6 +87,9 @@ import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
 import { destroyRenderer } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
+import { inspectAstraSessionAuthority } from "./astra/session-authority"
+import { registerAstraAppFeatures } from "./astra/features"
+import { dispatchRemoteTuiCommand } from "./astra/command-policy"
 
 registerOpencodeSpinner()
 
@@ -184,6 +188,16 @@ function isVersionGreater(left: string, right: string) {
 }
 
 export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
+  let astraAuthority: AstraSessionAuthority | undefined
+  if (Flag.ASTRA_SAFE_START) {
+    const authority = inspectAstraSessionAuthority(process.env, process.cwd())
+    if (authority.status !== "valid") {
+      return yield* Effect.fail(
+        new Error(`Astra session authority rejected: ${authority.status === "invalid" ? authority.reason : "missing"}`),
+      )
+    }
+    astraAuthority = authority.authority
+  }
   const global = yield* Global.Service
   const exit = { epilogue: undefined as string | undefined, reason: undefined as unknown }
   const result = yield* Effect.scoped(
@@ -214,7 +228,9 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       win32DisableProcessedInput()
       const keymap = createDefaultOpenTuiKeymap(renderer)
       yield* Effect.acquireRelease(
-        Effect.sync(() => registerOpencodeKeymap(keymap, renderer, input.config)),
+        Effect.sync(() =>
+          registerOpencodeKeymap(keymap, renderer, input.config, { astraSafeStart: astraAuthority !== undefined }),
+        ),
         (unregister) => Effect.sync(unregister),
       )
       yield* Effect.addFinalizer(() =>
@@ -318,6 +334,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                                     <App
                                                                       onSnapshot={input.onSnapshot}
                                                                       pluginHost={input.pluginHost}
+                                                                      astraAuthority={astraAuthority}
                                                                     />
                                                                   </LocationProvider>
                                                                 </EditorContextProvider>
@@ -362,7 +379,11 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
   })
 })
 
-function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPluginHost }) {
+function App(props: {
+  onSnapshot?: () => Promise<string[]>
+  pluginHost: TuiPluginHost
+  astraAuthority?: AstraSessionAuthority
+}) {
   const startup = useTuiStartup()
   const tuiConfig = useTuiConfig()
   const route = useRoute()
@@ -384,6 +405,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   const pluginRuntime = usePluginRuntime()
   const attention = createTuiAttention({ renderer, config: tuiConfig, kv })
   const clipboard = useClipboard()
+  const astraSession = props.astraAuthority !== undefined
 
   const api = createTuiApi(
     createTuiApiAdapters({
@@ -405,19 +427,26 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     }),
   )
   const [ready, setReady] = createSignal(false)
-  props.pluginHost
-    .start({
-      api,
-      config: tuiConfig,
-      runtime: pluginRuntime,
-      dispose: () => attention.dispose(),
-    })
-    .catch((error) => {
-      console.error("Failed to load TUI plugins", error)
-    })
-    .finally(() => {
-      setReady(true)
-    })
+  let astraSlots: ReturnType<typeof pluginRuntime.setupSlots> | undefined
+  if (props.astraAuthority) {
+    registerAstraAppFeatures(api, props.astraAuthority)
+    astraSlots = pluginRuntime.setupSlots(api)
+    setReady(true)
+  } else {
+    props.pluginHost
+      .start({
+        api,
+        config: tuiConfig,
+        runtime: pluginRuntime,
+        dispose: () => attention.dispose(),
+      })
+      .catch((error) => {
+        console.error("Failed to load TUI plugins", error)
+      })
+      .finally(() => {
+        setReady(true)
+      })
+  }
 
   // Let selection copy/dismiss win ahead of normal bindings when explicit copy is required.
   const offSelectionKeys = keymap.intercept(
@@ -429,6 +458,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     { priority: 1 },
   )
   onCleanup(() => {
+    astraSlots?.dispose()
     offSelectionKeys()
     attention.dispose()
   })
@@ -541,6 +571,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     on(
       () => sync.status === "complete" && sync.data.provider.length === 0,
       (isEmpty, wasEmpty) => {
+        if (astraSession) return
         // only trigger when we transition into an empty-provider state
         if (!isEmpty || wasEmpty) return
         dialog.replace(() => <DialogProviderList />)
@@ -564,7 +595,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         category: "System",
         hidden: true,
         run: () => {
-          dialog.replace(() => <CommandPaletteDialog />)
+          dialog.replace(() => <CommandPaletteDialog astraSafeStart={astraSession} />)
         },
       },
       {
@@ -983,8 +1014,13 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
   }))
 
   event.on("tui.command.execute", (evt, { workspace }) => {
-    if (workspace !== project.workspace.current()) return
-    keymap.dispatchCommand(evt.properties.command)
+    dispatchRemoteTuiCommand({
+      astraSafeStart: astraSession,
+      eventWorkspace: workspace,
+      currentWorkspace: project.workspace.current(),
+      command: evt.properties.command,
+      dispatch: (command) => keymap.dispatchCommand(command),
+    })
   })
 
   event.on("tui.toast.show", (evt, { workspace }) => {

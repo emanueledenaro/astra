@@ -6,7 +6,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
-import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Ref, Stream } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -57,6 +57,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { LocationServiceMap, locationServiceMapLayer } from "@opencode-ai/core/location-services"
+import { LLMEvent } from "@opencode-ai/llm"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -86,6 +87,22 @@ function withSh<A, E, R>(fx: () => Effect.Effect<A, E, R>) {
         if (prev === undefined) delete process.env.SHELL
         else process.env.SHELL = prev
         Shell.preferred.reset()
+      }),
+  )
+}
+
+function withSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
       }),
   )
 }
@@ -207,6 +224,57 @@ const promptRoot = LayerNode.group([
   CrossSpawnSpawner.node,
   RuntimeFlags.node,
 ])
+
+const safeStartTitleCalls = Ref.makeUnsafe(0)
+const safeStartMainCalls = Ref.makeUnsafe(0)
+const safeStartPromptSummaryCalls = Ref.makeUnsafe(0)
+const safeStartPromptLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: (input) =>
+      Stream.fromEffect(Ref.update(input.small ? safeStartTitleCalls : safeStartMainCalls, (value) => value + 1)).pipe(
+        Stream.flatMap(() =>
+          input.small
+            ? Stream.make(
+                LLMEvent.textStart({ id: "title" }),
+                LLMEvent.textDelta({ id: "title", text: "Hidden title" }),
+                LLMEvent.textEnd({ id: "title" }),
+                LLMEvent.finish({ reason: "stop" }),
+              )
+            : Stream.make(
+                LLMEvent.stepStart({ index: 0 }),
+                LLMEvent.textStart({ id: "answer" }),
+                LLMEvent.textDelta({ id: "answer", text: "visible answer" }),
+                LLMEvent.textEnd({ id: "answer" }),
+                LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+                LLMEvent.finish({ reason: "stop" }),
+              ),
+        ),
+      ),
+  }),
+)
+const safeStartPromptSummary = Layer.succeed(
+  SessionSummary.Service,
+  SessionSummary.Service.of({
+    summarize: () => Ref.update(safeStartPromptSummaryCalls, (value) => value + 1),
+    diff: () => Effect.succeed([]),
+    computeDiff: () => Effect.succeed([]),
+  }),
+)
+const safeStartPromptSnapshot = Layer.mock(Snapshot.Service)({
+  track: () => Effect.die("unexpected Snapshot.track during Astra safe start"),
+  patch: () => Effect.die("unexpected Snapshot.patch during Astra safe start"),
+})
+const safeStartPrompt = testEffect(
+  LayerNode.compile(promptRoot, [
+    [SessionSummary.node, safeStartPromptSummary],
+    [LSP.node, lsp],
+    [MCP.node, makeMcp()],
+    [RuntimeFlags.node, runtimeFlags],
+    [LLM.node, safeStartPromptLLM],
+    [Snapshot.node, safeStartPromptSnapshot],
+  ]),
+)
 
 function makePrompt(input?: { mcpInstructions?: MCP.ServerInstructions[]; processor?: "blocking" }) {
   const replacements = [
@@ -443,6 +511,71 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
 })
 
 // Loop semantics
+
+safeStartPrompt.instance(
+  "safe start runs only the requested provider turn without title or summary turns",
+  () =>
+    Effect.gen(function* () {
+      yield* Ref.set(safeStartTitleCalls, 0)
+      yield* Ref.set(safeStartMainCalls, 0)
+      yield* Ref.set(safeStartPromptSummaryCalls, 0)
+      const config = yield* Config.Service
+      const provider = yield* ProviderSvc.Service
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      yield* config.get()
+      yield* provider.getModel(ref.providerID, ref.modelID)
+      const chat = yield* sessions.create({})
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "hello" }],
+      })
+
+      const result = yield* withSafeStart(prompt.loop({ sessionID: chat.id }))
+
+      expect(result.info.role).toBe("assistant")
+      expect(yield* Ref.get(safeStartMainCalls)).toBe(1)
+      expect(yield* Ref.get(safeStartTitleCalls)).toBe(0)
+      expect(yield* Ref.get(safeStartPromptSummaryCalls)).toBe(0)
+    }),
+  { config: cfg },
+)
+
+safeStartPrompt.instance(
+  "safe start blocks a pending compaction task without starting a provider turn",
+  () =>
+    Effect.gen(function* () {
+      yield* Ref.set(safeStartTitleCalls, 0)
+      yield* Ref.set(safeStartMainCalls, 0)
+      yield* Ref.set(safeStartPromptSummaryCalls, 0)
+      const config = yield* Config.Service
+      const provider = yield* ProviderSvc.Service
+      const compaction = yield* SessionCompaction.Service
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      yield* config.get()
+      yield* provider.getModel(ref.providerID, ref.modelID)
+      const chat = yield* sessions.create({})
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "hello" }],
+      })
+      yield* compaction.create({ sessionID: chat.id, agent: "build", model: ref, auto: true })
+
+      yield* withSafeStart(prompt.loop({ sessionID: chat.id }))
+
+      expect(yield* Ref.get(safeStartMainCalls)).toBe(0)
+      expect(yield* Ref.get(safeStartTitleCalls)).toBe(0)
+      expect(yield* Ref.get(safeStartPromptSummaryCalls)).toBe(0)
+    }),
+  { config: cfg },
+)
 
 noLLMServer.instance(
   "loop exits immediately when last assistant has stop finish",

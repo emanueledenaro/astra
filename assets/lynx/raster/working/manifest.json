@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "working-typing-v1",
+  "status": "concept-keyframes-not-runtime-wired",
+  "format": "image/png",
+  "source": {
+    "identityReference": "../../source/lynx-concept-reference-v1.png",
+    "identityReferenceSha256": "f75ec727688c787e64b507f14b04d2e072fbcb8009c48d0de53bfa18db972119",
+    "generatedSheet": "lynx-working-typing-sheet-v1.png",
+    "generatedSheetSha256": "5f46b779ba8ec5c291a0d38268fb18e9ec71b39c4cb2b01406c2930371b95edb",
+    "nativeVector": false
+  },
+  "playback": {
+    "mode": "loop",
+    "frameDurationMs": 220,
+    "reducedMotionFrame": "typing-01"
+  },
+  "frames": [
+    {
+      "id": "typing-01",
+      "file": "lynx-working-typing-01-v1.png",
+      "width": 879,
+      "height": 879,
+      "sha256": "6ff35d64100a7ba9d98584f9173b3c26fb6486e9a9ec07525b29a974418d6a78"
+    },
+    {
+      "id": "typing-02",
+      "file": "lynx-working-typing-02-v1.png",
+      "width": 879,
+      "height": 879,
+      "sha256": "5c3ee78212d125d1205f65ee033990ca70d09452218377785a40ac2d525a57ca"
+    }
+  ],
+  "limitations": [
+    "The two generated panels preserve identity but are not pixel-identical outside the moving paw region.",
+    "Deterministic alignment and localized cleanup are required before production playback.",
+    "Transparency and terminal image-protocol compatibility are not provided by this pack."
+  ]
+}

@@ -31,6 +31,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 
@@ -1071,7 +1072,20 @@ export const ConfigProvidersResult = Schema.Struct({
 })
 export type ConfigProvidersResult = Types.DeepMutable<Schema.Schema.Type<typeof ConfigProvidersResult>>
 
-export function toPublicInfo(provider: Info): Info {
+function publicApiUrl(value: string) {
+  try {
+    const url = new URL(value)
+    url.username = ""
+    url.password = ""
+    url.search = ""
+    url.hash = ""
+    return url.origin
+  } catch {
+    return ""
+  }
+}
+
+function cloneProviderInfo(provider: Info): Info {
   return JSON.parse(
     JSON.stringify(
       {
@@ -1085,6 +1099,33 @@ export function toPublicInfo(provider: Info): Info {
       },
     ),
   )
+}
+
+export function toPublicInfo(provider: Info): Info {
+  const models = Object.fromEntries(
+    Object.entries(provider.models)
+      .filter(([, model]) => Schema.is(Model)(model))
+      .map(([id, model]) => [
+        id,
+        {
+          ...model,
+          api: { ...model.api, url: publicApiUrl(model.api.url) },
+          options: {},
+          headers: {},
+          variants: model.variants
+            ? Object.fromEntries(Object.keys(model.variants).map((name) => [name, {}]))
+            : undefined,
+        },
+      ]),
+  )
+  return {
+    id: provider.id,
+    name: provider.name,
+    source: provider.source,
+    env: [...provider.env],
+    options: {},
+    models,
+  }
 }
 
 export function defaultModelIDs<T extends { models: Record<string, { id: string }> }>(providers: Record<string, T>) {
@@ -1337,11 +1378,21 @@ const layer = Layer.effect(
 
     const state = yield* InstanceState.make<State>(() =>
       Effect.gen(function* () {
+        if (Flag.ASTRA_SAFE_START) {
+          return {
+            models: new Map(),
+            providers: {} as Record<ProviderV2.ID, Info>,
+            catalog: {} as Record<ProviderV2.ID, Info>,
+            sdk: new Map(),
+            modelLoaders: {},
+            varsLoaders: {},
+          }
+        }
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
         const catalog = mapValues(modelsDev, fromModelsDevProvider)
-        const database = mapValues(catalog, toPublicInfo)
+        const database = mapValues(catalog, cloneProviderInfo)
 
         const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
         const languages = new Map<string, LanguageModelV3>()
@@ -1402,7 +1453,7 @@ const layer = Layer.effect(
           const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
 
           provider.models = yield* Effect.promise(async () => {
-            const next = await models(toPublicInfo(provider), { auth: pluginAuth })
+            const next = await models(cloneProviderInfo(provider), { auth: pluginAuth })
             return Object.fromEntries(
               Object.entries(next).map(([id, model]) => [
                 id,
@@ -1553,7 +1604,7 @@ const layer = Layer.effect(
           const options = yield* Effect.promise(() =>
             plugin.auth!.loader!(
               () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
-              toPublicInfo(database[plugin.auth!.provider]),
+              cloneProviderInfo(database[plugin.auth!.provider]),
             ),
           )
           const opts = options ?? {}
@@ -1886,7 +1937,7 @@ const layer = Layer.effect(
 
       const experimental = yield* plugin.trigger<"experimental.provider.small_model">(
         "experimental.provider.small_model",
-        { provider: toPublicInfo(provider) },
+        { provider: cloneProviderInfo(provider) },
         { model: undefined },
       )
       if (experimental.model) {

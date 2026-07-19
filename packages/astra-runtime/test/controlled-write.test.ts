@@ -1,5 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { lstat, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { constants } from "node:fs"
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { open } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createControlledWritePlan, demoMarkerName } from "../src/controlled-write-plan"
@@ -24,13 +26,13 @@ describe("controlled demo write", () => {
     const root = await workspace()
     const report = await scanWorkspace(root)
     const plan = createControlledWritePlan(root, "operation-positive")
-    const prepared = await prepareControlledWrite(plan, report)
+    const prepared = await prepareControlledWrite(plan, report, allowTestEffect, undefined, executeTestEffect)
 
     expect(prepared.prepared).toBeTrue()
     if (!prepared.prepared) throw new Error(prepared.reason)
     const result = await prepared.execute()
     expect(result).toMatchObject({
-      status: "verified",
+      status: "effect_observed",
       receipt: {
         path: join(root, demoMarkerName),
         expectedDigest: plan.contentDigest,
@@ -51,7 +53,13 @@ describe("controlled demo write", () => {
     const marker = join(root, demoMarkerName)
     await writeFile(marker, "user-owned\n")
     const report = await scanWorkspace(root)
-    const prepared = await prepareControlledWrite(createControlledWritePlan(root, "operation-existing"), report)
+    const prepared = await prepareControlledWrite(
+      createControlledWritePlan(root, "operation-existing"),
+      report,
+      allowTestEffect,
+      undefined,
+      executeTestEffect,
+    )
 
     expect(prepared).toEqual({ prepared: false, reason: "target_already_exists" })
     expect(await readFile(marker, "utf8")).toBe("user-owned\n")
@@ -99,9 +107,70 @@ describe("controlled demo write", () => {
     const report = await scanWorkspace(root)
     await writeFile(join(root, "AGENTS.md"), "changed after approval preview\n")
 
-    expect(await prepareControlledWrite(createControlledWritePlan(root, "operation-stale"), report)).toMatchObject({
+    expect(
+      await prepareControlledWrite(createControlledWritePlan(root, "operation-stale"), report, allowTestEffect),
+    ).toMatchObject({
       prepared: false,
       reason: "security_digest_changed",
     })
   })
+
+  test("blocks the effect when Git metadata exists without an inspected baseline", async () => {
+    const root = await workspace()
+    await mkdir(join(root, ".git"))
+    const report = await scanWorkspace(root)
+
+    expect(
+      await prepareControlledWrite(createControlledWritePlan(root, "operation-git"), report, allowTestEffect),
+    ).toEqual({
+      prepared: false,
+      reason: "git_baseline_not_inspected",
+    })
+    expect(await lstat(join(root, demoMarkerName)).catch(() => null)).toBeNull()
+  })
+
+  test("blocks the effect when Git metadata appears after preparation", async () => {
+    const root = await workspace()
+    const report = await scanWorkspace(root)
+    const prepared = await prepareControlledWrite(
+      createControlledWritePlan(root, "operation-late-git"),
+      report,
+      allowTestEffect,
+      undefined,
+      executeTestEffect,
+    )
+    expect(prepared.prepared).toBeTrue()
+    if (!prepared.prepared) throw new Error(prepared.reason)
+
+    await mkdir(join(root, ".git"))
+
+    expect(await prepared.execute()).toEqual({
+      status: "failed_without_effect",
+      reason: "git_baseline_not_inspected",
+    })
+    expect(await lstat(join(root, demoMarkerName)).catch(() => null)).toBeNull()
+  })
 })
+
+async function allowTestEffect() {
+  return { allowed: true as const }
+}
+
+async function executeTestEffect(
+  plan: ReturnType<typeof createControlledWritePlan>,
+  target: string,
+  expectedWorkspaceIdentity: NonNullable<Awaited<ReturnType<typeof scanWorkspace>>["identity"]>,
+) {
+  const handle = await open(
+    target,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+    0o600,
+  )
+  await handle.writeFile(plan.content)
+  await handle.sync()
+  await handle.close()
+  return {
+    status: "effect_observed" as const,
+    receipt: await verifyControlledWrite(plan, target, expectedWorkspaceIdentity),
+  }
+}

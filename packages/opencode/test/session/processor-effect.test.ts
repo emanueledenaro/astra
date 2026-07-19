@@ -4,7 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Ref, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -18,7 +18,7 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { provideTmpdirInstance, provideTmpdirServer } from "../fixture/fixture"
+import { provideTmpdirInstance, provideTmpdirServer, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { raw, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -26,6 +26,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { LLMEvent } from "@opencode-ai/llm"
+import { Snapshot } from "@/snapshot"
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -226,6 +227,106 @@ const fragmentFailureLLM = Layer.succeed(
 const fragmentFailureEnv = LayerNode.compile(root, [...replacements, [LLM.node, fragmentFailureLLM]])
 const itFragmentFailure = testEffect(fragmentFailureEnv)
 
+const safeStartModel = {
+  id: ref.modelID,
+  providerID: ref.providerID,
+  api: { id: "safe-start-test", url: "https://provider.example/v1", npm: "@ai-sdk/openai-compatible" },
+  name: "Safe start test model",
+  capabilities: {
+    temperature: false,
+    reasoning: false,
+    attachment: false,
+    toolcall: true,
+    input: { text: true, audio: false, image: false, video: false, pdf: false },
+    output: { text: true, audio: false, image: false, video: false, pdf: false },
+    interleaved: false,
+  },
+  cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+  limit: { context: 100_000, output: 10_000 },
+  status: "active",
+  options: {},
+  headers: {},
+  release_date: "2026-01-01",
+} satisfies Provider.Model
+
+function withSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+}
+
+const safeStartSnapshotCalls = Ref.makeUnsafe(0)
+const safeStartSummaryCalls = Ref.makeUnsafe(0)
+const safeStartEffectLLMCalls = Ref.makeUnsafe(0)
+const safeStartSnapshot = Layer.mock(Snapshot.Service)({
+  track: () => Ref.update(safeStartSnapshotCalls, (value) => value + 1).pipe(Effect.as(undefined)),
+  patch: () => Effect.die("unexpected Snapshot.patch during Astra safe start"),
+})
+const safeStartSummary = Layer.succeed(
+  SessionSummary.Service,
+  SessionSummary.Service.of({
+    summarize: () => Ref.update(safeStartSummaryCalls, (value) => value + 1),
+    diff: () => Effect.succeed([]),
+    computeDiff: () => Effect.succeed([]),
+  }),
+)
+const safeStartEffectLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.fromEffect(Ref.update(safeStartEffectLLMCalls, (value) => value + 1)).pipe(
+        Stream.flatMap(() =>
+          Stream.make(
+            LLMEvent.stepStart({ index: 0 }),
+            LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+            LLMEvent.finish({ reason: "stop" }),
+          ),
+        ),
+      ),
+  }),
+)
+const safeStartEffectsEnv = LayerNode.compile(root, [
+  [SessionSummary.node, safeStartSummary],
+  [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+  [LLM.node, safeStartEffectLLM],
+  [Snapshot.node, safeStartSnapshot],
+])
+const itSafeStartEffects = testEffect(safeStartEffectsEnv)
+
+const safeStartRetryLLMCalls = Ref.makeUnsafe(0)
+const safeStartRetryLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.fromEffect(Ref.updateAndGet(safeStartRetryLLMCalls, (value) => value + 1)).pipe(
+        Stream.flatMap((calls) => {
+          if (calls === 1) {
+            const error = Object.assign(new Error("connection reset"), { code: "ECONNRESET" })
+            return Stream.fail(error)
+          }
+          return Stream.make(LLMEvent.finish({ reason: "stop" }))
+        }),
+      ),
+  }),
+)
+const safeStartRetryEnv = LayerNode.compile(root, [
+  [SessionSummary.node, safeStartSummary],
+  [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+  [LLM.node, safeStartRetryLLM],
+  [Snapshot.node, safeStartSnapshot],
+])
+const itSafeStartRetry = testEffect(safeStartRetryEnv)
+
 const boot = Effect.fn("test.boot")(function* () {
   const processors = yield* SessionProcessor.Service
   const session = yield* Session.Service
@@ -236,6 +337,65 @@ const boot = Effect.fn("test.boot")(function* () {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+itSafeStartEffects.instance("session.processor safe start skips snapshots and hidden summaries", () =>
+  withSafeStart(
+    Effect.gen(function* () {
+      yield* Ref.set(safeStartSnapshotCalls, 0)
+      yield* Ref.set(safeStartSummaryCalls, 0)
+      yield* Ref.set(safeStartEffectLLMCalls, 0)
+      const { processors, session } = yield* boot()
+      const test = yield* TestInstance
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "safe start")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: safeStartModel })
+
+      const result = yield* handle.process({
+        user: parent,
+        sessionID: chat.id,
+        model: safeStartModel,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user", content: "safe start" }],
+        tools: {},
+      })
+
+      expect(result).toBe("continue")
+      expect(yield* Ref.get(safeStartEffectLLMCalls)).toBe(1)
+      expect(yield* Ref.get(safeStartSnapshotCalls)).toBe(0)
+      expect(yield* Ref.get(safeStartSummaryCalls)).toBe(0)
+    }),
+  ),
+)
+
+itSafeStartRetry.instance("session.processor safe start does not retry provider failures", () =>
+  withSafeStart(
+    Effect.gen(function* () {
+      yield* Ref.set(safeStartRetryLLMCalls, 0)
+      const { processors, session } = yield* boot()
+      const test = yield* TestInstance
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "do not retry")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(test.directory))
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: safeStartModel })
+
+      const result = yield* handle.process({
+        user: parent,
+        sessionID: chat.id,
+        model: safeStartModel,
+        agent: agent(),
+        system: [],
+        messages: [{ role: "user", content: "do not retry" }],
+        tools: {},
+      })
+
+      expect(result).toBe("stop")
+      expect(yield* Ref.get(safeStartRetryLLMCalls)).toBe(1)
+      expect(handle.message.error?.name).toBe("APIError")
+    }),
+  ),
+)
 
 it.live("session.processor effect tests capture llm input cleanly", () =>
   provideTmpdirServer(

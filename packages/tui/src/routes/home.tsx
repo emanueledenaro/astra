@@ -1,6 +1,6 @@
 import { Prompt, type PromptRef } from "../component/prompt"
 import { createEffect, createMemo, createSignal, onMount } from "solid-js"
-import { Logo } from "../component/logo"
+import { Lynx } from "../component/lynx"
 import { useSync } from "../context/sync"
 import { Toast } from "../ui/toast"
 import { useArgs } from "../context/args"
@@ -12,6 +12,8 @@ import { useEditorContext } from "../context/editor"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTuiConfig } from "../config"
 import { HomeSessionDestinationProvider } from "./home/session-destination"
+import { AstraWorkspaceStatus, getAstraWorkspaceStatus } from "../component/astra-workspace-status"
+import { inspectAstraSessionAuthority } from "../astra/session-authority"
 
 let once = false
 const placeholder = {
@@ -30,6 +32,10 @@ export function Home() {
   const editor = useEditorContext()
   const dimensions = useTerminalDimensions()
   const tuiConfig = useTuiConfig()
+  const astraAuthority = inspectAstraSessionAuthority()
+  const authority = astraAuthority.status === "valid" ? astraAuthority.authority : undefined
+  const astraStatus = getAstraWorkspaceStatus(authority)
+  const astraEffectsBlocked = authority?.effectPolicy === "deny"
   const promptMaxWidth = createMemo(() => {
     const configured = tuiConfig.prompt?.max_width
     if (configured === "auto") return Math.max(75, Math.floor(dimensions().width * 0.7))
@@ -74,13 +80,34 @@ export function Home() {
         <box height={4} minHeight={0} flexShrink={1} />
         <box flexShrink={0}>
           <pluginRuntime.Slot name="home_logo" mode="replace">
-            <Logo />
+            <Lynx
+              state={
+                astraStatus?.mode === "read-only"
+                  ? "read-only"
+                  : sync.ready && local.model.ready
+                    ? "idle"
+                    : "initializing"
+              }
+              size={dimensions().width >= 42 && dimensions().height >= 22 ? "full" : "compact"}
+              showVisual={dimensions().width >= 31}
+            />
           </pluginRuntime.Slot>
         </box>
+        <AstraWorkspaceStatus authority={authority} />
         <box height={1} minHeight={0} flexShrink={1} />
         <box width="100%" maxWidth={promptMaxWidth()} zIndex={1000} paddingTop={1} flexShrink={0}>
           <pluginRuntime.Slot name="home_prompt" mode="replace" ref={bind}>
-            <Prompt ref={bind} right={<pluginRuntime.Slot name="home_prompt_right" />} placeholders={placeholder} />
+            <Prompt
+              ref={bind}
+              disabled={astraEffectsBlocked}
+              hint={
+                astraEffectsBlocked ? (
+                  <text fg="#f0bd6a">Provider and host effects are locked in this preview</text>
+                ) : undefined
+              }
+              right={<pluginRuntime.Slot name="home_prompt_right" />}
+              placeholders={placeholder}
+            />
           </pluginRuntime.Slot>
         </box>
         <pluginRuntime.Slot name="home_bottom" />

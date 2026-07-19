@@ -19,7 +19,6 @@ import type { Agent } from "../../src/agent/agent"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { Permission } from "@/permission"
 import { LLMAISDK } from "@/session/llm/ai-sdk"
 import { Session as SessionNs } from "@/session/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -753,6 +752,67 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
 
 describe("session.llm.stream", () => {
   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
+  it.instance(
+    "blocks provider execution during Astra safe start without a network request",
+    () =>
+      Effect.gen(function* () {
+        const fixture = loadFixture("openai", "gpt-5.2")
+        waitRequest(
+          "/responses",
+          new Response(createChatStream("must not be requested"), {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+        )
+        const resolved = yield* Provider.use.getModel(ProviderV2.ID.make("openai"), ModelV2.ID.make(fixture.model.id))
+        const sessionID = SessionID.make("session-astra-safe-start")
+        const agent = {
+          name: "test",
+          mode: "primary",
+          options: {},
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        } satisfies Agent.Info
+        const user = {
+          id: MessageID.make("msg_astra-safe-start"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: agent.name,
+          model: { providerID: resolved.providerID, modelID: resolved.id },
+        } satisfies SessionV1.User
+
+        const exit = yield* Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const previous = process.env.ASTRA_SAFE_START
+            process.env.ASTRA_SAFE_START = "1"
+            return previous
+          }),
+          () =>
+            Effect.exit(
+              drain({
+                user,
+                sessionID,
+                model: resolved,
+                agent,
+                system: ["must not leave the process"],
+                messages: [{ role: "user", content: "must not leave the process" }],
+                tools: {},
+              }),
+            ),
+          (previous) =>
+            Effect.sync(() => {
+              if (previous === undefined) delete process.env.ASTRA_SAFE_START
+              else process.env.ASTRA_SAFE_START = previous
+            }),
+        )
+        expect(exit._tag).toBe("Failure")
+        expect(state.queue).toHaveLength(1)
+      }),
+    {
+      config: () => openAIConfig(loadFixture("openai", "gpt-5.2").model, `${state.server!.url.origin}/v1`),
+    },
+  )
+
   it.instance(
     "sends temperature, tokens, and reasoning options for openai-compatible models",
     () =>

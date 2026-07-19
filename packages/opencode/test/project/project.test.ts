@@ -274,6 +274,33 @@ describe("Project.fromDirectory git failure paths", () => {
   )
 })
 
+describe("Project.initGit safe start", () => {
+  it.live("rejects repository initialization without creating Git metadata", () =>
+    Effect.gen(function* () {
+      const project = yield* Project.Service
+      const tmp = yield* tmpdirScoped()
+      const current = (yield* project.fromDirectory(tmp)).project
+
+      const exit = yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          const previous = process.env.ASTRA_SAFE_START
+          process.env.ASTRA_SAFE_START = "1"
+          return previous
+        }),
+        () => Effect.exit(project.initGit({ directory: tmp, project: current })),
+        (previous) =>
+          Effect.sync(() => {
+            if (previous === undefined) delete process.env.ASTRA_SAFE_START
+            else process.env.ASTRA_SAFE_START = previous
+          }),
+      )
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* Effect.promise(() => Bun.file(path.join(tmp, ".git")).exists())).toBe(false)
+    }),
+  )
+})
+
 describe("Project.fromDirectory with worktrees", () => {
   it.live("should set worktree to root when called from root", () =>
     Effect.gen(function* () {

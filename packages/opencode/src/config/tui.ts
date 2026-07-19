@@ -225,7 +225,7 @@ const loadState = Effect.fn("TuiConfig.loadState")(function* (ctx: { directory: 
   }
 })
 
-const layer = Layer.effect(
+const hostLayer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const directory = yield* CurrentWorkingDirectory
@@ -259,7 +259,31 @@ const layer = Layer.effect(
   }).pipe(Effect.withSpan("TuiConfig.layer")),
 )
 
-export const node = LayerNode.make({ service: Service, layer, deps: [Npm.node, FSUtil.node] })
+const inertConfig = TuiConfig.resolve(
+  {},
+  {
+    terminalSuspend: process.platform !== "win32",
+  },
+)
+
+const inertLayer = Layer.succeed(
+  Service,
+  Service.of({
+    get: () => Effect.succeed(inertConfig),
+    pluginOrigins: () => Effect.succeed([]),
+    waitForDependencies: () => Effect.void,
+  }),
+)
+
+const hostNode = LayerNode.make({ service: Service, layer: hostLayer, deps: [Npm.node, FSUtil.node] })
+const inertNode = LayerNode.make({ service: Service, layer: inertLayer, deps: [] })
+
+/** Selects a dependency-free TUI config service for Astra Safe Start. */
+export function makeNode() {
+  return Flag.ASTRA_SAFE_START ? inertNode : hostNode
+}
+
+export const node = makeNode()
 
 const { runPromise } = makeRuntime(Service, AppNodeBuilder.build(node))
 

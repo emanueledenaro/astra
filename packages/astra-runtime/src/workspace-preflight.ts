@@ -5,8 +5,9 @@ import type {
   WorkspaceTrustReport,
 } from "@astra/domain/workspace-trust"
 import { createHash } from "node:crypto"
-import { lstat, open, opendir, readlink } from "node:fs/promises"
-import { join, resolve } from "node:path"
+import { constants } from "node:fs"
+import { lstat, open, opendir, readlink, realpath } from "node:fs/promises"
+import { dirname, join, relative, resolve } from "node:path"
 
 export const defaultWorkspacePreflightLimits = {
   maxEntries: 128,
@@ -17,6 +18,7 @@ export const defaultWorkspacePreflightLimits = {
 
 const digestedFiles = new Set([
   ".env",
+  ".git",
   ".gitmodules",
   ".mcp.json",
   ".npmrc",
@@ -32,9 +34,13 @@ export type WorkspaceRevalidation =
   | Readonly<{ matched: true; report: WorkspaceTrustReport }>
   | Readonly<{
       matched: false
-      reason: "identity_changed" | "security_digest_changed" | "preflight_blocked"
+      reason: "identity_changed" | "security_digest_changed" | "preflight_blocked" | "git_baseline_not_inspected"
       report: WorkspaceTrustReport
     }>
+
+export type WorkspaceActivationCheck =
+  | Readonly<{ allowed: true }>
+  | Readonly<{ allowed: false; reason: "preflight_incomplete" | "git_baseline_not_inspected" }>
 
 /**
  * Opens an untrusted workspace through bounded metadata reads only.
@@ -53,6 +59,8 @@ export async function scanWorkspace(
   const startedAt = performance.now()
   const rootFacts = await inspectRoot(root)
   if (!rootFacts.ok) return blockedReport(root, limits, rootFacts.reason)
+  const physicalRoot = await safeRealpath(root)
+  if (!physicalRoot) return blockedReport(root, limits, "workspace_physical_path_unreadable", rootFacts.identity)
 
   const names = await listRootNames(root, limits.maxEntries)
   if (!names.complete) {
@@ -62,10 +70,18 @@ export async function scanWorkspace(
   const hash = createHash("sha256")
   hash.update("astra.workspace-security.v1\0")
   hash.update(rootFacts.identity.device + "\0" + rootFacts.identity.inode + "\0")
+  hash.update(`physical-root\0${physicalRoot}\0`)
 
   const surfaces: Array<WorkspaceRiskSurface> = []
   const blockers: Array<string> = []
   let scannedBytes = 0
+
+  const ancestorGit = await inspectAncestorGitMetadata(physicalRoot, startedAt, limits.maxDurationMs)
+  if (!ancestorGit.complete) blockers.push(ancestorGit.reason)
+  if (ancestorGit.complete && ancestorGit.surface) {
+    surfaces.push(ancestorGit.surface)
+    hash.update(`ancestor-git\0${ancestorGit.fingerprint}\0`)
+  }
 
   for (const name of names.names.sort(compareBytes)) {
     if (performance.now() - startedAt > limits.maxDurationMs) {
@@ -83,8 +99,8 @@ export async function scanWorkspace(
     const kind = entryKind(facts)
     hash.update(`${name}\0${kind}\0${facts.mode}\0${facts.size}\0${facts.mtimeMs}\0`)
 
-    const risk = classifyRiskSurface(name, facts.isSymbolicLink())
-    if (risk) surfaces.push({ kind: risk, path: name })
+    const risk = classifyRiskSurface(name, kind)
+    if (risk) surfaces.push({ kind: risk, path: name, entryKind: kind })
 
     if (facts.isSymbolicLink()) {
       const target = await safeReadlink(path)
@@ -106,6 +122,8 @@ export async function scanWorkspace(
 
   const finalRoot = await inspectRoot(root)
   if (!finalRoot.ok || !sameIdentity(rootFacts.identity, finalRoot.identity)) blockers.push("root_identity_changed")
+  const finalPhysicalRoot = await safeRealpath(root)
+  if (finalPhysicalRoot !== physicalRoot) blockers.push("workspace_physical_path_changed")
 
   if (blockers.length > 0) {
     return {
@@ -137,6 +155,18 @@ export async function scanWorkspace(
 }
 
 export async function revalidateWorkspaceSnapshot(report: WorkspaceTrustReport): Promise<WorkspaceRevalidation> {
+  const current = await revalidateWorkspacePreflight(report)
+  if (!current.matched) return current
+  const activation = checkWorkspaceActivation(current.report)
+  if (!activation.allowed) {
+    const reason = activation.reason === "preflight_incomplete" ? "preflight_blocked" : activation.reason
+    return { matched: false, reason, report: current.report }
+  }
+  return current
+}
+
+/** Revalidates bounded static facts without granting workspace activation. */
+export async function revalidateWorkspacePreflight(report: WorkspaceTrustReport): Promise<WorkspaceRevalidation> {
   const current = await scanWorkspace(report.root, report.limits)
   if (current.completeness !== "complete" || !current.identity || !current.securityDigest) {
     return { matched: false, reason: "preflight_blocked", report: current }
@@ -148,6 +178,21 @@ export async function revalidateWorkspaceSnapshot(report: WorkspaceTrustReport):
     return { matched: false, reason: "security_digest_changed", report: current }
   }
   return { matched: true, report: current }
+}
+
+/**
+ * Separates a useful static report from authority to activate the workspace.
+ * Git workspaces remain readable but cannot activate until a real baseline is
+ * inspected by a later Git-aware increment.
+ */
+export function checkWorkspaceActivation(report: WorkspaceTrustReport): WorkspaceActivationCheck {
+  if (report.completeness !== "complete" || !report.identity || !report.securityDigest) {
+    return { allowed: false, reason: "preflight_incomplete" }
+  }
+  if (report.surfaces.some((surface) => surface.kind === "git_metadata")) {
+    return { allowed: false, reason: "git_baseline_not_inspected" }
+  }
+  return { allowed: true }
 }
 
 function blockedReport(
@@ -196,10 +241,61 @@ async function listRootNames(root: string, maxEntries: number) {
   }
 }
 
+async function inspectAncestorGitMetadata(root: string, startedAt: number, maxDurationMs: number) {
+  const firstParent = dirname(root)
+  if (firstParent === root) return { complete: true, surface: null } as const
+
+  let current = firstParent
+  while (true) {
+    if (performance.now() - startedAt > maxDurationMs) {
+      return { complete: false, reason: "ancestor_git_scan_time_limit_exceeded" } as const
+    }
+
+    const marker = join(current, ".git")
+    const result = await inspectOptionalPath(marker)
+    if (result.state === "unreadable") {
+      return { complete: false, reason: "ancestor_git_metadata_unreadable" } as const
+    }
+    if (result.state === "present") {
+      const kind = entryKind(result.facts)
+      return {
+        complete: true,
+        surface: {
+          kind: "git_metadata",
+          path: relative(root, marker),
+          entryKind: kind,
+        } satisfies WorkspaceRiskSurface,
+        fingerprint: [
+          relative(root, marker),
+          kind,
+          result.facts.dev,
+          result.facts.ino,
+          result.facts.mode,
+          result.facts.size,
+          result.facts.mtimeMs,
+        ].join("\0"),
+      } as const
+    }
+
+    const parent = dirname(current)
+    if (parent === current) return { complete: true, surface: null } as const
+    current = parent
+  }
+}
+
+async function inspectOptionalPath(path: string) {
+  try {
+    return { state: "present", facts: await lstat(path) } as const
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return { state: "absent" } as const
+    return { state: "unreadable" } as const
+  }
+}
+
 async function digestBoundedFile(path: string, expectedDevice: number, expectedInode: number, maxBytes: number) {
   if (maxBytes <= 0) return { complete: false, reason: "total_byte_limit_exceeded" } as const
 
-  const handle = await open(path, "r").catch(() => null)
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => null)
   if (!handle) return { complete: false, reason: "file_unreadable" } as const
   try {
     const before = await handle.stat()
@@ -250,33 +346,47 @@ async function safeReadlink(path: string) {
   }
 }
 
+async function safeRealpath(path: string) {
+  try {
+    return await realpath(path)
+  } catch {
+    return null
+  }
+}
+
 function sameIdentity(left: WorkspaceIdentity, right: WorkspaceIdentity) {
   return left.device === right.device && left.inode === right.inode
 }
 
 function shouldDigest(name: string) {
-  return digestedFiles.has(name) || name.startsWith(".env.")
+  const normalized = name.toLowerCase()
+  return digestedFiles.has(normalized) || normalized.startsWith(".env.")
 }
 
-function classifyRiskSurface(name: string, symbolicLink: boolean): string | null {
-  if (symbolicLink) return "symbolic_link"
-  if (name === ".git") return "git_metadata"
-  if (name === ".gitmodules") return "git_external_reference"
-  if (name === ".opencode" || name === "opencode.json" || name === "opencode.jsonc") {
+function classifyRiskSurface(name: string, kind: WorkspaceRiskSurface["entryKind"]): string | null {
+  const normalized = name.toLowerCase()
+  if (normalized === ".git") return "git_metadata"
+  if (kind === "symlink") return "symbolic_link"
+  if (normalized === ".gitmodules") return "git_external_reference"
+  if (normalized === ".opencode" || normalized === "opencode.json" || normalized === "opencode.jsonc") {
     return "opencode_configuration"
   }
-  if (name === ".mcp.json") return "mcp_configuration"
-  if (name === "package.json" || name === "bunfig.toml" || name === ".npmrc") return "package_configuration"
-  if (name === "AGENTS.md") return "repository_instructions"
-  if (name === "SKILL.md") return "skill_instructions"
-  if (name === ".vscode" || name === ".idea") return "editor_configuration"
-  if (name === ".env" || name.startsWith(".env.")) return "environment_file"
-  if (name === ".envrc" || name === "Makefile" || name === "mise.toml") return "host_execution_configuration"
+  if (normalized === ".mcp.json") return "mcp_configuration"
+  if (normalized === "package.json" || normalized === "bunfig.toml" || normalized === ".npmrc") {
+    return "package_configuration"
+  }
+  if (normalized === "agents.md") return "repository_instructions"
+  if (normalized === "skill.md") return "skill_instructions"
+  if (normalized === ".vscode" || normalized === ".idea") return "editor_configuration"
+  if (normalized === ".env" || normalized.startsWith(".env.")) return "environment_file"
+  if (normalized === ".envrc" || normalized === "makefile" || normalized === "mise.toml") {
+    return "host_execution_configuration"
+  }
   return null
 }
 
 function entryKind(facts: Awaited<ReturnType<typeof lstat>>) {
-  if (facts.isSymbolicLink()) return "link"
+  if (facts.isSymbolicLink()) return "symlink"
   if (facts.isDirectory()) return "directory"
   if (facts.isFile()) return "file"
   return "other"
@@ -284,6 +394,12 @@ function entryKind(facts: Awaited<ReturnType<typeof lstat>>) {
 
 function compareBytes(left: string, right: string) {
   return Buffer.compare(Buffer.from(left), Buffer.from(right))
+}
+
+function errorCode(error: unknown) {
+  if (typeof error !== "object" || error === null || !("code" in error)) return null
+  const code = (error as { code?: unknown }).code
+  return typeof code === "string" ? code : null
 }
 
 function validLimits(limits: WorkspacePreflightLimits) {

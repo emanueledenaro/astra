@@ -27,6 +27,14 @@ const it = testEffect(
     [RuntimeFlags.node, RuntimeFlags.layer({ disableDefaultPlugins: true })],
   ]),
 )
+const itWithDefaultPlugins = testEffect(
+  AppNodeBuilder.build(LayerNode.group([Plugin.node, CrossSpawnSpawner.node]), [
+    [Auth.node, AuthTest.empty],
+    [Account.node, AccountTest.empty],
+    [Npm.node, NpmTest.noop],
+    [RuntimeFlags.node, RuntimeFlags.layer({ disableDefaultPlugins: false })],
+  ]),
+)
 const systemHook = "experimental.chat.system.transform"
 
 function withProject<A, E, R>(source: string, self: Effect.Effect<A, E, R>) {
@@ -72,7 +80,48 @@ const triggerSystemTransform = Effect.fn("PluginTriggerTest.triggerSystemTransfo
   return out.system
 })
 
+function withAstraSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+}
+
 describe("plugin.trigger", () => {
+  itWithDefaultPlugins.instance("Astra safe start skips built-in plugins before initialization", () =>
+    withAstraSafeStart(
+      Effect.gen(function* () {
+        const plugin = yield* Plugin.Service
+        expect(yield* plugin.list()).toEqual([])
+      }),
+    ),
+  )
+
+  it.instance("Astra safe start does not import or run workspace plugins", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const marker = path.join(test.directory, "plugin-ran")
+      yield* withProject(
+        [`await Bun.write(${JSON.stringify(marker)}, "executed")`, "export default async () => ({})", ""].join("\n"),
+        withAstraSafeStart(
+          Effect.gen(function* () {
+            expect(yield* triggerSystemTransform()).toEqual([])
+            expect(yield* Effect.promise(() => Bun.file(marker).exists())).toBe(false)
+          }),
+        ),
+      )
+    }),
+  )
+
   it.instance("runs synchronous hooks without crashing", () =>
     withProject(
       [

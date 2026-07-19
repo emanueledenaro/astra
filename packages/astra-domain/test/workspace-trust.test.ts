@@ -79,7 +79,7 @@ describe("Workspace trust transition projector", () => {
     }
   })
 
-  test("allows trust once only from an exact completed snapshot decision", () => {
+  test("allows trust once only from a completed bounded-static decision", () => {
     expect(workspaceTrustTransitions.filter((transition) => transition.to === "TRUSTED_ONCE")).toEqual([
       { from: "AWAITING_DECISION", event: "decision.activate_once", to: "TRUSTED_ONCE" },
     ])
@@ -101,7 +101,7 @@ describe("Workspace trust transition projector", () => {
     expect(workspaceTrustStates.join(",")).not.toContain("TRUSTED_PROJECT")
   })
 
-  test("invalidates decision and activation when the snapshot drifts", () => {
+  test("invalidates decision and activation when bounded static facts drift", () => {
     for (const state of ["AWAITING_DECISION", "TRUSTED_ONCE"] as const) {
       expect(projectWorkspaceTrustEvent(state, "snapshot.drifted")).toEqual({
         accepted: true,
@@ -129,7 +129,7 @@ describe("Workspace trust transition projector", () => {
       securityDigest: "sha256:abc",
       completeness: "complete",
       state: "awaiting_decision",
-      surfaces: [{ kind: "package_manifest", path: "package.json" }],
+      surfaces: [{ kind: "package_manifest", path: "package.json", entryKind: "file" }],
       blockers: [],
       scannedEntries: 1,
       scannedBytes: 120,

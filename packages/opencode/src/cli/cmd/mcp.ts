@@ -1,6 +1,6 @@
 import { cmd } from "./cmd"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
-import { effectCmd } from "../effect-cmd"
+import { effectCmd, fail } from "../effect-cmd"
 import { Cause } from "effect"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js"
@@ -20,6 +20,12 @@ import { Global } from "@opencode-ai/core/global"
 import { modify, applyEdits } from "jsonc-parser"
 import { Filesystem } from "@/util/filesystem"
 import { Effect } from "effect"
+import { Flag } from "@opencode-ai/core/flag/flag"
+
+function denyAstraSafeStart(operation: string) {
+  if (Flag.ASTRA_SAFE_START) return fail(`${operation} is disabled during Astra safe start`)
+  return Effect.void
+}
 
 function getAuthStatusIcon(status: MCP.AuthStatus): string {
   switch (status) {
@@ -111,10 +117,13 @@ export const McpListCommand = effectCmd({
   aliases: ["ls"],
   describe: "list MCP servers and their status",
   handler: Effect.fn("Cli.mcp.list")(function* () {
+    yield* denyAstraSafeStart("MCP inspection")
     UI.empty()
     prompts.intro("MCP Servers")
 
-    const { config, statuses, stored } = yield* listState()
+    const { config, statuses, stored } = yield* listState().pipe(
+      Effect.catchTag("MCP.SafeStartDisabledError", (error) => fail(error.message)),
+    )
     const servers = configuredServers(config)
 
     if (servers.length === 0) {
@@ -178,10 +187,13 @@ export const McpAuthCommand = effectCmd({
       })
       .command(McpAuthListCommand),
   handler: Effect.fn("Cli.mcp.auth")(function* (args) {
+    yield* denyAstraSafeStart("MCP authentication")
     UI.empty()
     prompts.intro("MCP OAuth Authentication")
 
-    const { config, auth } = yield* authState()
+    const { config, auth } = yield* authState().pipe(
+      Effect.catchTag("MCP.SafeStartDisabledError", (error) => fail(error.message)),
+    )
     const mcpServers = config.mcp ?? {}
     const servers = oauthServers(config)
 
@@ -238,7 +250,11 @@ export const McpAuthCommand = effectCmd({
     }
 
     // Check if already authenticated
-    const authStatus = auth[serverName] ?? (yield* MCP.Service.use((mcp) => mcp.getAuthStatus(serverName)))
+    const authStatus =
+      auth[serverName] ??
+      (yield* MCP.Service.use((mcp) => mcp.getAuthStatus(serverName)).pipe(
+        Effect.catchTag("MCP.SafeStartDisabledError", (error) => fail(error.message)),
+      ))
     if (authStatus === "authenticated") {
       const confirm = yield* Effect.promise(() =>
         prompts.confirm({
@@ -291,9 +307,10 @@ export const McpAuthCommand = effectCmd({
         }),
       ),
       Effect.catchCause((cause) =>
-        Effect.sync(() => {
+        Effect.gen(function* () {
           spinner.stop("Authentication failed", 1)
           const error = Cause.squash(cause)
+          if (error instanceof MCP.SafeStartDisabledError) yield* fail(error.message)
           prompts.log.error(error instanceof Error ? error.message : String(error))
         }),
       ),
@@ -308,10 +325,13 @@ export const McpAuthListCommand = effectCmd({
   aliases: ["ls"],
   describe: "list OAuth-capable MCP servers and their auth status",
   handler: Effect.fn("Cli.mcp.auth.list")(function* () {
+    yield* denyAstraSafeStart("MCP authentication inspection")
     UI.empty()
     prompts.intro("MCP OAuth Status")
 
-    const { config, auth } = yield* authState()
+    const { config, auth } = yield* authState().pipe(
+      Effect.catchTag("MCP.SafeStartDisabledError", (error) => fail(error.message)),
+    )
     const servers = oauthServers(config)
 
     if (servers.length === 0) {
@@ -342,6 +362,7 @@ export const McpLogoutCommand = effectCmd({
       type: "string",
     }),
   handler: Effect.fn("Cli.mcp.logout")(function* (args) {
+    yield* denyAstraSafeStart("MCP credential removal")
     UI.empty()
     prompts.intro("MCP OAuth Logout")
 
@@ -385,7 +406,9 @@ export const McpLogoutCommand = effectCmd({
       return
     }
 
-    yield* MCP.Service.use((mcp) => mcp.removeAuth(serverName))
+    yield* MCP.Service.use((mcp) => mcp.removeAuth(serverName)).pipe(
+      Effect.catchTag("MCP.SafeStartDisabledError", (error) => fail(error.message)),
+    )
     prompts.log.success(`Removed OAuth credentials for ${serverName}`)
     prompts.outro("Done")
   }),
@@ -450,6 +473,7 @@ export const McpAddCommand = effectCmd({
         array: true,
       }),
   handler: Effect.fn("Cli.mcp.add")(function* (args) {
+    yield* denyAstraSafeStart("MCP configuration")
     const maybeCtx = yield* InstanceRef
     if (!maybeCtx) return yield* Effect.die("InstanceRef not provided")
     const ctx = maybeCtx
@@ -666,6 +690,7 @@ export const McpDebugCommand = effectCmd({
       demandOption: true,
     }),
   handler: Effect.fn("Cli.mcp.debug")(function* (args) {
+    yield* denyAstraSafeStart("MCP authentication inspection")
     const config = yield* Config.Service.use((cfg) => cfg.get())
     const mcp = yield* MCP.Service
     const auth = yield* McpAuth.Service
@@ -675,7 +700,7 @@ export const McpDebugCommand = effectCmd({
         ? yield* Effect.all({
             authStatus: mcp.getAuthStatus(args.name),
             entry: auth.get(args.name),
-          })
+          }).pipe(Effect.catchTag("MCP.SafeStartDisabledError", (error) => fail(error.message)))
         : undefined
     yield* Effect.promise(async () => {
       UI.empty()

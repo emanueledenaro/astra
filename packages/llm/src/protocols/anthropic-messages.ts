@@ -18,7 +18,8 @@ import {
   type ToolContent,
   type ToolResultPart,
 } from "../schema"
-import { JsonObject, optionalArray, optionalNull, ProviderShared } from "./shared"
+import { AnthropicWire } from "./anthropic-wire"
+import { JsonObject, optionalArray, ProviderShared } from "./shared"
 import { isContextOverflow } from "../provider-error"
 import * as Cache from "./utils/cache"
 import { Lifecycle } from "./utils/lifecycle"
@@ -170,55 +171,7 @@ const AnthropicBodyFields = {
 const AnthropicMessagesBody = Schema.Struct(AnthropicBodyFields)
 export type AnthropicMessagesBody = Schema.Schema.Type<typeof AnthropicMessagesBody>
 
-const AnthropicUsage = Schema.Struct({
-  input_tokens: Schema.optional(Schema.Number),
-  output_tokens: Schema.optional(Schema.Number),
-  cache_creation_input_tokens: optionalNull(Schema.Number),
-  cache_read_input_tokens: optionalNull(Schema.Number),
-})
-type AnthropicUsage = Schema.Schema.Type<typeof AnthropicUsage>
-
-const AnthropicStreamBlock = Schema.Struct({
-  type: Schema.String,
-  id: Schema.optional(Schema.String),
-  name: Schema.optional(Schema.String),
-  text: Schema.optional(Schema.String),
-  thinking: Schema.optional(Schema.String),
-  signature: Schema.optional(Schema.String),
-  input: Schema.optional(Schema.Unknown),
-  // *_tool_result blocks arrive whole as content_block_start (no streaming
-  // delta) with the structured payload in `content` and the originating
-  // server_tool_use id in `tool_use_id`.
-  tool_use_id: Schema.optional(Schema.String),
-  content: Schema.optional(Schema.Unknown),
-})
-
-const AnthropicStreamDelta = Schema.Struct({
-  type: Schema.optional(Schema.String),
-  text: Schema.optional(Schema.String),
-  thinking: Schema.optional(Schema.String),
-  partial_json: Schema.optional(Schema.String),
-  signature: Schema.optional(Schema.String),
-  stop_reason: optionalNull(Schema.String),
-  stop_sequence: optionalNull(Schema.String),
-})
-
-const AnthropicEvent = Schema.Struct({
-  type: Schema.String,
-  index: Schema.optional(Schema.Number),
-  message: Schema.optional(Schema.Struct({ usage: Schema.optional(AnthropicUsage) })),
-  content_block: Schema.optional(AnthropicStreamBlock),
-  delta: Schema.optional(AnthropicStreamDelta),
-  usage: Schema.optional(AnthropicUsage),
-  // `type` and `message` are both required per Anthropic's spec, but
-  // OpenAI-compatible proxies and gateway translations occasionally drop one
-  // or the other; mark them optional so a partial payload still parses and
-  // the parser can fall back to whichever field is populated.
-  error: Schema.optional(
-    Schema.Struct({ type: Schema.optional(Schema.String), message: Schema.optional(Schema.String) }),
-  ),
-})
-type AnthropicEvent = Schema.Schema.Type<typeof AnthropicEvent>
+type AnthropicEvent = AnthropicWire.StreamEvent
 
 interface ParserState {
   readonly tools: ToolStream.State<number>
@@ -570,7 +523,7 @@ const mapFinishReason = (reason: string | null | undefined): FinishReason => {
 // thinking tokens are *not* broken out by Anthropic — they're billed as
 // part of `output_tokens`, so `reasoningTokens` stays `undefined` and
 // `outputTokens` carries the combined total.
-const mapUsage = (usage: AnthropicUsage | undefined): Usage | undefined => {
+const mapUsage = (usage: AnthropicWire.Usage | undefined): Usage | undefined => {
   if (!usage) return undefined
   const nonCached = usage.input_tokens
   const cacheRead = usage.cache_read_input_tokens ?? undefined
@@ -836,7 +789,7 @@ export const protocol = Protocol.make({
     from: fromRequest,
   },
   stream: {
-    event: Protocol.jsonEvent(AnthropicEvent),
+    event: Protocol.jsonEvent(AnthropicWire.StreamEvent),
     initial: () => ({ tools: ToolStream.empty<number>(), lifecycle: Lifecycle.initial() }),
     step,
   },

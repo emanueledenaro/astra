@@ -100,7 +100,10 @@
       },
       "dependencies": {
         "@astra/domain": "workspace:*",
+        "@astra/git": "workspace:*",
         "@astra/runtime": "workspace:*",
+        "@opencode-ai/tui": "workspace:*",
+        "opencode": "workspace:*",
       },
       "devDependencies": {
         "@types/bun": "catalog:",
@@ -114,8 +117,64 @@
         "@typescript/native-preview": "catalog:",
       },
     },
+    "packages/astra-executor": {
+      "name": "@astra/executor",
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+        "@opencode-ai/effect-drizzle-sqlite": "workspace:*",
+        "drizzle-orm": "catalog:",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@effect/sql-sqlite-bun": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
+    "packages/astra-git": {
+      "name": "@astra/git",
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
+    "packages/astra-ledger": {
+      "name": "@astra/ledger",
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+        "@opencode-ai/effect-drizzle-sqlite": "workspace:*",
+        "drizzle-orm": "catalog:",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@astra/executor": "workspace:*",
+        "@effect/sql-sqlite-bun": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
     "packages/astra-runtime": {
       "name": "@astra/runtime",
+      "dependencies": {
+        "@astra/domain": "workspace:*",
+        "@astra/executor": "workspace:*",
+        "@astra/git": "workspace:*",
+        "@astra/ledger": "workspace:*",
+        "@astra/sandbox": "workspace:*",
+        "@effect/sql-sqlite-bun": "catalog:",
+        "@opencode-ai/llm": "workspace:*",
+        "effect": "catalog:",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
+    "packages/astra-sandbox": {
+      "name": "@astra/sandbox",
       "dependencies": {
         "@astra/domain": "workspace:*",
       },
@@ -616,6 +675,7 @@
         "@ai-sdk/togetherai": "2.0.41",
         "@ai-sdk/vercel": "2.0.39",
         "@ai-sdk/xai": "3.0.102",
+        "@astra/runtime": "workspace:*",
         "@aws-sdk/credential-providers": "3.1057.0",
         "@clack/prompts": "1.0.0-alpha.1",
         "@effect/opentelemetry": "catalog:",
@@ -979,6 +1039,8 @@
       "name": "@opencode-ai/tui",
       "version": "1.18.3",
       "dependencies": {
+        "@astra/domain": "workspace:*",
+        "@astra/runtime": "workspace:*",
         "@opencode-ai/core": "workspace:*",
         "@opencode-ai/plugin": "workspace:*",
         "@opencode-ai/sdk": "workspace:*",
@@ -1259,7 +1321,15 @@
 
     "@astra/domain": ["@astra/domain@workspace:packages/astra-domain"],
 
+    "@astra/executor": ["@astra/executor@workspace:packages/astra-executor"],
+
+    "@astra/git": ["@astra/git@workspace:packages/astra-git"],
+
+    "@astra/ledger": ["@astra/ledger@workspace:packages/astra-ledger"],
+
     "@astra/runtime": ["@astra/runtime@workspace:packages/astra-runtime"],
+
+    "@astra/sandbox": ["@astra/sandbox@workspace:packages/astra-sandbox"],
 
     "@astrojs/check": ["@astrojs/check@0.9.6", "", { "dependencies": { "@astrojs/language-server": "^2.16.1", "chokidar": "^4.0.1", "kleur": "^4.1.5", "yargs": "^17.7.2" }, "peerDependencies": { "typescript": "^5.0.0" }, "bin": { "astro-check": "bin/astro-check.js" } }, "sha512-jlaEu5SxvSgmfGIFfNgcn5/f+29H61NJzEMfAZ82Xopr4XBchXB1GVlcJsE+elUlsYSbXlptZLX+JMG3b/wZEA=="],
 

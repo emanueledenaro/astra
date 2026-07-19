@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false
+  },
+  "include": [
+    "src/operation-ledger.ts",
+    "src/operation-storage.ts",
+    "src/controlled-write-coordinator.ts",
+    "src/controlled-write-verifier.ts",
+    "src/controlled-write-operation-facts.ts",
+    "test/operation-ledger.test.ts",
+    "test/controlled-write-coordinator.test.ts"
+  ],
+  "exclude": []
+}

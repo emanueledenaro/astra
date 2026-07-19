@@ -2,33 +2,73 @@
 
 **A predictable, security-first AI development system built on OpenCode.**
 
-Astra is being designed so a developer can always see what the AI intends to do, which authority it has, what changed, what was independently verified, what remains uncertain, and how to recover. The Git Control Plane, Codex-compatible skills and plugins, and animated pixel Lynx will be delivered as later vertical slices.
+Astra is being designed so a developer can always see what the AI intends to do, which authority it has, what changed, what was independently verified, what remains uncertain, and how to recover. It reuses OpenCode while adding an explicit workspace gate, durable operations, bounded authority, visible Git state, and fail-closed effects.
+
+## Command experience
+
+The product command contract is:
+
+```bash
+astra             # Start Astra in No Workspace mode
+astra .           # Propose the current directory as a workspace
+astra /path       # Propose a specific directory as a workspace
+astra system      # Start directly in System Mode
+```
+
+Selecting a directory never activates it automatically. Astra must first show the bounded preflight and require the appropriate trust and effect decisions. `astra open <path>` remains an explicit compatibility alias for scripts and automation.
+
+Current implementation status:
+
+| Command             | Status                                                              |
+| ------------------- | ------------------------------------------------------------------- |
+| `astra .`           | Working local macOS product path                                    |
+| `astra /path`       | Working; intermediate path aliases are canonicalized before opening |
+| `astra open <path>` | Working compatibility alias                                         |
+| `astra`             | Planned No Workspace mode; currently prints help                    |
+| `astra system`      | Working inert System Mode; no workspace or effect authority         |
 
 ## Current local demo
 
-The first macOS product slice now includes:
+The current macOS checkpoint includes:
 
-- 15 explicit states from proposal to verified success, failure, recovery, or unresolved ambiguity;
-- a separate terminal Workspace Gate with the Lynx identity;
-- bounded static preflight without normal OpenCode workspace bootstrap;
-- visible `read-only`, `activate once`, and `exit` decisions with no persistent trust;
-- a second explicit approval before one create-only demo write;
-- distinct observed and verified states, with exact readback evidence before the scoped `VERIFIED` result.
+- a dedicated `astra system` surface with `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED`, no workspace admission, and local keyboard exit;
+- a real terminal Workspace Gate with the Lynx identity;
+- bounded static preflight without workspace code, provider, plugin, MCP, LSP, formatter, shell, or normal OpenCode bootstrap;
+- explicit `read-only`, `inspect Git`, `activate once`, and `exit` decisions with no persistent trust;
+- visible progress during bounded Git inspection instead of a blank terminal;
+- sandboxed, read-only Git observation and an exact ephemeral baseline before activation;
+- a capability-bound Operation Kernel with durable consent, dispatch, receipts, recovery, and independent verification;
+- an explicitly labelled bounded host-process backend for the current create-only verification effect;
+- a private, digest-bound session authority that is revalidated again inside the TUI process;
+- a fail-closed OpenCode safe-start that skips project persistence and automatic Git, provider, plugin, skill, MCP, LSP, and formatter initialization;
+- clear `READ ONLY • EFFECTS DENIED` and `ACTIVE ONCE • EFFECTS BLOCKED` states;
+- a locked prompt until provider and general host effects are connected to Astra's Operation Kernel.
+
+From this repository:
 
 ```bash
-bun run --cwd packages/astra-cli demo -- /absolute/path/to/workspace
+bun install --frozen-lockfile
+bun run --cwd packages/astra-cli start -- .
 ```
 
-Run the complete negative and positive verification matrix:
+If the local `astra` launcher is already linked:
+
+```bash
+astra .
+astra /absolute/path/to/workspace
+```
+
+The earlier controlled-write vertical slice remains available only as a developer verification path:
 
 ```bash
 bun run --cwd packages/astra-cli verify:demo
 ```
 
 > [!IMPORTANT]
-> Astra is in active foundation development and is not ready for installation or production use. This demo performs host execution without a sandbox only after explicit approval. It does not activate providers, plugins, MCP, LSP, Git, shell commands, or the normal OpenCode runtime. The OpenCode documentation below describes the inherited compatibility baseline, not a released Astra product.
+> Astra is not yet a release candidate. `Activate once` currently activates only the inspected workspace identity; it does not enable AI, shell, general writes, provider traffic, plugin execution, MCP, LSP, or formatter effects in the product TUI. The developer verification path can perform one separately approved create-only host write and always labels it `HOST EXECUTION — NO SANDBOX`. Its preview also states that host network access is not isolated and filesystem scope is application-enforced. General macOS sandboxing is preserved as future work and deferred to hardening so it does not block the usable product slice. The inherited OpenCode documentation below describes the compatibility baseline, not a released Astra product.
 
 See [UPSTREAM.md](UPSTREAM.md) for the exact source baseline, license provenance, and remote policy.
+See [docs/astra/ROADMAP.md](docs/astra/ROADMAP.md) for the current product sequence.
 
 ---
 

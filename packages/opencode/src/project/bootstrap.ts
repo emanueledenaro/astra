@@ -10,6 +10,7 @@ import { ShareNext } from "@/share/share-next"
 import { Effect, Layer } from "effect"
 import { Config } from "@/config/config"
 import { Service } from "./bootstrap-service"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 export { Service } from "./bootstrap-service"
 export type { Interface } from "./bootstrap-service"
@@ -34,6 +35,10 @@ const layer = Layer.effect(
       yield* Effect.logInfo("bootstrapping", { directory: ctx.directory })
       // everything depends on config so eager load it for nice traces
       yield* config.get()
+      if (Flag.ASTRA_SAFE_START) {
+        yield* Effect.logInfo("Astra safe start keeps extension and workspace services dormant")
+        return
+      }
       // Plugin can mutate config so it has to be initialized before anything else.
       yield* plugin.init()
       // Each service self-manages its own slow work via Effect.forkScoped against

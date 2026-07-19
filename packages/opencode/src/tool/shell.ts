@@ -13,6 +13,7 @@ import { fileURLToPath } from "url"
 import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import { ShellID } from "./shell/id"
 
 import * as Truncate from "./truncate"
@@ -608,6 +609,11 @@ export const ShellTool = Tool.define(
           parameters: prompt.parameters,
           execute: (params: Parameters, ctx: Tool.Context) =>
             Effect.gen(function* () {
+              if (Flag.ASTRA_SAFE_START) {
+                return yield* Effect.die(
+                  new Error("Generic shell execution is blocked until the Astra Git Control Plane authorizes it"),
+                )
+              }
               const instanceCtx = yield* InstanceState.context
               const cwd = params.workdir
                 ? yield* resolvePath(params.workdir, instanceCtx.directory, shell)

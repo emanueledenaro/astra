@@ -28,6 +28,24 @@
     "@opencode-ai/session-ui#test": {
       "dependsOn": ["^build"],
       "outputs": []
+    },
+    // Astra packages that are green on Linux CI runners (189/189).
+    // TODO(macOS runner): @astra/runtime, @astra/cli, and @astra/git tests are
+    // partially macOS-only (they fail closed with unsupported_platform on Linux),
+    // so they are intentionally NOT wired here. Add "@astra/runtime#test",
+    // "@astra/cli#test", and "@astra/git#test" once test.yml gains a macOS job.
+    // @astra/sandbox is a dormant prototype, excluded per docs/astra/STATUS.md.
+    "@astra/domain#test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@astra/ledger#test": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@astra/executor#test": {
+      "dependsOn": ["^build"],
+      "outputs": []
     }
   }
 }

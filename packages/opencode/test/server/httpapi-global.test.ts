@@ -1,6 +1,6 @@
 import { NodeHttpServer } from "@effect/platform-node"
 import { describe, expect } from "bun:test"
-import { Context, Effect, Layer, Option } from "effect"
+import { Context, Effect, Layer, Option, Ref } from "effect"
 import { HttpBody, HttpClient, HttpClientRequest, HttpRouter } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
 import { Auth } from "../../src/auth"
@@ -17,6 +17,24 @@ import { authorizationLayer } from "../../src/server/routes/instance/httpapi/mid
 import { schemaErrorLayer } from "../../src/server/routes/instance/httpapi/middleware/schema-error"
 import { testEffect } from "../lib/effect"
 
+const globalConfigUpdateCalls = Ref.makeUnsafe(0)
+
+function withSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+}
+
 const apiLayer = HttpRouter.serve(
   HttpApiBuilder.layer(RootHttpApi).pipe(
     Layer.provide([controlHandlers, controlPlaneHandlers, globalHandlers]),
@@ -29,7 +47,12 @@ const apiLayer = HttpRouter.serve(
 ).pipe(
   Layer.provideMerge(NodeHttpServer.layerTest),
   Layer.provide(Layer.mock(Auth.Service)({})),
-  Layer.provide(Layer.mock(Config.Service)({})),
+  Layer.provide(
+    Layer.mock(Config.Service)({
+      updateGlobal: (config) =>
+        Ref.update(globalConfigUpdateCalls, (value) => value + 1).pipe(Effect.as({ info: config, changed: true })),
+    }),
+  ),
   Layer.provide(Layer.mock(MoveSession.Service)({})),
   Layer.provide(
     Layer.mock(Installation.Service)({
@@ -43,6 +66,21 @@ const apiLayer = HttpRouter.serve(
 const it = testEffect(apiLayer)
 
 describe("global HttpApi", () => {
+  it.live("rejects global config writes during Astra safe start before calling the config service", () =>
+    withSafeStart(
+      Effect.gen(function* () {
+        yield* Ref.set(globalConfigUpdateCalls, 0)
+        const response = yield* HttpClientRequest.patch(GlobalPaths.config).pipe(
+          HttpClientRequest.setBody(HttpBody.jsonUnsafe({ username: "must-not-write" })),
+          HttpClient.execute,
+        )
+
+        expect(response.status).toBe(400)
+        expect(yield* Ref.get(globalConfigUpdateCalls)).toBe(0)
+      }),
+    ),
+  )
+
   it.live("upgrades to latest when the request body is omitted", () =>
     Effect.gen(function* () {
       const response = yield* HttpClient.post(GlobalPaths.upgrade)

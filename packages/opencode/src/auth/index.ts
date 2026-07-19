@@ -4,6 +4,7 @@ import { Effect, Layer, Record, Result, Schema, Context } from "effect"
 import { NonNegativeInt } from "@opencode-ai/core/schema"
 import { Global } from "@opencode-ai/core/global"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
@@ -71,6 +72,9 @@ const layer = Layer.effect(
     })
 
     const set = Effect.fn("Auth.set")(function* (key: string, info: Info) {
+      if (Flag.ASTRA_SAFE_START) {
+        yield* new AuthError({ message: "Auth writes are blocked during Astra safe start" })
+      }
       const norm = key.replace(/\/+$/, "")
       const data = yield* all()
       if (norm !== key) delete data[key]
@@ -81,6 +85,9 @@ const layer = Layer.effect(
     })
 
     const remove = Effect.fn("Auth.remove")(function* (key: string) {
+      if (Flag.ASTRA_SAFE_START) {
+        yield* new AuthError({ message: "Auth writes are blocked during Astra safe start" })
+      }
       const norm = key.replace(/\/+$/, "")
       const data = yield* all()
       delete data[key]

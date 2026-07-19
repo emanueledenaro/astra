@@ -2,8 +2,25 @@ import { describe, expect } from "bun:test"
 import { Effect } from "effect"
 import path from "path"
 import { cliIt } from "../lib/cli-process"
+import { withAstraSafeStart } from "../lib/astra-safe-start"
 
 describe("opencode mcp add (non-interactive subprocess)", () => {
+  cliIt.concurrent(
+    "rejects safe-start configuration without creating a file",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const configPath = path.join(home, ".astra-safe-state", "config", "opencode", "opencode.json")
+        const result = yield* withAstraSafeStart(home, (env) =>
+          opencode.spawn(["mcp", "add", "blocked", "--url", "https://example.com/mcp"], { env }),
+        )
+
+        expect(result.exitCode).not.toBe(0)
+        expect(result.stderr).toContain("MCP configuration is disabled during Astra safe start")
+        expect(yield* Effect.promise(() => Bun.file(configPath).exists())).toBe(false)
+      }),
+    60_000,
+  )
+
   cliIt.concurrent(
     "adds a remote server with HTTP headers",
     ({ home, opencode }) =>

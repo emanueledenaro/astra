@@ -9,11 +9,14 @@
   },
   "exports": {
     ".": "./src/index.ts",
+    "./app-state": "./src/app-state.ts",
     "./session": "./src/workspace-gate.ts",
     "./terminal": "./src/terminal.ts"
   },
   "scripts": {
+    "check:provider-catalog": "bun run ./script/generate-provider-catalog.ts --check",
     "demo": "bun run ./src/index.ts open",
+    "generate:provider-catalog": "bun run ./script/generate-provider-catalog.ts",
     "start": "bun run ./src/index.ts",
     "test": "bun test",
     "typecheck": "tsgo --noEmit",
@@ -21,7 +24,10 @@
   },
   "dependencies": {
     "@astra/domain": "workspace:*",
-    "@astra/runtime": "workspace:*"
+    "@astra/git": "workspace:*",
+    "@astra/runtime": "workspace:*",
+    "@opencode-ai/tui": "workspace:*",
+    "opencode": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

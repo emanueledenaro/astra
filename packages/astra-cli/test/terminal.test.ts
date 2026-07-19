@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { renderHeader, sanitizeTerminalText } from "../src/terminal"
+import { renderHeader, renderWorkspaceReport, sanitizeTerminalText } from "../src/terminal"
 
 describe("Astra terminal rendering", () => {
   test("neutralizes terminal controls and bidi overrides from workspace text", () => {
@@ -31,5 +31,26 @@ describe("Astra terminal rendering", () => {
     expect(renderHeader().join("\n")).toContain("ASTRA // WORKSPACE GATE")
     expect(renderHeader().join("\n")).toContain("LYNX STATUS: WATCHING")
     expect(renderHeader().join("\n")).toContain("NO AUTO EXECUTION")
+  })
+
+  test("labels bounded static evidence and the Git metadata form without overclaiming", () => {
+    const output = renderWorkspaceReport({
+      root: "/workspace",
+      identity: { device: "1", inode: "2" },
+      securityDigest: "sha256:static",
+      completeness: "complete",
+      state: "awaiting_decision",
+      surfaces: [{ kind: "git_metadata", path: ".git", entryKind: "symlink" }],
+      blockers: [],
+      scannedEntries: 1,
+      scannedBytes: 0,
+      limits: { maxEntries: 128, maxFileBytes: 65_536, maxTotalBytes: 262_144, maxDurationMs: 1_000 },
+    }).join("\n")
+
+    expect(output).toContain("STATIC PREFLIGHT DIGEST  sha256:static")
+    expect(output).toContain("bounded root metadata, selected regular files, and ancestor .git markers only")
+    expect(output).toContain("GIT META   symlink • .git")
+    expect(output).toContain("GIT BASELINE NOT INSPECTED")
+    expect(output).not.toContain("SNAPSHOT")
   })
 })

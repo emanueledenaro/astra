@@ -19,11 +19,17 @@ const TableSymbol = (
 ).Symbol
 
 export function getTableColumnsRuntime(table: SQLiteTable) {
-  return (table as unknown as Record<symbol, Record<string, Column>>)[TableSymbol.Columns]
+  const columns = (table as unknown as Record<symbol, Record<string, Column>>)[TableSymbol.Columns]
+  if (!columns) throw new Error("SQLite table columns are unavailable")
+  return columns
 }
 
 export function getViewSelectedFieldsRuntime(view: SQLiteViewBase) {
-  return (view as unknown as Record<symbol, { selectedFields: Record<string, unknown>; name: string }>)[ViewBaseConfig]
+  const config = (view as unknown as Record<symbol, { selectedFields: Record<string, unknown>; name: string }>)[
+    ViewBaseConfig
+  ]
+  if (!config) throw new Error("SQLite view configuration is unavailable")
+  return config
 }
 
 export function jitCompatCheck(isEnabled: boolean | undefined) {

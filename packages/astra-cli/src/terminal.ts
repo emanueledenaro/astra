@@ -1,4 +1,5 @@
 import type { ControlledWritePlan } from "@astra/runtime/controlled-write-plan"
+import type { ExecutionCapability } from "@astra/domain/execution-capability"
 import type { WorkspaceTrustReport, WorkspaceTrustState } from "@astra/domain/workspace-trust"
 import type { OperationSemanticKey } from "@astra/domain/operation"
 
@@ -25,15 +26,23 @@ export function renderHeader() {
 }
 
 export function renderWorkspaceReport(report: WorkspaceTrustReport) {
+  const gitMetadata = report.surfaces.find((surface) => surface.kind === "git_metadata")
   const lines = [
     `WORKSPACE  ${sanitizeTerminalText(report.root)}`,
     `STATE      ${report.state === "awaiting_decision" ? "AWAITING_DECISION" : "PREFLIGHT_BLOCKED"}`,
-    `SNAPSHOT   ${report.securityDigest ?? "UNAVAILABLE"}`,
+    `STATIC PREFLIGHT DIGEST  ${report.securityDigest ?? "UNAVAILABLE"}`,
     `IDENTITY   ${report.identity ? `${report.identity.device}:${report.identity.inode}` : "UNAVAILABLE"}`,
     `BOUNDS     ${report.scannedEntries}/${report.limits.maxEntries} entries • ${report.scannedBytes}/${report.limits.maxTotalBytes} bytes`,
+    "SCOPE      bounded root metadata, selected regular files, and ancestor .git markers only",
+    gitMetadata
+      ? `GIT META   ${gitMetadata.entryKind} • ${sanitizeTerminalText(gitMetadata.path)}`
+      : "GIT META   none in bounded static inspection",
+    gitMetadata
+      ? "GIT BASELINE NOT INSPECTED • activation blocked"
+      : "GIT BASELINE not required for this non-Git workspace",
   ]
 
-  if (report.surfaces.length === 0) lines.push("SURFACES   none detected in bounded root inventory")
+  if (report.surfaces.length === 0) lines.push("SURFACES   none detected in bounded static inspection")
   for (const surface of report.surfaces) {
     lines.push(`SURFACE    ${sanitizeTerminalText(surface.kind)} • ${sanitizeTerminalText(surface.path)}`)
   }
@@ -49,12 +58,18 @@ export function renderOperationState(operationId: string, semantic: OperationSem
   return `OPERATION ${sanitizeTerminalText(operationId)}  ${semantic}`
 }
 
-export function renderControlledWritePreview(plan: ControlledWritePlan) {
+export function renderControlledWritePreview(plan: ControlledWritePlan, capability: ExecutionCapability) {
+  const hostExecution = capability.manifest.isolation.backend === "host"
   return [
-    "HOST EXECUTION — NO SANDBOX",
+    `CAPABILITY PROPOSED • ${hostExecution ? "HOST PROCESS" : "DARWIN SEATBELT"} • FALLBACK DENY`,
+    hostExecution ? "HOST EXECUTION — NO SANDBOX" : "SANDBOXED EXECUTION — DARWIN SEATBELT",
     `EFFECT     create one new file: ${sanitizeTerminalText(plan.relativePath)}`,
     `BYTES      ${Buffer.byteLength(plan.content)}`,
     `DIGEST     ${plan.contentDigest}`,
-    "GUARD      create-only; existing file is never overwritten",
+    `AUTHORITY  ${capability.capabilityDigest}`,
+    hostExecution ? "NETWORK    host access is not isolated" : "NETWORK    denied by sandbox profile",
+    hostExecution
+      ? "GUARD      application-enforced create-only; host OS does not sandbox the process"
+      : "GUARD      sandbox-enforced create-only; existing file is never overwritten",
   ]
 }

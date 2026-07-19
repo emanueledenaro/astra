@@ -1,4 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Flag } from "@opencode-ai/core/flag/flag"
 import type { AuthOAuthResult, Hooks } from "@opencode-ai/plugin"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Auth } from "@/auth"
@@ -113,6 +114,9 @@ const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> = Layer.
     const plugin = yield* Plugin.Service
     const state = yield* InstanceState.make<State>(
       Effect.fn("ProviderAuth.state")(function* () {
+        if (Flag.ASTRA_SAFE_START) {
+          return { hooks: {}, pending: new Map<ProviderV2.ID, AuthOAuthResult>() }
+        }
         const plugins = yield* plugin.list()
         return {
           hooks: Record.fromEntries(
@@ -163,6 +167,7 @@ const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> = Layer.
     const authorize = Effect.fn("ProviderAuth.authorize")(function* (
       input: { providerID: ProviderV2.ID } & AuthorizeInput,
     ) {
+      if (Flag.ASTRA_SAFE_START) return yield* new OauthMissing({ providerID: input.providerID })
       const { hooks, pending } = yield* InstanceState.get(state)
       const method = hooks[input.providerID].methods[input.method]
       if (method.type !== "oauth") return
@@ -188,6 +193,7 @@ const layer: Layer.Layer<Service, never, Auth.Service | Plugin.Service> = Layer.
     const callback = Effect.fn("ProviderAuth.callback")(function* (
       input: { providerID: ProviderV2.ID } & CallbackInput,
     ) {
+      if (Flag.ASTRA_SAFE_START) return yield* new OauthMissing({ providerID: input.providerID })
       const pending = (yield* InstanceState.get(state)).pending
       const match = pending.get(input.providerID)
       if (!match) return yield* new OauthMissing({ providerID: input.providerID })

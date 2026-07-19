@@ -56,6 +56,22 @@ afterEach(() => {
   mock.restore()
 })
 
+function withSafeStart<A, E, R>(effect: Effect.Effect<A, E, R>) {
+  return Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const previous = process.env.ASTRA_SAFE_START
+      process.env.ASTRA_SAFE_START = "1"
+      return previous
+    }),
+    () => effect,
+    (previous) =>
+      Effect.sync(() => {
+        if (previous === undefined) delete process.env.ASTRA_SAFE_START
+        else process.env.ASTRA_SAFE_START = previous
+      }),
+  )
+}
+
 function createModel(opts: {
   context: number
   output: number
@@ -364,6 +380,39 @@ function autocontinue(enabled: boolean) {
     init: () => Effect.void,
   })
 }
+
+describe("session.compaction safe start", () => {
+  it.instance("blocks create, prune, and process at the service boundary without mutating the session", () =>
+    Effect.gen(function* () {
+      const compact = yield* SessionCompaction.Service
+      const sessions = yield* SessionNs.Service
+      const session = yield* sessions.create({})
+      const parent = yield* createUserMessage(session.id, "preserve me")
+      const before = yield* sessions.messages({ sessionID: session.id })
+
+      const exits = yield* withSafeStart(
+        Effect.all(
+          [
+            Effect.exit(compact.create({ sessionID: session.id, agent: "build", model: ref, auto: true })),
+            Effect.exit(compact.prune({ sessionID: session.id })),
+            Effect.exit(
+              compact.process({
+                parentID: parent.id,
+                messages: before,
+                sessionID: session.id,
+                auto: true,
+              }),
+            ),
+          ],
+          { concurrency: 1 },
+        ),
+      )
+
+      expect(exits.every((exit) => exit._tag === "Failure")).toBe(true)
+      expect(yield* sessions.messages({ sessionID: session.id })).toEqual(before)
+    }),
+  )
+})
 
 describe("session.compaction.isOverflow", () => {
   it.live(

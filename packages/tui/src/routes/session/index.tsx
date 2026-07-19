@@ -82,6 +82,9 @@ import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
 import { LocationProvider } from "../../context/location"
+import { Lynx } from "../../component/lynx"
+import { AstraWorkspaceStatus } from "../../component/astra-workspace-status"
+import { inspectAstraSessionAuthority } from "../../astra/session-authority"
 
 addDefaultParsers(parsers.parsers)
 
@@ -193,6 +196,9 @@ export function Session() {
   const kv = useKV()
   const { theme } = useTheme()
   const promptRef = usePromptRef()
+  const astraAuthorityState = inspectAstraSessionAuthority()
+  const astraAuthority = astraAuthorityState.status === "valid" ? astraAuthorityState.authority : undefined
+  const astraEffectsBlocked = astraAuthority?.effectPolicy === "deny"
   const session = createMemo(() => sync.session.get(route.sessionID))
   const location = createMemo(() => {
     const current = session()
@@ -233,7 +239,7 @@ export function Session() {
     return children().flatMap((x) => sync.data.question[x.id] ?? [])
   })
   const visible = createMemo(() => !session()?.parentID && permissions().length === 0 && questions().length === 0)
-  const disabled = createMemo(() => permissions().length > 0 || questions().length > 0)
+  const disabled = createMemo(() => astraEffectsBlocked || permissions().length > 0 || questions().length > 0)
 
   const pending = createMemo(() => {
     const completed = messages().findLast((x) => x.role === "assistant" && x.time.completed)?.id
@@ -1280,6 +1286,17 @@ export function Session() {
                 </For>
               </scrollbox>
               <box flexShrink={0}>
+                <AstraWorkspaceStatus authority={astraAuthority} />
+                <Show when={permissions().length > 0 || questions().length > 0}>
+                  <box paddingLeft={1} paddingBottom={1}>
+                    <Lynx
+                      state="awaiting-decision"
+                      size="compact"
+                      animate={false}
+                      showVisual={dimensions().width >= 52}
+                    />
+                  </box>
+                </Show>
                 <Show when={permissions().length > 0}>
                   <PermissionPrompt
                     request={permissions()[0]}
@@ -1309,6 +1326,11 @@ export function Session() {
                       visible={visible()}
                       ref={bind}
                       disabled={disabled()}
+                      hint={
+                        astraEffectsBlocked ? (
+                          <text fg={theme.warning}>Provider and host effects are locked in this preview</text>
+                        ) : undefined
+                      }
                       onSubmit={() => {
                         toBottom()
                       }}

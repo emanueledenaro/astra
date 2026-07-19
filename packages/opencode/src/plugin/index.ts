@@ -31,6 +31,7 @@ import type { WorkspaceAdapter } from "@/control-plane/types"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 type State = {
   hooks: Hooks[]
@@ -130,6 +131,7 @@ const layer = Layer.effect(
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
         const hooks: Hooks[] = []
+        if (Flag.ASTRA_SAFE_START) return { hooks }
         const bridge = yield* EffectBridge.make()
 
         function publishPluginError(message: string) {

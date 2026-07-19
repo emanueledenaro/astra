@@ -244,7 +244,7 @@ export class SQLiteEffectUpdateBase<
     private effectDialect: SQLiteDialect,
     withList?: Subquery[],
   ) {
-    this.config = { set, table, withList, joins: [] }
+    this.config = { set, table, joins: [], ...(withList === undefined ? {} : { withList }) }
   }
 
   from<TFrom extends SQLiteTable | Subquery | SQLiteViewBase | SQL>(
