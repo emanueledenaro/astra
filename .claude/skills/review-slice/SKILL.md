@@ -1,5 +1,6 @@
 ---
-description: Review the current diff as an Astra vertical slice (rules + invariants + tests)
+name: review-slice
+description: Review the current diff as an Astra vertical slice (rules + invariants + tests). Use before committing a slice or when asked for a review.
 ---
 
 Review the current working diff (or the branch diff vs `astra` if the tree is clean)

@@ -7,8 +7,11 @@ what changed, what was independently verified, what remains uncertain, and how t
 
 **`AGENTS.md` is the authoritative engineering rulebook** (Astra rules, opencode style
 guide, commit/branch conventions, SDK regeneration). Read it before writing code.
-This file adds Claude-specific navigation; `.claude/rules/` splits the load-bearing
-rules by topic; `.claude/context/` holds durable project knowledge.
+`.claude/rules/` (auto-loaded) splits the load-bearing rules by topic. Durable project
+knowledge is imported below; the runbook is read on demand.
+
+@.claude/context/repo-map.md
+@.claude/context/domain-glossary.md
 
 ## Layout
 
@@ -45,5 +48,6 @@ rules by topic; `.claude/context/` holds durable project knowledge.
 
 ## Current state
 
-See `.claude/context/repo-map.md` for branch topology and where the real work lives,
-and `AUDIT.md` for the latest full project audit.
+Branch topology and project knowledge are imported above (repo-map, glossary).
+Operational procedures: `.claude/context/runbook.md` (demo, native helper build,
+ledger inspection, upstream sync). Latest full project audit: `AUDIT.md`.

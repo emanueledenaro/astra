@@ -1,5 +1,6 @@
 ---
-description: Run the full Astra verification gate (tests + typecheck per package + demo matrix)
+name: verify-astra
+description: Run the full Astra verification gate (tests + typecheck per package + demo matrix). Use after changing any astra-* package or before pushing.
 ---
 
 Run the complete Astra verification gate and report a single pass/fail table:
