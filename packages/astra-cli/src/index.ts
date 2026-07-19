@@ -105,8 +105,7 @@ if (!parsed.ok) {
   process.exitCode = parsed.help ? 0 : 1
 } else {
   if (parsed.arguments.experience === "no-workspace") {
-    printUsage()
-    process.exitCode = 0
+    process.exitCode = await runNoWorkspaceMode()
   } else if (parsed.arguments.experience === "system") {
     process.exitCode = await runSystemMode()
   } else if (parsed.arguments.experience === "product") {
@@ -167,6 +166,18 @@ async function runSystemMode() {
   const loaded: unknown = await import(moduleName)
   if (!isSystemModeModule(loaded)) throw new Error("The Astra System Mode interface is unavailable")
   await loaded.runAstraSystemMode()
+  return 0
+}
+
+async function runNoWorkspaceMode() {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    printUsage()
+    return 0
+  }
+  const moduleName = ["@opencode-ai/tui", "astra/no-workspace-mode"].join("/")
+  const loaded: unknown = await import(moduleName)
+  if (!isNoWorkspaceModeModule(loaded)) throw new Error("The Astra No Workspace interface is unavailable")
+  await loaded.runAstraNoWorkspaceMode()
   return 0
 }
 
@@ -356,6 +367,15 @@ function isSystemModeModule(value: unknown): value is Readonly<{ runAstraSystemM
     value !== null &&
     "runAstraSystemMode" in value &&
     typeof value.runAstraSystemMode === "function"
+  )
+}
+
+function isNoWorkspaceModeModule(value: unknown): value is Readonly<{ runAstraNoWorkspaceMode: () => Promise<void> }> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "runAstraNoWorkspaceMode" in value &&
+    typeof value.runAstraNoWorkspaceMode === "function"
   )
 }
 
