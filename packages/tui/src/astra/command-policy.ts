@@ -32,6 +32,7 @@ const approvedCommands = new Set([
   "astra.operations.open",
   "astra.operations.previous",
   "astra.operations.refresh",
+  "astra.provider.connect",
   "astra.skill.close",
   "astra.skill.inventory",
   "astra.skill.open",

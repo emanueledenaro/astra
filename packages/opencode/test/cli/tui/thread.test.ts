@@ -4,7 +4,7 @@ import fs from "fs/promises"
 import path from "path"
 import yargs from "yargs"
 import { tmpdir } from "../../fixture/fixture"
-import { TuiThreadCommand, resolveThreadDirectory } from "../../../src/cli/cmd/tui"
+import { TuiThreadCommand, resolveThreadDirectory, resolveTuiExitCode } from "../../../src/cli/cmd/tui"
 import { cliIt } from "../../lib/cli-process"
 
 describe("tui thread", () => {
@@ -20,6 +20,15 @@ describe("tui thread", () => {
     const source = await Bun.file(new URL("../../../src/cli/cmd/tui.ts", import.meta.url)).text()
 
     expect(source).toMatch(/new Worker\(file, \{\s*env: Object\.fromEntries\(\s*Object\.entries\(process\.env\)/)
+  })
+
+  test("preserves a private TUI handoff code only during Astra Safe Start", () => {
+    expect(resolveTuiExitCode(true, 86)).toBe(86)
+    expect(resolveTuiExitCode(true, "86")).toBe(86)
+    expect(resolveTuiExitCode(true, undefined)).toBe(0)
+    expect(resolveTuiExitCode(true, null)).toBe(0)
+    expect(resolveTuiExitCode(true, 1)).toBe(0)
+    expect(resolveTuiExitCode(false, 86)).toBe(0)
   })
 
   async function check(project?: string) {

@@ -93,9 +93,9 @@ test("explains safe credential setup without rendering a secret", async () => {
     await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
     await prepareThroughDialog(app)
     const blocked = await app.render.waitForFrame((frame) => frame.includes("credential unavailable"))
-    expect(blocked).toContain("Add an Anthropic API key with the existing OpenCode authentication flow.")
-    expect(blocked).toContain("Restart Astra and open /chat again.")
-    expect(blocked).toContain("Never displayed or stored by this chat screen.")
+    expect(blocked).toContain("Run /connect to add the Anthropic API key through Astra.")
+    expect(blocked).toContain("Astra reconnects this workspace automatically.")
+    expect(blocked).toContain("Never exposed to chat, the AI, plugins, or MCP.")
     expect(blocked).not.toContain(secret)
   } finally {
     app.render.renderer.destroy()

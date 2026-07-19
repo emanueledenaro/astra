@@ -1,6 +1,6 @@
 # Astra Delivery Status
 
-Updated: 2026-07-19 (local macOS readiness checkpoint; not yet pushed or independently reviewed)
+Updated: 2026-07-19 (local Astra cockpit checkpoint; not pushed)
 
 ## 2026-07-19 delta
 
@@ -19,14 +19,26 @@ Updated: 2026-07-19 (local macOS readiness checkpoint; not yet pushed or indepen
 - macOS operation storage now uses bounded SQLite busy handling and avoids unsafe
   cleanup races; consecutive Git stage, unstage, stage, and commit operations share an
   exact verified repository-authority chain in one activated session.
-- Full local macOS package verification and the developer demo matrix are green. A real
-  PTY smoke verified Git stage, durable rejection without effect, an exact local commit,
-  and the read-only Operations ledger. Chat stopped fail-closed because this Mac has no
-  Anthropic API credential configured.
+- The Astra package verification and developer demo matrix are green. A real PTY smoke
+  verified Git stage, durable rejection without effect, an exact local commit, and the
+  read-only Operations ledger. Chat stopped fail-closed because this Mac has no
+  Anthropic API credential configured. The inherited OpenCode full suite currently has
+  one PTY timing failure, recorded below without masking it.
 - A governed host shell is now connected end to end. It previews the exact script,
   `/bin/zsh -f -c`, cwd, fixed environment, declared resources, and unrestricted host
   filesystem/network boundary before a local A/D decision. Output is bounded and
   recorded only as observed, never verified.
+- The workspace TUI now uses the distinct Astra cockpit: conversation stays on the
+  left while the right Control Rail keeps workspace mode, operation, provider, Git,
+  permission boundary, and current parent-agent state visible. Compact terminals keep
+  the critical state without clipping. Delegated-agent telemetry is not connected yet.
+- `/connect` now performs an explicit trusted-parent handoff for Anthropic. Astra shows
+  the global credential-store write and secret boundary before consent, uses hidden
+  input outside the child TUI, and reopens the same workspace session. Cancellation
+  produces no credential write, while the stored path requires exact readback before
+  reporting success. The UI truthfully marks this as a setup handoff without a durable
+  Operation receipt. Successful storage and live provider chat remain unobserved on
+  this Mac.
 
 ## Objective
 
@@ -43,7 +55,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 ## Repository
 
 - Path: `/Users/emanueledenaro/Documents/progetti/Astra`
-- Branch: `macos-readiness` (local only; based on `origin/astra`)
+- Branch: `astra-cockpit` (local only; based on the local macOS readiness checkpoint)
 - OpenCode baseline: `453b61e27b2f6c2752a60dd7d8412bdcf4e0aa3d`
 - History: full clone; MIT license, attribution, and provider source registry preserved
 - Remotes: `origin` is the Astra fork; `upstream` fetches OpenCode and has push disabled
@@ -63,6 +75,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 | `A`                 | Activates one session after a current baseline; only governed actions exist |
 | `Q`                 | Exits without storing trust or launching the inherited workspace runtime    |
 | `Ctrl+P`            | Opens the governed action surface; the inherited prompt remains disabled    |
+| `/connect`          | Previews and hands Anthropic credential setup to the trusted parent process |
 
 ## Implemented and verified
 
@@ -110,6 +123,9 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 - `astra system` dynamically loads a dedicated TUI only after a TTY check; it does not open a workspace or create Astra state and exits with `Q`, `Esc`, or `Ctrl-C`.
 - The public launcher disables cwd-controlled Bun config, preload, `.env`, and auto-install before Astra starts. System Mode stays in that inert process and does not bootstrap workspace services.
 - The real Workspace Gate and safe OpenCode-derived TUI render on macOS.
+- The Astra cockpit places conversation on the left and a live Control Rail on the
+  right for AI activity, provider, operation, workspace, Git, boundaries, and the
+  current parent agent. A live delegated-agent queue remains future work.
 - Full and compact terminal layouts have tests.
 - Lynx has deterministic terminal frames and an illustrated two-frame raster concept pack under `assets/lynx`.
 - The illustrated pack is not yet wired into a terminal animation; the current TUI uses the deterministic terminal Lynx.
@@ -124,8 +140,17 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 - Executor: 8 tests, 24 expectations; typecheck passes.
 - Git: 96 tests, 361 expectations; typecheck passes.
 - CLI: 189 tests, 979 expectations; typecheck passes.
-- TUI: 303 pass, 1 platform skip, 987 expectations; typecheck passes. Existing KV fixture warnings are noisy but non-failing.
-- Current connected-product gate: 981 passing tests, 1 skipped test, and 6,226 expectations across the packages above.
+- TUI: 308 pass, 1 platform skip, 1,021 expectations; typecheck passes. Existing KV fixture warnings are noisy but non-failing.
+- The earlier connected-product gate remains green; the current cockpit and `/connect`
+  increment adds five passing TUI tests plus focused domain, CLI, and OpenCode tests.
+- OpenCode `/connect` adapter and TUI-exit focused tests: 14 pass, 32 expectations.
+- Inherited OpenCode full suite: 3,211 pass, 22 skip, 1 todo, 1 fail, and 1
+  between-test error. `test/server/httpapi-v2-pty.test.ts` timed out after 5,000 ms;
+  the expected `{ status: "exited", exitCode: 4 }` still reported `status: "running"`.
+- OpenCode typecheck reaches four pre-existing cross-package `TS2504` errors in
+  `astra-runtime` because its `ReadableStream` type lacks `Symbol.asyncIterator` in
+  controlled write, extension inventory, workspace search, and host command. The
+  `/connect`-specific type error found during review was corrected.
 - The preserved sandbox prototype has 12 passing tests and 59 expectations, but is excluded from the working-product gate until its open timeout and cleanup findings are resolved during hardening.
 - `git diff --check` passes; changed files pass Prettier after formatting.
 - `verify:demo` reports `DEMO MATRIX PASS`: hostile read-only open produced zero effects, denial was durable with no dispatch, one approved create-only host effect reached independent exact verification, the network canary received zero requests during that fixture, and no trust was persisted.
@@ -134,23 +159,29 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 - The Operations view loaded the current commit and stage records from the durable ledger and exposed their event sequence, receipt, verifier evidence, and exact criterion without running an action.
 - Real governed-shell PTY fixture: rejecting `touch denied-marker` left the workspace unchanged and produced a durable `DENIED` operation with no dispatch. Approving `printf 'astra-shell-smoke\n'` crossed the parent Operation Kernel once, displayed stdout and exit `0`, and produced a durable `COMPLETED` operation with no verification fact. The TUI kept `HOST EXECUTION — NO SANDBOX`, `HOST FILESYSTEM UNRESTRICTED`, `HOST NETWORK UNRESTRICTED`, and `NOT VERIFIED` visible.
 - Governed chat accepted the exact local prompt but stopped at `BLOCKED • NO EFFECT CLAIMED` with `credential unavailable` before preview, credential handoff, or network dispatch. Multi-turn live chat therefore remains unobserved on this Mac.
+- Real `/connect` PTY smoke showed the write/network/secret preview, transferred control
+  to the trusted parent, used hidden input, and returned to the same active cockpit
+  after cancellation. No credential was added or changed in that smoke.
+- Local technical review found and closed an ambiguous provider-storage failure path:
+  Astra now reports uncertain credential state without a false success and returns to
+  the cockpit. No independent review has yet been run for this local increment.
 - Real large-repository diagnosis proved that the earlier false `STALE` result was a timeout. With realistic bounded limits, two captures produced the same digest.
 - Independent security review confirmed closure of the three safe-opening P1 findings: inherited project/Git startup, child authority replacement, and nested-symlink read escape.
 - The latest independent review also confirmed closure of workspace Bun startup execution and generic safe-start Git process bypasses; no P0/P1 remains in the reviewed host checkpoint.
 
 ## Remaining release-candidate work
 
-| Area                        | State and next dependency                                                                                                                                                  |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| General effect bridge       | Partial: chat, host shell, controlled write, git stage/unstage/commit, and search are governed; general verified file changes are next                                     |
-| macOS sandbox               | Deferred to hardening; prototype preserved and backend boundary remains injectable                                                                                         |
-| Git Control Plane mutations | Stage/unstage/commit shipped (commit is macOS-only, packed refs blocked at prepare); branch, fetch, merge/rebase, recovery actions missing                                 |
-| Providers and credentials   | Governed Anthropic chat is wired but lacks a configured credential on this Mac; provider selection, persistence, streaming, and non-Anthropic providers are missing        |
-| Plugins, skills, and MCP    | Inventory, quarantine, skill activation, and observed remote MCP activation shipped; MCP tool invocation, plugin containment, and capability grants for extensions missing |
-| Complete TUI/CLI            | Operation/evidence/recovery views shipped (dispatched operations only — ledger list API pending); agent queue and richer provider/extension views missing                  |
-| Upstream compatibility      | Intake workflow, drift gates, parity, and rehearsal missing                                                                                                                |
-| Hardening                   | Full E2E, hostile fixtures, scans, SBOM, performance, accessibility, Linux/Windows matrix missing                                                                          |
-| Local release candidate     | Package, version, changelog, checksums, provenance, recovery manual, and final demo missing                                                                                |
+| Area                        | State and next dependency                                                                                                                                                                                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| General effect bridge       | Partial: chat, host shell, controlled write, git stage/unstage/commit, and search are governed; general verified file changes are next                                                                                                                             |
+| macOS sandbox               | Deferred to hardening; prototype preserved and backend boundary remains injectable                                                                                                                                                                                 |
+| Git Control Plane mutations | Stage/unstage/commit shipped (commit is macOS-only, packed refs blocked at prepare); branch, fetch, merge/rebase, recovery actions missing                                                                                                                         |
+| Providers and credentials   | Governed Anthropic chat and explicit parent-owned `/connect` are wired; `/connect` has exact readback but no durable Operation receipt yet; successful storage, live chat, provider selection, streaming, and non-Anthropic providers remain unverified or missing |
+| Plugins, skills, and MCP    | Inventory, quarantine, skill activation, and observed remote MCP activation shipped; MCP tool invocation, plugin containment, and capability grants for extensions missing                                                                                         |
+| Complete TUI/CLI            | Operation/evidence/recovery views shipped (dispatched operations only — ledger list API pending); agent queue and richer provider/extension views missing                                                                                                          |
+| Upstream compatibility      | Intake workflow, drift gates, parity, and rehearsal missing                                                                                                                                                                                                        |
+| Hardening                   | Full E2E, hostile fixtures, scans, SBOM, performance, accessibility, Linux/Windows matrix missing                                                                                                                                                                  |
+| Local release candidate     | Package, version, changelog, checksums, provenance, recovery manual, and final demo missing                                                                                                                                                                        |
 
 ## Safety invariants
 
@@ -161,14 +192,16 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Blockers
 
-- Live chat verification requires an Anthropic API credential configured through the existing OpenCode authentication flow; no credential was read, added, or modified during this checkpoint.
+- Live chat verification requires completing Astra `/connect` with an Anthropic API
+  credential. No credential was read, added, or modified during this checkpoint.
 - Real Linux and Windows verification will require those environments; interfaces and reproducible tests must be prepared locally first.
 - Public release actions remain intentionally blocked pending explicit product-owner authorization.
 
 ## Next executable work
 
 1. Generalize chat from the current Anthropic-only path to the preserved OpenCode provider registry and authentication sources without exposing credentials to the child TUI.
-2. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
-3. Add MCP tool invocation and extension capability grants while keeping plugin code quarantined by default.
-4. Complete branch/fetch/merge recovery flows, keeping push and destructive Git actions behind separate authorization.
-5. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.
+2. Move credential-store setup behind a durable Operation receipt while preserving the trusted-parent secret boundary.
+3. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
+4. Add MCP tool invocation and extension capability grants while keeping plugin code quarantined by default.
+5. Complete branch/fetch/merge recovery flows, keeping push and destructive Git actions behind separate authorization.
+6. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.

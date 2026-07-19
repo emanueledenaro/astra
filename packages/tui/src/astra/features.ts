@@ -27,6 +27,7 @@ import { registerAstraOperations } from "../feature-plugins/system/astra-operati
 import { createAstraGitClientAuthority } from "./git-client-authority"
 import { createAstraHostCommandClient, type AstraHostCommandClient } from "./host-command-client"
 import { registerAstraHostCommand } from "../feature-plugins/system/astra-host-command"
+import { registerAstraProviderConnect } from "../feature-plugins/system/astra-provider-connect"
 
 /** Registers built-in Astra surfaces from the authority validated at process admission. */
 export function registerAstraAppFeatures(
@@ -46,6 +47,7 @@ export function registerAstraAppFeatures(
   hostCommandClient?: AstraHostCommandClient,
 ) {
   const gitAuthority = createAstraGitClientAuthority(authority.repositoryBaseline?.snapshotDigest)
+  registerAstraProviderConnect(api, authority)
   registerAstraChat(api, authority, providerClient)
   registerAstraGitControlPlane(
     api,

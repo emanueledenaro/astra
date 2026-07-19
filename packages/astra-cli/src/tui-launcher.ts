@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
+import { astraProviderConnectExitCode } from "@astra/domain/tui-handoff"
 import type { GitRepositoryBaselineRevalidationResult } from "@astra/domain/git-repository-baseline"
 import type { WorkspaceRevalidation } from "@astra/runtime/preflight"
 import { startAstraTuiControlServer, type AstraTuiControlServer } from "./tui-control-server"
@@ -30,6 +31,7 @@ import {
 } from "@astra/runtime/extension-inventory-operation"
 import { createAstraMcpActivationControl } from "./mcp-activation-control"
 import { createAstraMcpActivationAdapter } from "./mcp-activation-adapter"
+import { connectParentAnthropicCredential } from "./provider-connect"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -222,27 +224,43 @@ export async function launchAstraTui(session: OpenedWorkspace) {
       extensionInventoryControl,
       mcpActivationControl,
     })
-    authReader = await loadParentAnthropicAuthReader()
-    const credentialBroker = createParentProviderCredentialBroker({ auth: authReader })
-    provider = await startAstraProviderControlServer({
-      directory: authority.directory,
-      sessionID: authority.authority.sessionID,
-      control: createAstraProviderControl(
-        session,
-        authority.authority.sessionID,
-        { ledgerFilename: operationLedgerPath(), spoolFilename: receiptSpoolPath() },
-        makeAstraProviderSessionDependencies(credentialBroker, skillActivationControl),
-      ),
-    })
-    const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control, provider)
-    child = Bun.spawn([...spec.command], {
-      cwd: spec.cwd,
-      env: spec.env,
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    })
-    return await child.exited
+    while (true) {
+      authReader = await loadParentAnthropicAuthReader()
+      const credentialBroker = createParentProviderCredentialBroker({ auth: authReader })
+      provider = await startAstraProviderControlServer({
+        directory: authority.directory,
+        sessionID: authority.authority.sessionID,
+        control: createAstraProviderControl(
+          session,
+          authority.authority.sessionID,
+          { ledgerFilename: operationLedgerPath(), spoolFilename: receiptSpoolPath() },
+          makeAstraProviderSessionDependencies(credentialBroker, skillActivationControl),
+        ),
+      })
+      const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control, provider)
+      child = Bun.spawn([...spec.command], {
+        cwd: spec.cwd,
+        env: spec.env,
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      })
+      const exitCode = await child.exited
+      child = undefined
+      if (exitCode !== astraProviderConnectExitCode) return exitCode
+
+      await provider.close()
+      provider = undefined
+      await authReader.close()
+      authReader = undefined
+      try {
+        await connectParentAnthropicCredential()
+      } catch {
+        process.stderr.write(
+          "Provider connection did not complete cleanly; credential state may be uncertain. Returning to Astra.\n",
+        )
+      }
+    }
   } finally {
     process.off("SIGHUP", onHangup)
     process.off("SIGTERM", onTerminate)

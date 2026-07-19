@@ -69,6 +69,12 @@ export function resolveThreadDirectory(project?: string, envPWD = process.env.PW
   return Filesystem.resolve(cwd)
 }
 
+/** Preserves only Astra's private parent handoff code without changing normal OpenCode exits. */
+export function resolveTuiExitCode(astraSafeStart: boolean, requestedCode: string | number | null | undefined) {
+  if (!astraSafeStart) return 0
+  return requestedCode === 86 || requestedCode === "86" ? 86 : 0
+}
+
 export const TuiThreadCommand = cmd({
   command: "$0 [project]",
   describe: "start opencode tui",
@@ -303,7 +309,7 @@ export const TuiThreadCommand = cmd({
         unguard?.()
       } catch {}
     }
-    process.exit(0)
+    process.exit(resolveTuiExitCode(process.env.ASTRA_SAFE_START === "1", process.exitCode))
   },
 })
 // scratch

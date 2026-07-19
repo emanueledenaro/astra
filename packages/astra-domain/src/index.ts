@@ -38,6 +38,7 @@ export {
 export * as WorkspaceTrust from "./workspace-trust"
 
 export type { AstraSessionAuthority, AstraSessionAuthorityParseResult } from "./session-authority"
+export { astraProviderConnectExitCode } from "./tui-handoff"
 
 export {
   controlledWriteBoundaryLabel,

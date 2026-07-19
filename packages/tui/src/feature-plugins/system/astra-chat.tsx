@@ -139,6 +139,10 @@ export function AstraChatView(props: {
           const userText = raw.trim()
           if (!userText) return
           props.api.ui.dialog.clear()
+          if (userText === "/connect") {
+            void props.api.keymap.dispatchCommand("astra.provider.connect")
+            return
+          }
           const currentGeneration = ++generation
           abort = new AbortController()
           setState({ status: "preparing", catalog: current.catalog, modelID: current.modelID, userText })
@@ -438,13 +442,9 @@ export function AstraChatView(props: {
       </Show>
       <Show when={blockedOf(state()) === "credential_unavailable"}>
         <box marginTop={1} flexDirection="column">
-          <Row
-            label="ACTION"
-            value="Add an Anthropic API key with the existing OpenCode authentication flow."
-            api={props.api}
-          />
-          <Row label="THEN" value="Restart Astra and open /chat again." api={props.api} />
-          <Row label="SECRET" value="Never displayed or stored by this chat screen." api={props.api} />
+          <Row label="ACTION" value="Run /connect to add the Anthropic API key through Astra." api={props.api} />
+          <Row label="THEN" value="Astra reconnects this workspace automatically." api={props.api} />
+          <Row label="SECRET" value="Never exposed to chat, the AI, plugins, or MCP." api={props.api} />
         </box>
       </Show>
       <Show when={blockedOf(state()) === "conversation_limit_reached"}>
