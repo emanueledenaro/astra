@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="Astra Lynx logo mark">
+  <!-- head-only flat mark; legible at 16-24px, transparent background -->
+  <g>
+    <path d="M74 96 L48 22 L122 64 Z" fill="#D99A4E"/>
+    <path d="M52 26 L40 0 L66 20 Z" fill="#1A1A1A"/>
+    <path d="M182 96 L208 22 L134 64 Z" fill="#D99A4E"/>
+    <path d="M204 26 L216 0 L190 20 Z" fill="#1A1A1A"/>
+    <circle cx="128" cy="148" r="86" fill="#D99A4E"/>
+    <path d="M48 160 L14 200 L66 210 Z" fill="#D99A4E"/>
+    <path d="M208 160 L242 200 L190 210 Z" fill="#D99A4E"/>
+    <ellipse cx="95" cy="142" rx="19" ry="15" fill="#2EC4B6"/>
+    <ellipse cx="99" cy="144" rx="7" ry="9" fill="#0F2C29"/>
+    <ellipse cx="161" cy="142" rx="19" ry="15" fill="#2EC4B6"/>
+    <ellipse cx="157" cy="144" rx="7" ry="9" fill="#0F2C29"/>
+    <ellipse cx="128" cy="184" rx="38" ry="26" fill="#F2E3C6"/>
+    <path d="M120 172 Q128 166 136 172 Q132 182 128 182 Q124 182 120 172 Z" fill="#3A2B22"/>
+    <path d="M128 182 Q128 194 116 197" stroke="#3A2B22" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M128 182 Q128 194 140 197" stroke="#3A2B22" stroke-width="3" fill="none" stroke-linecap="round"/>
+  </g>
+</svg>

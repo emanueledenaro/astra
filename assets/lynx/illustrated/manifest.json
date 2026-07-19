@@ -1,0 +1,34 @@
+{
+ "version": "v2",
+ "style": "illustrated flat vector (hand-authored SVG, no raster, no generation)",
+ "viewBox": "0 0 512 512 (logo: 0 0 256 256)",
+ "reducedMotion": "all animations disabled via prefers-reduced-motion",
+ "states": {
+  "lynx-attention-v2.svg": {
+   "role": "attention/blocked \u2014 wide pupils, amber rim pulse, still posture",
+   "sha256": "72988126f0d35a081316858c740bfa8785312b0a2f86b15af5c2157376e758b6",
+   "bytes": 6005
+  },
+  "lynx-logo-mark-v2.svg": {
+   "role": "logo mark \u2014 head only, transparent, favicon-ready",
+   "sha256": "a8aa7a6471893e930896ff12b1748a3ee5f9d0b8f878fb8fb15efc3fffd9b17f",
+   "bytes": 1249
+  },
+  "lynx-thinking-v2.svg": {
+   "role": "thinking \u2014 gaze up, sequential dots, slow head tilt",
+   "sha256": "6498362ff185700d90dfa599ce4fd10c64c82d079ca804612ad252e7773ec5b1",
+   "bytes": 6509
+  },
+  "lynx-verified-v2.svg": {
+   "role": "verified \u2014 soft closed eyes, green check badge, slow nod",
+   "sha256": "eac0ebf5fc343b2135020c2f359576f6b80929ba23be8928772deab962a62ba9",
+   "bytes": 6334
+  },
+  "lynx-working-v2.svg": {
+   "role": "working/typing \u2014 paws alternate 460ms, cyan glow pulse",
+   "sha256": "50d12ca35c2fdd9445eb44851a40fa561015f7dc3d7145f5c71a63686a787baf",
+   "bytes": 6137
+  }
+ },
+ "provenance": "authored in-repo; any AI-raster derivation must be a separate reviewed asset"
+}
