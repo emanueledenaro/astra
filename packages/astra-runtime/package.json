@@ -12,6 +12,7 @@
     "./controlled-write-capability": "./src/controlled-write-capability.ts",
     "./controlled-write": "./src/controlled-write.ts",
     "./operation-ledger": "./src/operation-ledger.ts",
+    "./operation-view": "./src/operation-view.ts",
     "./controlled-write-coordinator": "./src/controlled-write-coordinator.ts",
     "./controlled-write-verifier": "./src/controlled-write-verifier.ts",
     "./host-command": "./src/host-command.ts",

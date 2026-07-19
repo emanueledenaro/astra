@@ -169,13 +169,13 @@ export function AstraGitControlPlaneView(props: {
         {(current) => <Row label="REASON" value={current().reason.replaceAll("_", " ")} api={props.api} />}
       </Show>
       <Show when={compact()}>
-        <Row label="MUTATIONS" value="unavailable" api={props.api} />
-        <Row label="" value="write operations unavailable" api={props.api} />
+        <Row label="MUTATIONS" value="stage · unstage · commit" api={props.api} />
+        <Row label="" value="each via governed operation" api={props.api} />
         <Row label="PUSH" value="UNAVAILABLE" api={props.api} />
         <Row label="" value="separate authorization required" api={props.api} />
       </Show>
       <Show when={!compact()}>
-        <Row label="MUTATIONS" value="unavailable until the Operation Kernel adapter exists" api={props.api} />
+        <Row label="MUTATIONS" value="stage · unstage · commit — governed, approval required" api={props.api} />
         <Row label="PUSH" value="UNAVAILABLE — separate authorization required" api={props.api} />
       </Show>
     </box>

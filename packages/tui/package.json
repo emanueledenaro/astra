@@ -52,6 +52,7 @@
     "./astra/workspace-gate-contract": "./src/astra/workspace-gate-contract.ts",
     "./astra/git-unstage-client": "./src/astra/git-unstage-client.ts",
     "./astra/git-stage-client": "./src/astra/git-stage-client.ts",
+    "./astra/git-commit-client": "./src/astra/git-commit-client.ts",
     "./astra/governed-workspace-search-client": "./src/astra/governed-workspace-search-client.ts",
     "./astra/mcp-activation-client": "./src/astra/mcp-activation-client.ts"
   },
