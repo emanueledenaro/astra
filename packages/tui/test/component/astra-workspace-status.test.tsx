@@ -2,7 +2,15 @@
 import { expect, test } from "bun:test"
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import { testRender } from "@opentui/solid"
-import { AstraWorkspaceStatus, getAstraWorkspaceStatus } from "../../src/component/astra-workspace-status"
+import {
+  ASTRA_GOVERNED_ACTION_HINT,
+  AstraWorkspaceStatus,
+  getAstraWorkspaceStatus,
+} from "../../src/component/astra-workspace-status"
+
+test("directs safe-start users to the governed action surface", () => {
+  expect(ASTRA_GOVERNED_ACTION_HINT).toBe("Inherited prompt disabled • ctrl+p opens governed actions")
+})
 
 test("describes a fail-closed read-only Astra workspace", () => {
   expect(getAstraWorkspaceStatus(authority("read-only"))).toMatchObject({

@@ -83,7 +83,7 @@ import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap 
 import { usePathFormatter } from "../../context/path-format"
 import { LocationProvider } from "../../context/location"
 import { Lynx } from "../../component/lynx"
-import { AstraWorkspaceStatus } from "../../component/astra-workspace-status"
+import { ASTRA_GOVERNED_ACTION_HINT, AstraWorkspaceStatus } from "../../component/astra-workspace-status"
 import { inspectAstraSessionAuthority } from "../../astra/session-authority"
 
 addDefaultParsers(parsers.parsers)
@@ -1327,9 +1327,7 @@ export function Session() {
                       ref={bind}
                       disabled={disabled()}
                       hint={
-                        astraEffectsBlocked ? (
-                          <text fg={theme.warning}>Provider and host effects are locked in this preview</text>
-                        ) : undefined
+                        astraEffectsBlocked ? <text fg={theme.warning}>{ASTRA_GOVERNED_ACTION_HINT}</text> : undefined
                       }
                       onSubmit={() => {
                         toBottom()

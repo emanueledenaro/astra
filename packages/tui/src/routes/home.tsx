@@ -12,7 +12,11 @@ import { useEditorContext } from "../context/editor"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useTuiConfig } from "../config"
 import { HomeSessionDestinationProvider } from "./home/session-destination"
-import { AstraWorkspaceStatus, getAstraWorkspaceStatus } from "../component/astra-workspace-status"
+import {
+  ASTRA_GOVERNED_ACTION_HINT,
+  AstraWorkspaceStatus,
+  getAstraWorkspaceStatus,
+} from "../component/astra-workspace-status"
 import { inspectAstraSessionAuthority } from "../astra/session-authority"
 
 let once = false
@@ -100,11 +104,7 @@ export function Home() {
             <Prompt
               ref={bind}
               disabled={astraEffectsBlocked}
-              hint={
-                astraEffectsBlocked ? (
-                  <text fg="#f0bd6a">Provider and host effects are locked in this preview</text>
-                ) : undefined
-              }
+              hint={astraEffectsBlocked ? <text fg="#f0bd6a">{ASTRA_GOVERNED_ACTION_HINT}</text> : undefined}
               right={<pluginRuntime.Slot name="home_prompt_right" />}
               placeholders={placeholder}
             />

@@ -5,6 +5,8 @@ import { inspectAstraSessionAuthority } from "../astra/session-authority"
 
 export type AstraWorkspaceMode = "read-only" | "activate-once"
 
+export const ASTRA_GOVERNED_ACTION_HINT = "Inherited prompt disabled • ctrl+p opens governed actions"
+
 export type AstraWorkspaceStatusView = Readonly<{
   mode: AstraWorkspaceMode
   label: string
