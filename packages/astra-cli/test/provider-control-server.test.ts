@@ -135,6 +135,7 @@ function fakeControl(onCall: () => void = () => {}): AstraProviderControl {
           modelID,
           destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
           logicalPayload: { digest: digest("body"), bytes: 128, contextBindingDigest: null },
+          conversation: { priorTurns: 0, historyBytes: 0, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
           providerCapabilityDigest: digest("capability"),
           skillContext: null,
           headerNames: ["anthropic-version", "content-type", "x-api-key"],

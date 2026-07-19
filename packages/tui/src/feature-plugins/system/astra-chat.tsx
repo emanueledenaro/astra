@@ -58,7 +58,7 @@ type ChatState =
       userText: string
       result: Extract<ProviderTurnDecisionResult, { status: "response_observed_not_verified" }>
     }>
-  | Readonly<{ status: "denied"; modelID: string; userText: string }>
+  | Readonly<{ status: "denied"; catalog: ProviderControlCatalog; modelID: string; userText: string }>
   | Readonly<{ status: "blocked"; reason: string }>
   | Readonly<{ status: "reconciliation"; operationID: string }>
 
@@ -115,7 +115,7 @@ export function AstraChatView(props: {
   const compose = () => {
     const current = state()
     if (props.authority.mode !== "activate-once") return setState({ status: "blocked", reason: "read_only" })
-    if (current.status !== "ready" && current.status !== "completed") return
+    if (current.status !== "ready" && current.status !== "completed" && current.status !== "denied") return
     props.api.ui.dialog.replace(() => (
       <props.api.ui.DialogPrompt
         title="Message Astra"
@@ -124,19 +124,6 @@ export function AstraChatView(props: {
           const userText = raw.trim()
           if (!userText) return
           props.api.ui.dialog.clear()
-          if (current.status === "completed") {
-            setHistory((turns) =>
-              [
-                ...turns,
-                {
-                  modelID: current.modelID,
-                  userText: current.userText,
-                  assistantText: current.result.response.assistantText,
-                  finishReason: current.result.response.finishReason,
-                },
-              ].slice(-maximumVisibleHistoryTurns),
-            )
-          }
           const currentGeneration = ++generation
           abort = new AbortController()
           setState({ status: "preparing", catalog: current.catalog, modelID: current.modelID, userText })
@@ -176,6 +163,17 @@ export function AstraChatView(props: {
       .then((result) => {
         if (generation !== currentGeneration) return
         if (result.status === "response_observed_not_verified") {
+          setHistory((turns) =>
+            [
+              ...turns,
+              {
+                modelID: current.modelID,
+                userText: current.userText,
+                assistantText: result.response.assistantText,
+                finishReason: result.response.finishReason,
+              },
+            ].slice(-maximumVisibleHistoryTurns),
+          )
           setState({
             status: "completed",
             catalog: current.catalog,
@@ -187,7 +185,12 @@ export function AstraChatView(props: {
         }
         if (result.status === "denied_without_effect") {
           if (afterDenied) return afterDenied()
-          setState({ status: "denied", modelID: current.modelID, userText: current.userText })
+          setState({
+            status: "denied",
+            catalog: current.catalog,
+            modelID: current.modelID,
+            userText: current.userText,
+          })
           return
         }
         if (result.status === "reconciliation_required") {
@@ -203,15 +206,13 @@ export function AstraChatView(props: {
       })
   }
 
+  // Reloads the catalog and rejects any pending proposal. The consented conversation history
+  // lives in the parent and stays intact; the transcript keeps rendering it truthfully.
   const reset = () => {
     const current = state()
-    const clear = () => {
-      setHistory([])
-      loadCatalog()
-    }
-    if (current.status === "prepared") return decide("reject", clear)
+    if (current.status === "prepared") return decide("reject", loadCatalog)
     if (decisionInFlight(current)) return
-    clear()
+    loadCatalog()
   }
   const close = () => {
     const navigate = () => {
@@ -241,7 +242,7 @@ export function AstraChatView(props: {
       { name: "astra.chat.compose", title: "Compose Chat Message", category: "Astra", run: compose },
       { name: "astra.chat.approve", title: "Approve Provider Turn", category: "Astra", run: () => decide("approve") },
       { name: "astra.chat.reject", title: "Reject Provider Turn", category: "Astra", run: () => decide("reject") },
-      { name: "astra.chat.reset", title: "Reset One-turn Chat", category: "Astra", run: reset },
+      { name: "astra.chat.reset", title: "Reload Chat Catalog", category: "Astra", run: reset },
       { name: "astra.chat.close", title: "Close Chat", category: "Astra", run: close },
     ],
     bindings: [
@@ -249,7 +250,7 @@ export function AstraChatView(props: {
       { key: "p", cmd: "astra.chat.compose", desc: "Prompt" },
       { key: "a", cmd: "astra.chat.approve", desc: "Approve" },
       { key: "d", cmd: "astra.chat.reject", desc: "Reject" },
-      { key: "r", cmd: "astra.chat.reset", desc: "Reset" },
+      { key: "r", cmd: "astra.chat.reset", desc: "Reload" },
       { key: "escape", cmd: "astra.chat.close", desc: "Close" },
     ],
   }))
@@ -269,12 +270,12 @@ export function AstraChatView(props: {
       <box flexDirection="row" flexShrink={0}>
         <text fg={props.api.theme.current.text}>Astra Chat · Anthropic</text>
         <box flexGrow={1} />
-        <text fg={props.api.theme.current.textMuted}>m model p prompt a approve d reject r reset esc close</text>
+        <text fg={props.api.theme.current.textMuted}>m model p prompt a approve d reject r reload esc close</text>
       </box>
       <text fg={props.api.theme.current.error}>HOST EXECUTION — NO SANDBOX</text>
       <text fg={props.api.theme.current.warning}>NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX</text>
       <text fg={props.api.theme.current.warning}>
-        INDEPENDENT TURNS · IN-MEMORY DISPLAY ONLY · NO TOOLS · NO FILES · NOT VERIFIED
+        CONSENTED MULTI-TURN · HISTORY IN PARENT MEMORY ONLY · NOT PERSISTED · NO TOOLS · NOT VERIFIED
       </text>
       <box height={1} />
       <Row
@@ -299,7 +300,16 @@ export function AstraChatView(props: {
               value={`${preview().destination.origin}${preview().destination.path}`}
               api={props.api}
             />
-            <Row label="BODY" value={`${preview().logicalPayload.bytes} bytes`} api={props.api} />
+            <Row
+              label="BODY"
+              value={`${preview().logicalPayload.bytes} bytes leave this machine (includes history)`}
+              api={props.api}
+            />
+            <Row
+              label="HISTORY"
+              value={`${preview().conversation.priorTurns} prior turns · ${preview().conversation.historyBytes} bytes · ${preview().conversation.retention}`}
+              api={props.api}
+            />
             <Row
               label="DIGEST"
               value={Locale.truncate(preview().logicalPayload.digest, valueWidth())}
@@ -352,9 +362,11 @@ export function AstraChatView(props: {
       <For each={history()}>
         {(turn) => (
           <box marginTop={1} flexDirection="column">
-            <text fg={props.api.theme.current.textMuted}>YOU · MEMORY ONLY · {turn.modelID}</text>
+            <text fg={props.api.theme.current.textMuted}>{`YOU · IN CONVERSATION · ${turn.modelID}`}</text>
             <text fg={props.api.theme.current.text}>{turn.userText}</text>
-            <text fg={props.api.theme.current.textMuted}>ASTRA · {turn.finishReason.toUpperCase()} · MEMORY ONLY</text>
+            <text
+              fg={props.api.theme.current.textMuted}
+            >{`ASTRA · ${turn.finishReason.toUpperCase()} · IN CONVERSATION`}</text>
             <text fg={props.api.theme.current.text}>{turn.assistantText}</text>
           </box>
         )}
@@ -362,28 +374,38 @@ export function AstraChatView(props: {
       <Show when={userTextOf(state())}>
         {(text) => (
           <box marginTop={1} flexDirection="column">
-            <text fg={props.api.theme.current.textMuted}>YOU · MEMORY ONLY</text>
+            <text fg={props.api.theme.current.textMuted}>
+              {state().status === "denied" ? "YOU · DENIED · NOT SENT · NOT IN CONVERSATION" : "YOU · THIS TURN"}
+            </text>
             <text fg={props.api.theme.current.text}>{text()}</text>
           </box>
         )}
       </Show>
       <Show when={completedOf(state())}>
-        {(result) => (
-          <box marginTop={1} flexDirection="column">
-            <text fg={props.api.theme.current.success}>COMPLETED — RESPONSE OBSERVED — NOT VERIFIED</text>
-            <text fg={props.api.theme.current.textMuted}>ASTRA · {result().response.finishReason.toUpperCase()}</text>
-            <text fg={props.api.theme.current.text}>{result().response.assistantText}</text>
-          </box>
-        )}
+        <box marginTop={1} flexDirection="column">
+          <text fg={props.api.theme.current.success}>COMPLETED — RESPONSE OBSERVED — NOT VERIFIED</text>
+          <text fg={props.api.theme.current.textMuted}>Compose the next message to continue this conversation.</text>
+        </box>
       </Show>
       <Show when={blockedOf(state())}>
         {(reason) => <Row label="REASON" value={reason().replaceAll("_", " ")} api={props.api} />}
       </Show>
       <Show when={blockedOf(state()) === "credential_unavailable"}>
         <box marginTop={1} flexDirection="column">
-          <Row label="ACTION" value="Add an Anthropic API key with the existing OpenCode authentication flow." api={props.api} />
+          <Row
+            label="ACTION"
+            value="Add an Anthropic API key with the existing OpenCode authentication flow."
+            api={props.api}
+          />
           <Row label="THEN" value="Restart Astra and open /chat again." api={props.api} />
           <Row label="SECRET" value="Never displayed or stored by this chat screen." api={props.api} />
+        </box>
+      </Show>
+      <Show when={blockedOf(state()) === "conversation_limit_reached"}>
+        <box marginTop={1} flexDirection="column">
+          <Row label="ACTION" value="This conversation reached its history byte limit." api={props.api} />
+          <Row label="TRUTH" value="Nothing was sent and nothing is ever silently truncated." api={props.api} />
+          <Row label="THEN" value="Restart Astra to begin a new conversation." api={props.api} />
         </box>
       </Show>
       <Show when={reconciliationOf(state())}>{(id) => <Row label="OPERATION" value={id()} api={props.api} />}</Show>
@@ -452,6 +474,7 @@ function previewOf(state: ChatState) {
 }
 
 function userTextOf(state: ChatState) {
+  if (state.status === "completed") return undefined
   return "userText" in state ? state.userText : undefined
 }
 
@@ -475,7 +498,7 @@ function stateLabel(state: ChatState) {
   if (state.status === "deciding") return `${state.decision.toUpperCase()} REQUEST AUTHENTICATED · NOT VERIFIED`
   if (state.status === "progress") return state.phase.replaceAll("_", " ").toUpperCase()
   if (state.status === "completed") return "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED"
-  if (state.status === "denied") return "DENIED · ZERO NETWORK EFFECT"
+  if (state.status === "denied") return "DENIED · ZERO NETWORK EFFECT · CONVERSATION INTACT"
   if (state.status === "reconciliation") return "RECONCILIATION REQUIRED · EFFECT UNKNOWN"
   return "BLOCKED · NO EFFECT CLAIMED"
 }

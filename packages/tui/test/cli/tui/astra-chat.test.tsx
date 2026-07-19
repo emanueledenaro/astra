@@ -102,7 +102,7 @@ test("explains safe credential setup without rendering a secret", async () => {
   }
 })
 
-test("keeps consecutive independent turns in route memory and clears them on reset", async () => {
+test("keeps the consented conversation transcript across turns and across a catalog reload", async () => {
   let decisions = 0
   const client = {
     catalog: () => Promise.resolve(catalogResult),
@@ -148,9 +148,9 @@ test("keeps consecutive independent turns in route memory and clears them on res
     expect(completed).toContain("COMPLETED — RESPONSE OBSERVED — NOT VERIFIED")
 
     app.dispatch("astra.chat.reset")
-    const reset = await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
-    expect(reset).not.toContain("First observed answer")
-    expect(reset).not.toContain("Second observed answer")
+    const reloaded = await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
+    expect(reloaded).toContain("First observed answer")
+    expect(reloaded).toContain("Second observed answer")
   } finally {
     app.render.renderer.destroy()
   }
@@ -261,6 +261,7 @@ const preview = {
   modelID,
   destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
   logicalPayload: { digest, bytes: 256, contextBindingDigest: digest },
+  conversation: { priorTurns: 0, historyBytes: 0, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
   providerCapabilityDigest: digest,
   skillContext: {
     kind: "activated_skill",

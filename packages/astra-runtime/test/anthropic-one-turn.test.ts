@@ -110,6 +110,61 @@ describe("Astra Anthropic one-turn protocol", () => {
     expect(request.evidence.skillContextBindingDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
   })
 
+  test("encodes consented prior turns before the new user message without tools", () => {
+    const request = buildAnthropicOneTurnRequest({
+      catalogAuthority,
+      catalog,
+      modelID: "claude-haiku-4-5-20251001",
+      userText: "And what about the second file?",
+      maxTokens: 512,
+      conversationTurns: [
+        { userText: "Explain the first file.", assistantText: "It parses the ledger." },
+        { userText: "Is it bounded?", assistantText: "Yes, by fixed byte limits." },
+      ],
+    })
+    const body = JSON.parse(new TextDecoder().decode(request.privateWireBody))
+
+    expect(body.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "Explain the first file." }] },
+      { role: "assistant", content: [{ type: "text", text: "It parses the ledger." }] },
+      { role: "user", content: [{ type: "text", text: "Is it bounded?" }] },
+      { role: "assistant", content: [{ type: "text", text: "Yes, by fixed byte limits." }] },
+      { role: "user", content: [{ type: "text", text: "And what about the second file?" }] },
+    ])
+    expect(body).not.toHaveProperty("tools")
+    expect(request.evidence.requestBytes).toBe(request.privateWireBody.byteLength)
+    expect(JSON.stringify(request.evidence)).not.toContain("Explain the first file.")
+  })
+
+  test("refuses an over-limit conversation and malformed prior turns instead of truncating", () => {
+    const base = {
+      catalogAuthority,
+      catalog,
+      modelID: "claude-haiku-4-5-20251001",
+      userText: "Continue.",
+      maxTokens: 512,
+    }
+    expect(() =>
+      buildAnthropicOneTurnRequest({
+        ...base,
+        conversationTurns: [{ userText: "u".repeat(40_000), assistantText: "a".repeat(40_000) }],
+      }),
+    ).toThrow(new AnthropicOneTurnError("conversation_too_large"))
+    expect(() =>
+      buildAnthropicOneTurnRequest({
+        ...base,
+        // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- hostile-shape fixture
+        conversationTurns: [{ userText: "hello", assistantText: "", extra: 1 } as never],
+      }),
+    ).toThrow(new AnthropicOneTurnError("conversation_turn_rejected"))
+    expect(() =>
+      buildAnthropicOneTurnRequest({
+        ...base,
+        conversationTurns: [{ userText: "hello", assistantText: "   " }],
+      }),
+    ).toThrow(new AnthropicOneTurnError("conversation_turn_rejected"))
+  })
+
   test("rejects tampered skill identity, digest, trust, and resource discovery without leaking instructions", () => {
     const instructions = "private-skill-instruction-secret"
     const valid = {

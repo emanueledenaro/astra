@@ -12,6 +12,8 @@ type AnthropicDecodedEvent = AnthropicWire.StreamEvent
 
 export const anthropicOneTurnMaximumInputBytes = 65_536
 export const anthropicOneTurnMaximumRequestBytes = 131_072
+export const anthropicOneTurnMaximumConversationTurns = 64
+export const anthropicOneTurnMaximumConversationBytes = 65_536
 export const anthropicOneTurnMaximumResponseBytes = 2_097_152
 export const anthropicOneTurnMaximumAssistantBytes = 1_048_576
 export const anthropicOneTurnMaximumEvents = 8_192
@@ -50,6 +52,13 @@ export type AnthropicOneTurnRequestInput = Readonly<{
   userText: string
   maxTokens: number
   skillContext?: AnthropicSkillInstructionContext
+  conversationTurns?: ReadonlyArray<AnthropicConversationTurn>
+}>
+
+/** Parent-only prior exchange. Private text; never expose it over the child control protocol. */
+export type AnthropicConversationTurn = Readonly<{
+  userText: string
+  assistantText: string
 }>
 
 /** Parent-only private input. Never expose this shape over the child control protocol. */
@@ -106,6 +115,8 @@ export type AnthropicOneTurnErrorCode =
   | "model_rejected"
   | "user_text_rejected"
   | "skill_context_rejected"
+  | "conversation_turn_rejected"
+  | "conversation_too_large"
   | "token_limit_rejected"
   | "request_too_large"
   | "request_encoding_failed"
@@ -129,6 +140,8 @@ const safeErrorMessages: Record<AnthropicOneTurnErrorCode, string> = {
   model_rejected: "The Anthropic model selection was rejected",
   user_text_rejected: "The private user input was rejected",
   skill_context_rejected: "The activated skill instruction context was rejected",
+  conversation_turn_rejected: "A prior conversation turn was rejected",
+  conversation_too_large: "The conversation history exceeded its fixed byte limit",
   token_limit_rejected: "The Anthropic output token limit was rejected",
   request_too_large: "The Anthropic request exceeded its fixed byte limit",
   request_encoding_failed: "The Anthropic request could not be encoded",
@@ -198,29 +211,40 @@ export function sealValidatedAnthropicModelCatalog(
   }
 }
 
-/** Builds exactly one private user turn with no tools, history, or extension context. */
+/** Builds one private tool-free request: bounded consented prior turns plus exactly one new user turn. */
 export function buildAnthropicOneTurnRequest(input: AnthropicOneTurnRequestInput): AnthropicOneTurnRequest {
   requireCatalogSelection(input.catalogAuthority, input.catalog, input.modelID)
   requireUserText(input.userText)
   requireMaxTokens(input.maxTokens)
   const skillContext = input.skillContext ? requireSkillContext(input.skillContext) : null
-  const privateWireBody = encodeRequest({
-    model: input.modelID,
-    system: [{ type: "text" as const, text: skillContext ? skillSystemPrompt : fixedSystemPrompt }],
-    messages: [
-      {
-        role: "user" as const,
-        content: [
-          {
-            type: "text" as const,
-            text: skillContext ? privateSkillEnvelope(skillContext, input.userText) : input.userText,
-          },
-        ],
-      },
-    ],
-    stream: true as const,
-    max_tokens: input.maxTokens,
-  })
+  const conversationTurns = requireConversationTurns(input.conversationTurns ?? [], input.userText)
+  const currentUserText = skillContext ? privateSkillEnvelope(skillContext, input.userText) : input.userText
+  const messages: AnthropicConversationRequestBody["messages"] = [
+    ...conversationTurns.flatMap((turn): AnthropicConversationRequestBody["messages"] => [
+      { role: "user" as const, content: [{ type: "text" as const, text: turn.userText }] },
+      { role: "assistant" as const, content: [{ type: "text" as const, text: turn.assistantText }] },
+    ]),
+    { role: "user" as const, content: [{ type: "text" as const, text: currentUserText }] },
+  ]
+  const system: AnthropicConversationRequestBody["system"] = [
+    { type: "text" as const, text: skillContext ? skillSystemPrompt : fixedSystemPrompt },
+  ]
+  const privateWireBody =
+    conversationTurns.length === 0
+      ? encodeRequest({
+          model: input.modelID,
+          system,
+          messages: [{ role: "user" as const, content: [{ type: "text" as const, text: currentUserText }] }],
+          stream: true as const,
+          max_tokens: input.maxTokens,
+        })
+      : encodeConversationRequest({
+          model: input.modelID,
+          system,
+          messages,
+          stream: true as const,
+          max_tokens: input.maxTokens,
+        })
   if (privateWireBody.byteLength > anthropicOneTurnMaximumRequestBytes) fail("request_too_large")
   return {
     destination: { method: "POST", origin: anthropicOrigin, path: anthropicPath },
@@ -394,6 +418,51 @@ function skillContextDescriptors(input: AnthropicSkillInstructionContext) {
   }
 }
 
+function requireConversationTurns(
+  turns: ReadonlyArray<AnthropicConversationTurn>,
+  currentUserText: string,
+): ReadonlyArray<AnthropicConversationTurn> {
+  if (!Array.isArray(turns) || turns.length > anthropicOneTurnMaximumConversationTurns) {
+    fail("conversation_turn_rejected")
+  }
+  const validated = turns.map((turn) => {
+    const record = conversationTurnRecord(turn)
+    const userText = record.userText
+    const assistantText = record.assistantText
+    if (
+      typeof userText !== "string" ||
+      userText.trim().length === 0 ||
+      Buffer.byteLength(userText, "utf8") > anthropicOneTurnMaximumInputBytes ||
+      typeof assistantText !== "string" ||
+      assistantText.trim().length === 0 ||
+      Buffer.byteLength(assistantText, "utf8") > anthropicOneTurnMaximumAssistantBytes
+    ) {
+      fail("conversation_turn_rejected")
+    }
+    return Object.freeze({ userText, assistantText })
+  })
+  const totalBytes = validated.reduce(
+    (bytes, turn) => bytes + Buffer.byteLength(turn.userText, "utf8") + Buffer.byteLength(turn.assistantText, "utf8"),
+    Buffer.byteLength(currentUserText, "utf8"),
+  )
+  if (totalBytes > anthropicOneTurnMaximumConversationBytes) fail("conversation_too_large")
+  return validated
+}
+
+function conversationTurnRecord(input: AnthropicConversationTurn): Record<"userText" | "assistantText", unknown> {
+  if (typeof input !== "object" || input === null) return fail("conversation_turn_rejected")
+  const prototype = Object.getPrototypeOf(input)
+  const ownKeys = Reflect.ownKeys(input)
+  if (
+    (prototype !== Object.prototype && prototype !== null) ||
+    ownKeys.length !== 2 ||
+    ownKeys.some((key) => key !== "userText" && key !== "assistantText")
+  ) {
+    return fail("conversation_turn_rejected")
+  }
+  return { userText: input.userText, assistantText: input.assistantText }
+}
+
 function privateSkillEnvelope(input: AnthropicSkillInstructionContext, userText: string) {
   return `${userEnvelopeLabel}\n${JSON.stringify({
     skill: {
@@ -411,6 +480,36 @@ function privateSkillEnvelope(input: AnthropicSkillInstructionContext, userText:
 function encodeRequest(body: AnthropicRequestBody) {
   try {
     const encode = Schema.encodeSync(Schema.fromJsonString(AnthropicWire.OneTurnRequest))
+    return new TextEncoder().encode(encode(body))
+  } catch {
+    return fail("request_encoding_failed")
+  }
+}
+
+const conversationTextBlock = Schema.Struct({
+  type: Schema.tag("text"),
+  text: Schema.String,
+})
+
+/** Strict tool-free multi-message shape: consented prior turns plus one new user turn. */
+const conversationRequestSchema = Schema.Struct({
+  model: Schema.String,
+  system: Schema.Tuple([conversationTextBlock]),
+  messages: Schema.Array(
+    Schema.Struct({
+      role: Schema.Literals(["user", "assistant"]),
+      content: Schema.Tuple([conversationTextBlock]),
+    }),
+  ),
+  stream: Schema.Literal(true),
+  max_tokens: Schema.Number,
+})
+
+type AnthropicConversationRequestBody = Schema.Schema.Type<typeof conversationRequestSchema>
+
+function encodeConversationRequest(body: AnthropicConversationRequestBody) {
+  try {
+    const encode = Schema.encodeSync(Schema.fromJsonString(conversationRequestSchema))
     return new TextEncoder().encode(encode(body))
   } catch {
     return fail("request_encoding_failed")

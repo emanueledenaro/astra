@@ -5,6 +5,7 @@ export const providerNetworkExecutionBoundaryLabel = "NETWORK EGRESS — HOST TR
 export const providerObservedCompletionLabel = "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED" as const
 export const providerSkillInstructionTrustLabel = "UNTRUSTED INSTRUCTION DATA" as const
 export const providerSkillInstructionAssuranceLabel = "OBSERVED NOT VERIFIED" as const
+export const providerConversationRetentionLabel = "IN-MEMORY PARENT ONLY — NOT PERSISTED" as const
 export const providerControlRequestWireLimitBytes = 6 * 65_536 + 16_384
 export const providerControlResponseWireLimitBytes = 6 * 1_048_576 + 262_144
 
@@ -66,6 +67,11 @@ export type ProviderTurnPreview = Readonly<{
   modelID: string
   destination: Readonly<{ method: "POST"; origin: "https://api.anthropic.com"; path: "/v1/messages" }>
   logicalPayload: Readonly<{ digest: string; bytes: number; contextBindingDigest: string | null }>
+  conversation: Readonly<{
+    priorTurns: number
+    historyBytes: number
+    retention: typeof providerConversationRetentionLabel
+  }>
   providerCapabilityDigest: string
   skillContext: ProviderTurnSkillContext | null
   headerNames: ReadonlyArray<string>
@@ -128,6 +134,7 @@ export type ProviderTurnPrepareResult =
         | "input_rejected"
         | "control_busy"
         | "control_limit_reached"
+        | "conversation_limit_reached"
         | "workspace_stale"
         | "skill_context_unavailable"
         | "control_unavailable"
@@ -388,6 +395,7 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
       "modelID",
       "destination",
       "logicalPayload",
+      "conversation",
       "providerCapabilityDigest",
       "skillContext",
       "headerNames",
@@ -411,6 +419,7 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
   }
   const destination = plainRecord(record.destination)
   const payload = plainRecord(record.logicalPayload)
+  const conversation = plainRecord(record.conversation)
   const credential = plainRecord(record.credential)
   const skillContext = record.skillContext === null ? null : parseSkillContext(record.skillContext)
   if (
@@ -424,6 +433,12 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
     !digest(payload.digest) ||
     !positive(payload.bytes) ||
     (payload.contextBindingDigest !== null && !digest(payload.contextBindingDigest)) ||
+    !conversation ||
+    !exactKeys(conversation, ["priorTurns", "historyBytes", "retention"]) ||
+    !nonNegative(conversation.priorTurns) ||
+    !nonNegative(conversation.historyBytes) ||
+    (conversation.priorTurns === 0) !== (conversation.historyBytes === 0) ||
+    conversation.retention !== providerConversationRetentionLabel ||
     !digest(record.providerCapabilityDigest) ||
     (record.skillContext !== null && !skillContext) ||
     (skillContext === null && payload.contextBindingDigest !== null) ||
@@ -503,6 +518,7 @@ const prepareBlockReasons = new Set([
   "input_rejected",
   "control_busy",
   "control_limit_reached",
+  "conversation_limit_reached",
   "workspace_stale",
   "skill_context_unavailable",
   "control_unavailable",
@@ -556,6 +572,10 @@ function timestamp(input: unknown): input is string {
 
 function positive(input: unknown): input is number {
   return typeof input === "number" && Number.isSafeInteger(input) && input > 0
+}
+
+function nonNegative(input: unknown): input is number {
+  return typeof input === "number" && Number.isSafeInteger(input) && input >= 0
 }
 
 function display(input: unknown): input is string {
