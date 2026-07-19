@@ -23,6 +23,10 @@ Updated: 2026-07-19 (local macOS readiness checkpoint; not yet pushed or indepen
   PTY smoke verified Git stage, durable rejection without effect, an exact local commit,
   and the read-only Operations ledger. Chat stopped fail-closed because this Mac has no
   Anthropic API credential configured.
+- A governed host shell is now connected end to end. It previews the exact script,
+  `/bin/zsh -f -c`, cwd, fixed environment, declared resources, and unrestricted host
+  filesystem/network boundary before a local A/D decision. Output is bounded and
+  recorded only as observed, never verified.
 
 ## Objective
 
@@ -30,7 +34,7 @@ Produce a local Astra release candidate that is functional, independently verifi
 
 ## Bottom line
 
-Astra launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. `astra system` opens a separate inert System Mode without admitting or scanning a workspace and keeps `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED` visible. Read-only and Activate once are bound to a private session authority. The inherited OpenCode prompt and ungoverned effects remain blocked, while the `ctrl+p` command surface exposes parent-governed chat, controlled write, Git stage/unstage/local commit, literal workspace search, extension inventory, skill activation, MCP activation, and operation evidence.
+Astra launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. `astra system` opens a separate inert System Mode without admitting or scanning a workspace and keeps `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED` visible. Read-only and Activate once are bound to a private session authority. The inherited OpenCode prompt and ungoverned effects remain blocked, while the `ctrl+p` command surface exposes parent-governed chat, host shell, controlled write, Git stage/unstage/local commit, literal workspace search, extension inventory, skill activation, MCP activation, and operation evidence.
 
 This is a verified local product checkpoint, not a work-ready release candidate. Governed effects cross the Operation Kernel through explicit previews and consent, durable authority, receipts, recovery, and scoped verification where an independent criterion exists. Every active workspace surface keeps `HOST EXECUTION — NO SANDBOX` visible and does not claim host network isolation or OS-enforced filesystem scope.
 
@@ -114,20 +118,21 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 - Toolchain: Bun `1.3.14`; frozen install succeeds.
 - The linked `astra` command was run with no arguments from `/tmp`; the real PTY displayed `NO WORKSPACE • EFFECTS DENIED`, stated that no directory was scanned, and exited locally with `Q`.
-- Domain: 119 tests, 2,442 expectations; typecheck passes.
+- Domain: 122 tests, 2,450 expectations; typecheck passes.
 - Ledger: 54 tests, 506 expectations; typecheck passes.
-- Runtime: 207 tests, 914 expectations; typecheck passes.
+- Runtime: 209 tests, 919 expectations; typecheck passes.
 - Executor: 8 tests, 24 expectations; typecheck passes.
 - Git: 96 tests, 361 expectations; typecheck passes.
-- CLI: 187 tests, 967 expectations; typecheck passes.
-- TUI: 300 pass, 1 platform skip, 970 expectations; typecheck passes. Existing KV fixture warnings are noisy but non-failing.
-- Current connected-product gate: 971 passing tests, 1 skipped test, and 6,184 expectations across the packages above.
+- CLI: 189 tests, 979 expectations; typecheck passes.
+- TUI: 303 pass, 1 platform skip, 987 expectations; typecheck passes. Existing KV fixture warnings are noisy but non-failing.
+- Current connected-product gate: 981 passing tests, 1 skipped test, and 6,226 expectations across the packages above.
 - The preserved sandbox prototype has 12 passing tests and 59 expectations, but is excluded from the working-product gate until its open timeout and cleanup findings are resolved during hardening.
 - `git diff --check` passes; changed files pass Prettier after formatting.
 - `verify:demo` reports `DEMO MATRIX PASS`: hostile read-only open produced zero effects, denial was durable with no dispatch, one approved create-only host effect reached independent exact verification, the network canary received zero requests during that fixture, and no trust was persisted.
 - The capability preview truthfully reported that host network access was not isolated and that create-only scope was application-enforced.
 - Real PTY fixture: `G -> A` opened `ACTIVE ONCE • GOVERNED EFFECTS ONLY`; Git stage reached `VERIFIED • SELECTED INDEX + PRESERVATION`; two rejected commit previews produced no Git effect; the approved commit reached `VERIFIED • COMMIT BYTES + REPOSITORY STATE` with exact subject `test: verify exact TUI message` and author `Astra Smoke <astra-smoke@example.invalid>`.
 - The Operations view loaded the current commit and stage records from the durable ledger and exposed their event sequence, receipt, verifier evidence, and exact criterion without running an action.
+- Real governed-shell PTY fixture: rejecting `touch denied-marker` left the workspace unchanged and produced a durable `DENIED` operation with no dispatch. Approving `printf 'astra-shell-smoke\n'` crossed the parent Operation Kernel once, displayed stdout and exit `0`, and produced a durable `COMPLETED` operation with no verification fact. The TUI kept `HOST EXECUTION — NO SANDBOX`, `HOST FILESYSTEM UNRESTRICTED`, `HOST NETWORK UNRESTRICTED`, and `NOT VERIFIED` visible.
 - Governed chat accepted the exact local prompt but stopped at `BLOCKED • NO EFFECT CLAIMED` with `credential unavailable` before preview, credential handoff, or network dispatch. Multi-turn live chat therefore remains unobserved on this Mac.
 - Real large-repository diagnosis proved that the earlier false `STALE` result was a timeout. With realistic bounded limits, two captures produced the same digest.
 - Independent security review confirmed closure of the three safe-opening P1 findings: inherited project/Git startup, child authority replacement, and nested-symlink read escape.
@@ -137,7 +142,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 | Area                        | State and next dependency                                                                                                                                                  |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| General effect bridge       | Partial: chat, controlled write, git stage/unstage/commit, search are governed; shell effects next                                                                         |
+| General effect bridge       | Partial: chat, host shell, controlled write, git stage/unstage/commit, and search are governed; general verified file changes are next                                     |
 | macOS sandbox               | Deferred to hardening; prototype preserved and backend boundary remains injectable                                                                                         |
 | Git Control Plane mutations | Stage/unstage/commit shipped (commit is macOS-only, packed refs blocked at prepare); branch, fetch, merge/rebase, recovery actions missing                                 |
 | Providers and credentials   | Governed Anthropic chat is wired but lacks a configured credential on this Mac; provider selection, persistence, streaming, and non-Anthropic providers are missing        |
@@ -162,9 +167,8 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Next executable work
 
-1. Add governed shell execution with exact argv/cwd/environment preview, explicit approval, bounded output, receipts, and no blind retry.
-2. Generalize chat from the current Anthropic-only path to the preserved OpenCode provider registry and authentication sources without exposing credentials to the child TUI.
-3. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
-4. Add MCP tool invocation and extension capability grants while keeping plugin code quarantined by default.
-5. Complete branch/fetch/merge recovery flows, keeping push and destructive Git actions behind separate authorization.
-6. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.
+1. Generalize chat from the current Anthropic-only path to the preserved OpenCode provider registry and authentication sources without exposing credentials to the child TUI.
+2. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
+3. Add MCP tool invocation and extension capability grants while keeping plugin code quarantined by default.
+4. Complete branch/fetch/merge recovery flows, keeping push and destructive Git actions behind separate authorization.
+5. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.

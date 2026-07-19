@@ -36,9 +36,11 @@ Updated 2026-07-19. The Workspace Gate, safe OpenCode TUI, read-only Git observe
 durable ledger, receipt spool, recovery, and independent verification are consolidated
 on the `astra` mainline, now joined by governed multi-turn chat (per-turn consent),
 git stage/unstage/commit in the TUI, and read-only operation/evidence/recovery views.
-The local `macos-readiness` line also closes operation-storage races and keeps Git
-authority current across stage, unstage, and exact commit in one activated session.
-The connected product gate is green on macOS and a real PTY smoke verified Git and
-Operations. Live chat stopped safely because no Anthropic credential is configured.
-Next from section 1: governed shell, general file effects, provider-registry support,
-MCP tool invocation with capability grants, then the remaining TUI views and hardening.
+The local `macos-readiness` line also closes operation-storage races, keeps Git
+authority current across stage, unstage, and exact commit, and connects a governed
+host shell with durable rejection, exact approval, bounded output, and truthful
+unrestricted-host warnings. The connected product gate is green on macOS and real PTY
+smokes verified Git, Operations, and the shell. Live chat stopped safely because no
+Anthropic credential is configured. Next from section 1: provider-registry support,
+general verified file effects, MCP tool invocation with capability grants, then the
+remaining TUI views and hardening.
