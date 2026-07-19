@@ -1,3 +1,5 @@
+import type { AstraSessionAuthority } from "@astra/domain/session-authority"
+import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { Prompt, type PromptRef } from "../component/prompt"
 import { createEffect, createMemo, createSignal, onMount } from "solid-js"
 import { Lynx } from "../component/lynx"
@@ -18,6 +20,7 @@ import {
   getAstraWorkspaceStatus,
 } from "../component/astra-workspace-status"
 import { inspectAstraSessionAuthority } from "../astra/session-authority"
+import { AstraCockpit } from "../component/astra-cockpit"
 
 let once = false
 const placeholder = {
@@ -25,7 +28,12 @@ const placeholder = {
   shell: ["ls -la", "git status", "pwd"],
 }
 
-export function Home() {
+export function Home(props: { astra?: { api: TuiPluginApi; authority: AstraSessionAuthority } }) {
+  if (props.astra) return <AstraCockpit api={props.astra.api} authority={props.astra.authority} />
+  return <OpenCodeHome />
+}
+
+function OpenCodeHome() {
   const pluginRuntime = usePluginRuntime()
   const sync = useSync()
   const route = useRouteData("home")

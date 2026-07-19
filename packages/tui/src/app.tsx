@@ -1147,7 +1147,7 @@ function App(props: {
         <box flexGrow={1} minHeight={0} flexDirection="column">
           <Switch>
             <Match when={route.data.type === "home"}>
-              <Home />
+              <Home astra={props.astraAuthority ? { api, authority: props.astraAuthority } : undefined} />
             </Match>
             <Match when={route.data.type === "session"}>
               <Show when={route.data.type === "session" ? route.data.sessionID : undefined} keyed>

@@ -9,7 +9,7 @@ import type {
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import type { TuiPluginApi, TuiRouteCurrent } from "@opencode-ai/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { createAstraProviderClient, type AstraProviderClient } from "../../astra/provider-client"
 import { useBindings } from "../../keymap"
 import { Locale } from "../../util/locale"
@@ -62,11 +62,26 @@ type ChatState =
   | Readonly<{ status: "blocked"; reason: string }>
   | Readonly<{ status: "reconciliation"; operationID: string }>
 
+export type AstraChatActivity = Readonly<{
+  status: ChatState["status"]
+  label: string
+  summary: string
+  providerID?: string
+  providerName?: string
+  modelID?: string
+  operationID?: string
+  destination?: string
+  payloadBytes?: number
+  decisionRequired: boolean
+}>
+
 export function AstraChatView(props: {
   api: TuiPluginApi
   authority: AstraSessionAuthority
   client: AstraProviderClient
   returnRoute?: TuiRouteCurrent
+  embedded?: boolean
+  onActivity?: (activity: AstraChatActivity) => void
 }) {
   const dimensions = useTerminalDimensions()
   const valueWidth = createMemo(() => Math.max(24, dimensions().width - 18))
@@ -230,6 +245,7 @@ export function AstraChatView(props: {
   }
 
   onMount(loadCatalog)
+  createEffect(() => props.onActivity?.(chatActivity(state())))
   onCleanup(() => {
     generation += 1
     abort?.abort()
@@ -257,40 +273,47 @@ export function AstraChatView(props: {
 
   return (
     <box
-      position="absolute"
-      zIndex={2500}
-      left={0}
-      top={0}
-      width={dimensions().width}
-      height={dimensions().height}
+      {...(props.embedded ? {} : { position: "absolute" as const, zIndex: 2500, left: 0, top: 0 })}
+      width={props.embedded ? "100%" : dimensions().width}
+      height={props.embedded ? "100%" : dimensions().height}
       paddingLeft={1}
       paddingRight={1}
       flexDirection="column"
     >
       <box flexDirection="row" flexShrink={0}>
-        <text fg={props.api.theme.current.text}>Astra Chat · Anthropic</text>
+        <text fg={props.api.theme.current.primary}>{props.embedded ? "CONVERSATION" : "Astra Chat · Anthropic"}</text>
         <box flexGrow={1} />
-        <text fg={props.api.theme.current.textMuted}>m model p prompt a approve d reject r reload esc close</text>
+        <Show when={!props.embedded || dimensions().width >= 104}>
+          <text fg={props.api.theme.current.textMuted}>
+            {props.embedded
+              ? "p message · m model · a/d decision"
+              : "m model p prompt a approve d reject r reload esc close"}
+          </text>
+        </Show>
       </box>
-      <text fg={props.api.theme.current.error}>HOST EXECUTION — NO SANDBOX</text>
-      <text fg={props.api.theme.current.warning}>NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX</text>
-      <text fg={props.api.theme.current.warning}>
-        CONSENTED MULTI-TURN · HISTORY IN PARENT MEMORY ONLY · NOT PERSISTED · NO TOOLS · NOT VERIFIED
-      </text>
+      <Show when={!props.embedded}>
+        <text fg={props.api.theme.current.error}>HOST EXECUTION — NO SANDBOX</text>
+        <text fg={props.api.theme.current.warning}>NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX</text>
+        <text fg={props.api.theme.current.warning}>
+          CONSENTED MULTI-TURN · HISTORY IN PARENT MEMORY ONLY · NOT PERSISTED · NO TOOLS · NOT VERIFIED
+        </text>
+      </Show>
       <box height={1} />
-      <Row
-        label="WORKSPACE"
-        value={Locale.truncateLeft(props.authority.workspace.root, valueWidth())}
-        api={props.api}
-      />
-      <Row
-        label="MODE"
-        value={props.authority.mode === "activate-once" ? "ACTIVE ONCE" : "READ ONLY"}
-        api={props.api}
-      />
-      <Row label="STATE" value={stateLabel(state())} api={props.api} />
-      <Show when={modelOf(state())}>{(model) => <Row label="MODEL" value={model()} api={props.api} />}</Show>
-      <Show when={previewOf(state())}>
+      <Show when={!props.embedded}>
+        <Row
+          label="WORKSPACE"
+          value={Locale.truncateLeft(props.authority.workspace.root, valueWidth())}
+          api={props.api}
+        />
+        <Row
+          label="MODE"
+          value={props.authority.mode === "activate-once" ? "ACTIVE ONCE" : "READ ONLY"}
+          api={props.api}
+        />
+        <Row label="STATE" value={stateLabel(state())} api={props.api} />
+        <Show when={modelOf(state())}>{(model) => <Row label="MODEL" value={model()} api={props.api} />}</Show>
+      </Show>
+      <Show when={!props.embedded && previewOf(state())}>
         {(preview) => (
           <>
             <Row label="OPERATION" value={preview().operationID} api={props.api} />
@@ -359,6 +382,23 @@ export function AstraChatView(props: {
           </>
         )}
       </Show>
+      <Show when={props.embedded && history().length === 0 && state().status === "ready"}>
+        <box flexGrow={1} alignItems="center" justifyContent="center" flexDirection="column">
+          <text fg={props.api.theme.current.primary}>
+            {props.authority.mode === "activate-once" ? "Astra is ready" : "Workspace opened read-only"}
+          </text>
+          <text fg={props.api.theme.current.textMuted}>
+            {props.authority.mode === "activate-once"
+              ? "Press P to write a message."
+              : "Chat and workspace effects are denied."}
+          </text>
+          <text fg={props.api.theme.current.textMuted}>
+            {props.authority.mode === "activate-once"
+              ? "Every provider turn is previewed in the Control Rail."
+              : "Restart and choose Activate once to work with Astra."}
+          </text>
+        </box>
+      </Show>
       <For each={history()}>
         {(turn) => (
           <box marginTop={1} flexDirection="column">
@@ -380,6 +420,12 @@ export function AstraChatView(props: {
             <text fg={props.api.theme.current.text}>{text()}</text>
           </box>
         )}
+      </Show>
+      <Show when={props.embedded && state().status === "prepared"}>
+        <box marginTop={1} flexDirection="column">
+          <text fg={props.api.theme.current.warning}>APPROVAL REQUIRED — review the Control Rail</text>
+          <text fg={props.api.theme.current.textMuted}>A approve · D reject · no network request has started</text>
+        </box>
       </Show>
       <Show when={completedOf(state())}>
         <box marginTop={1} flexDirection="column">
@@ -409,6 +455,12 @@ export function AstraChatView(props: {
         </box>
       </Show>
       <Show when={reconciliationOf(state())}>{(id) => <Row label="OPERATION" value={id()} api={props.api} />}</Show>
+      <Show when={props.embedded}>
+        <box flexGrow={history().length === 0 && state().status === "ready" ? 0 : 1} />
+        <box border borderStyle="rounded" borderColor={props.api.theme.current.border} paddingLeft={1} paddingRight={1}>
+          <text fg={props.api.theme.current.textMuted}>❯ Press P to compose · Ctrl+P for governed actions</text>
+        </box>
+      </Show>
     </box>
   )
 }
@@ -440,6 +492,10 @@ export function registerAstraChat(
         category: "Astra",
         namespace: "palette",
         run() {
+          if (api.route.current.name === "home") {
+            api.ui.dialog.clear()
+            return
+          }
           api.route.navigate(routeName, { returnRoute: api.route.current })
           api.ui.dialog.clear()
         },
@@ -501,6 +557,47 @@ function stateLabel(state: ChatState) {
   if (state.status === "denied") return "DENIED · ZERO NETWORK EFFECT · CONVERSATION INTACT"
   if (state.status === "reconciliation") return "RECONCILIATION REQUIRED · EFFECT UNKNOWN"
   return "BLOCKED · NO EFFECT CLAIMED"
+}
+
+function chatActivity(state: ChatState): AstraChatActivity {
+  const preview = previewOf(state)
+  const catalog = catalogOf(state)
+  const modelID = modelOf(state)
+  return {
+    status: state.status,
+    label: stateLabel(state),
+    summary: activitySummary(state),
+    ...(catalog ? { providerID: catalog.providerID, providerName: catalog.providerName } : {}),
+    ...(modelID ? { modelID } : {}),
+    ...(preview ? { operationID: preview.operationID } : {}),
+    ...(preview ? { destination: `${preview.destination.origin}${preview.destination.path}` } : {}),
+    ...(preview ? { payloadBytes: preview.logicalPayload.bytes } : {}),
+    decisionRequired: state.status === "prepared",
+  }
+}
+
+function catalogOf(state: ChatState) {
+  return "catalog" in state ? state.catalog : undefined
+}
+
+function activitySummary(state: ChatState) {
+  if (state.status === "loading_catalog") return "Loading the trusted provider catalog"
+  if (state.status === "ready") return "Waiting for your message"
+  if (state.status === "preparing") return "Preparing the request locally"
+  if (state.status === "prepared") return "Waiting for your provider decision"
+  if (state.status === "deciding")
+    return state.decision === "approve" ? "Recording your approval" : "Recording your rejection"
+  if (state.status === "progress") {
+    if (state.phase === "recording_authority") return "Recording bounded authority"
+    if (state.phase === "authority_claimed") return "Authority claimed by the provider worker"
+    if (state.phase === "network_dispatch") return "Sending the approved request"
+    if (state.phase === "response_observed_not_verified") return "Provider response observed"
+    return "Recording the provider receipt"
+  }
+  if (state.status === "completed") return "Provider response received"
+  if (state.status === "denied") return "Request rejected without network effect"
+  if (state.status === "reconciliation") return "Provider outcome requires reconciliation"
+  return `Blocked: ${state.reason.replaceAll("_", " ")}`
 }
 
 function parseReturnRoute(input: unknown): TuiRouteCurrent | undefined {
