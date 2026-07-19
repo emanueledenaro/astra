@@ -1,17 +1,19 @@
 # Repo map & branch topology
 
-Updated: 2026-07-19 (after PR #4 merged the recovered line into the mainline).
+Updated: 2026-07-19 evening (after PR #4, #5, #6 merged).
 
 ## Branches (origin)
 
-- `astra` — protected fork mainline, **now current**: full recovered development line
-  (durable kernel, safe-start TUI integration, governed chat/MCP/skills/git-stage,
-  git commit slice) plus the round-2 audit fixes, merged via PR #4 (`78e455e`).
-  All seven astra packages typecheck clean; cross-platform suites 190/190 green.
-- `local-recovery`, `durable-coordinator`, `astra-foundation` — historical lines now
-  contained in `astra`; safe to delete after a settling period.
-- `claude/project-audit-04u7l4` — audit branch (AUDIT.md + this scaffolding), rebased
-  onto the merged mainline.
+- `astra` — protected fork mainline, fully current: recovered line + audit fixes
+  (PR #4), the product slices — governed git commit in the TUI, read-only
+  operation/evidence/recovery views, consented multi-turn chat, Lynx v2 illustrated
+  identity (PR #5) — and the docs/CI alignment (PR #6). All eight packages (astra-*
+  plus tui) typecheck clean; Linux-green suites: domain 119, ledger 54, executor 8,
+  sandbox 12, TUI astra 128 — zero failures; macOS surfaces fail closed pending the
+  owner-side re-verification (docs/astra/macos-verification.md).
+- `local-recovery`, `durable-coordinator`, `astra-foundation`, `product-slices`,
+  `docs-alignment` — historical/merged lines contained in `astra`; deletable.
+- `claude/project-audit-04u7l4` — audit branch (AUDIT.md + this scaffolding).
 - Hundreds of `origin/*` branches/tags are upstream opencode noise accidentally pushed
   by `git push --all`; cleanup pending (owner task — bulk deletion needs human hands).
 
