@@ -9,6 +9,14 @@ import {
   type ExecutionCapability,
   type ExecutionCapabilityManifest,
 } from "@astra/domain/execution-capability"
+import {
+  defaultHostCommandPolicy,
+  evaluateHostCommandPolicy,
+  type GrantedHostCommand,
+  type HostCommandPolicy,
+  type HostCommandPolicyDenialReason,
+  type ProposedHostCommand,
+} from "@astra/domain/host-command-policy"
 import type { GitRepositoryBaselineSnapshot } from "@astra/domain/git-repository-baseline"
 import {
   parseAttemptID,
@@ -59,6 +67,31 @@ const hostCommandAdapterDigest = digest("astra-runtime:host-command:direct-host-
 const hostCommandObserverDigest = digest("astra-observer:host-command-bounded-output:v1")
 const hostCommandExecutor = "astra-executor:allowlisted-host-command"
 
+/**
+ * The historical, hardwired command expressed as a granted spec. When
+ * `proposeHostCommand`/`executeHostCommand` receive no explicit granted command
+ * they default to exactly this, so the pwd path stays byte-identical: same
+ * program, empty arguments, `/` working directory, empty stdin, `LANG/LC_ALL/TZ`
+ * environment, 3s timeout, and 4096-byte output caps.
+ */
+const defaultPwdCommand: GrantedHostCommand = Object.freeze({
+  label: "pwd",
+  program: pwdExecutable,
+  arguments: Object.freeze([]),
+  workingDirectory: "/",
+  environment: Object.freeze([
+    Object.freeze({ name: "LANG", value: "C" }),
+    Object.freeze({ name: "LC_ALL", value: "C" }),
+    Object.freeze({ name: "TZ", value: "UTC" }),
+  ]),
+  limits: Object.freeze({
+    timeoutMs: commandTimeoutMilliseconds,
+    maxStdoutBytes: commandOutputLimitBytes,
+    maxStderrBytes: commandOutputLimitBytes,
+  }),
+  rationale: "direct execution of trusted pwd with no arguments and bounded output",
+})
+
 export const hostExecutionBoundaryLabel = "HOST EXECUTION — NO SANDBOX"
 
 export const hostCommandFaultPoints = [
@@ -77,13 +110,13 @@ export type HostCommandCoordinatorDependencies = Readonly<{
 }>
 
 export type HostCommandPreview = Readonly<{
-  command: "pwd"
+  command: string
   boundary: "host_no_sandbox"
   boundaryLabel: typeof hostExecutionBoundaryLabel
-  executable: ExecutionCapabilityManifest["process"]["executable"] & Readonly<{ requestedPath: typeof pwdExecutable }>
+  executable: ExecutionCapabilityManifest["process"]["executable"] & Readonly<{ requestedPath: string }>
   argv: ReadonlyArray<string>
-  workingDirectory: "/"
-  environment: ReadonlyArray<Readonly<{ name: "LANG" | "LC_ALL" | "TZ"; value: string }>>
+  workingDirectory: string
+  environment: ReadonlyArray<Readonly<{ name: string; value: string }>>
   stdin: Readonly<{ bytes: 0; digest: ContentDigest }>
   limits: Readonly<{ timeoutMs: number; maxStdoutBytes: number; maxStderrBytes: number }>
   workspace: Readonly<{ canonicalPath: string; device: string; inode: string; access: "identity_guard" }>
@@ -103,6 +136,16 @@ export type ProposeHostCommandInput = Readonly<{
   report: WorkspaceTrustReport
   repositoryBaseline?: GitRepositoryBaselineSnapshot
   policyAskedAt: string
+  /**
+   * An untrusted proposed command. Authority is granted *inside* this runtime
+   * trust boundary: the coordinator runs `evaluateHostCommandPolicy` against
+   * `policy` (defaulting to `defaultHostCommandPolicy`) and fails closed on any
+   * denial. It never accepts a pre-granted command from an external caller.
+   * When omitted, the trusted, byte-identical pwd spec is used.
+   */
+  commandProposal?: ProposedHostCommand
+  /** Deterministic authority policy; defaults to `defaultHostCommandPolicy`. */
+  policy?: HostCommandPolicy
 }>
 
 export type HostCommandConsent =
@@ -141,20 +184,48 @@ export class HostCommandCoordinationError extends Error {
   readonly _tag = "HostCommandCoordinationError"
 
   constructor(
-    readonly code: "invalid_input" | "state_unavailable" | "recovery_unavailable" | "operation_in_progress",
+    readonly code:
+      | "invalid_input"
+      | "state_unavailable"
+      | "recovery_unavailable"
+      | "operation_in_progress"
+      | "policy_denied",
     message: string,
     override readonly cause?: unknown,
+    readonly policyDenialReason?: HostCommandPolicyDenialReason,
   ) {
     super(message)
     this.name = this._tag
   }
 }
 
+/**
+ * Turns an untrusted proposed command into a deterministically granted command
+ * *inside* the trust boundary, or fails closed. When no proposal is supplied the
+ * trusted, byte-identical pwd spec is returned. A denial throws before any
+ * ledger event, claim, or process spawn — the only path to a non-pwd command is
+ * a policy grant, never a caller-supplied pre-granted command.
+ */
+function resolveGrantedCommand(input: ProposeHostCommandInput): GrantedHostCommand {
+  if (!input.commandProposal) return defaultPwdCommand
+  const decision = evaluateHostCommandPolicy(input.commandProposal, input.policy ?? defaultHostCommandPolicy)
+  if (decision.outcome === "denied") {
+    throw new HostCommandCoordinationError(
+      "policy_denied",
+      `The proposed host command was denied by deterministic policy: ${decision.reason}`,
+      undefined,
+      decision.reason,
+    )
+  }
+  return decision.command
+}
+
 /** Prepares the exact direct-exec authority that must be displayed before consent. */
 export async function proposeHostCommand(input: ProposeHostCommandInput): Promise<HostCommandProposal> {
+  const command = resolveGrantedCommand(input)
   requireHostCommandInput(input)
-  const executable = await inspectExecutableSource(pwdExecutable)
-  const proposal = makeProposal(input, executable)
+  const executable = await inspectExecutableSource(command.program)
+  const proposal = makeProposal(input, executable, command)
   const parsed = parseExecutionCapability({
     manifest: proposal.manifest,
     capabilityDigest: computeExecutionCapabilityDigest(proposal.manifest),
@@ -346,31 +417,32 @@ export async function recoverHostCommand(
 function makeProposal(
   input: ProposeHostCommandInput,
   executable: ExecutionCapabilityManifest["process"]["executable"],
+  command: GrantedHostCommand,
 ) {
   requireHostCommandInput(input)
   const operationID = requireOperationID(input.operationID)
   const attemptID = requireAttemptID(deterministicUUID(operationID, "attempt:1"))
   const capabilityGrantID = requireCapabilityGrantID(deterministicUUID(operationID, "capability:1"))
   const baseline = makeControlledWriteBaselineAuthority(input.report, input.repositoryBaseline)
-  const environment = [
-    { name: "LANG", value: "C" },
-    { name: "LC_ALL", value: "C" },
-    { name: "TZ", value: "UTC" },
-  ] as const
+  const environment = toManifestEnvironment(command.environment)
   const resources = [`process:${executable.canonicalPath}`, `workspace:${input.report.root}`]
+  // Host commands never receive stdin; the runtime spawns with `stdin: "ignore"`,
+  // so the granted authority is always an empty input stream.
   const stdinDigest = sha256(new Uint8Array())
   const limits = {
-    timeoutMs: commandTimeoutMilliseconds,
-    maxStdoutBytes: commandOutputLimitBytes,
-    maxStderrBytes: commandOutputLimitBytes,
+    timeoutMs: command.limits.timeoutMs,
+    maxStdoutBytes: command.limits.maxStdoutBytes,
+    maxStderrBytes: command.limits.maxStderrBytes,
   } as const
   const preview = freezePreview({
-    command: "pwd",
+    command: command.label,
     boundary: "host_no_sandbox",
     boundaryLabel: hostExecutionBoundaryLabel,
-    executable: { requestedPath: pwdExecutable, ...executable },
-    argv: [executable.canonicalPath],
-    workingDirectory: "/",
+    executable: { requestedPath: command.program, ...executable },
+    argv: [executable.canonicalPath, ...command.arguments],
+    // Bind the preview to the granted working directory so the displayed
+    // authority never diverges from the manifest's `process.workingDirectory`.
+    workingDirectory: command.workingDirectory,
     environment,
     stdin: { bytes: 0, digest: stdinDigest },
     limits,
@@ -396,9 +468,9 @@ function makeProposal(
     isolation: { platform: "darwin", backend: "host", fallback: "deny" },
     process: {
       executable,
-      programDigest: digest("astra-host-command:direct-exec:pwd:v1"),
-      arguments: [],
-      workingDirectory: "/",
+      programDigest: digest(`astra-host-command:direct-exec:${command.label}:v1`),
+      arguments: [...command.arguments],
+      workingDirectory: command.workingDirectory,
       stdinDigest,
     },
     filesystem: {
@@ -425,12 +497,13 @@ function makeHostCommandFacts(input: ExecuteHostCommandInput) {
   const repositoryBaseline = input.repositoryBaseline
     ? deepFreeze(structuredClone(input.repositoryBaseline))
     : undefined
+  const command = resolveGrantedCommand(input)
   const authorityInput = repositoryBaseline
     ? { operationID: input.operationID, report, repositoryBaseline, policyAskedAt: input.policyAskedAt }
     : { operationID: input.operationID, report, policyAskedAt: input.policyAskedAt }
   const parsed = parseExecutionCapability(input.proposal.capability)
   if (!parsed.ok) throw new TypeError("The host command capability is invalid")
-  const expected = makeProposal(authorityInput, parsed.value.manifest.process.executable)
+  const expected = makeProposal(authorityInput, parsed.value.manifest.process.executable, command)
   if (
     input.proposal.policyAskedAt !== input.policyAskedAt ||
     canonicalJson(parsed.value.manifest) !== canonicalJson(expected.manifest) ||
@@ -494,7 +567,7 @@ function makeHostCommandFacts(input: ExecuteHostCommandInput) {
     risk: {
       level: "low",
       classification: "allowlisted_read_only_host_command",
-      rationaleDigest: digest("direct execution of trusted pwd with no arguments and bounded output"),
+      rationaleDigest: digest(command.rationale),
     },
     reversibility: { kind: "irreversible" },
     verificationPlan: {
@@ -801,7 +874,7 @@ async function appendClaimUncertainty(
     observedAt,
     targetObservation: {
       state: "unavailable",
-      digest: digest(canonicalJson({ command: "pwd", observation: "receipt_missing" })),
+      digest: digest(canonicalJson({ command: facts.preview.command, observation: "receipt_missing" })),
     },
   })
   const recorded = await runWithCoordinatorLedger(
@@ -1108,6 +1181,23 @@ function notStartedObservation(reason: string): HostCommandProcessObservation {
     stderr: Buffer.from(reason),
     stopReason: "process_observation_failed",
   }
+}
+
+const permittedEnvironmentNames = ["LANG", "LC_ALL", "TMPDIR", "TZ"] as const
+
+/**
+ * Narrows a granted command's environment names to the capability manifest's
+ * permitted set. Any other name fails closed here, before the manifest is even
+ * built; `parseExecutionCapability` independently re-rejects unpermitted names.
+ */
+function toManifestEnvironment(
+  variables: GrantedHostCommand["environment"],
+): ExecutionCapabilityManifest["environment"]["variables"] {
+  return variables.map((variable) => {
+    const name = permittedEnvironmentNames.find((permitted) => permitted === variable.name)
+    if (!name) throw new TypeError("The host command environment variable is not permitted")
+    return { name, value: variable.value }
+  })
 }
 
 function freezePreview(preview: HostCommandPreview): HostCommandPreview {

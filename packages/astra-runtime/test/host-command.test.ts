@@ -3,6 +3,7 @@ import { access, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { parseOperationID } from "@astra/domain/operation-contract"
+import { type ProposedHostCommand } from "@astra/domain/host-command-policy"
 import { Effect } from "effect"
 import {
   classifyHostCommandObservation,
@@ -293,6 +294,120 @@ describe("governed host command", () => {
     })
   })
 })
+
+describe("generalized host command via deterministic policy", () => {
+  const onDarwin = process.platform === "darwin"
+
+  test("fails closed on a non-allowlisted proposal, with no manifest, claim, or spawn", async () => {
+    // Authority is granted inside the runtime trust boundary. A non-allowlisted
+    // program (here /bin/sh, the classic arbitrary-code lever) is denied by the
+    // deterministic policy before any executable inspection, ledger event, or
+    // process spawn — the platform gate is never even reached.
+    const workspace = await temporaryDirectory("astra-host-command-workspace-")
+    const state = await temporaryDirectory("astra-host-command-state-")
+    await writeFile(join(workspace, "package.json"), "{}\n")
+    const report = await scanWorkspace(workspace)
+    const ledgerFilename = join(state, "operations.sqlite")
+    const proposalInput = {
+      operationID: crypto.randomUUID(),
+      report,
+      policyAskedAt: new Date().toISOString(),
+      commandProposal: { program: "/bin/sh", arguments: ["-c", "touch /tmp/owned"], workingDirectory: "/" },
+    }
+    await expect(proposeHostCommand(proposalInput)).rejects.toMatchObject({
+      code: "policy_denied",
+      policyDenialReason: "program_not_allowlisted",
+    })
+    expect(await exists(ledgerFilename)).toBeFalse()
+  })
+
+  test.skipIf(!onDarwin)("binds an allowlisted proposal's argv, cwd, and narrowed env into the manifest", async () => {
+    const input = await proposalCommandInput({
+      program: "/bin/echo",
+      arguments: ["hello", "world"],
+      workingDirectory: "/",
+      environment: [{ name: "LANG", value: "C" }],
+    })
+    const preview = input.proposal.preview
+    const manifest = input.proposal.capability.manifest
+
+    // The displayed argv carries exactly the proposed arguments after argv[0].
+    expect(preview.argv.slice(1)).toEqual(["hello", "world"])
+    // ...and the bound manifest matches the preview, argument for argument.
+    expect(manifest.process.arguments).toEqual(["hello", "world"])
+    // FIX 2 regression guard: the bound working directory equals the previewed
+    // one — a hardcoded preview cwd would have diverged here.
+    expect(manifest.process.workingDirectory).toBe(preview.workingDirectory)
+    // The environment is narrowed to the allowlisted, sorted set.
+    expect(manifest.environment.variables).toEqual([{ name: "LANG", value: "C" }])
+    expect(preview.boundaryLabel).toBe(hostExecutionBoundaryLabel)
+  })
+
+  test.skipIf(!onDarwin)(
+    "runs an allowlisted non-pwd command, claims once, and records observed, never verified",
+    async () => {
+      const input = await proposalCommandInput({ program: "/bin/echo", arguments: ["hello"], workingDirectory: "/" })
+      const result = await executeHostCommand(input)
+
+      expect(result).toMatchObject({
+        state: "completed",
+        status: "completed_observed_not_verified",
+        boundaryLabel: hostExecutionBoundaryLabel,
+      })
+      expect(result.output?.stdout).toBe("hello\n")
+      expect(JSON.stringify(result)).not.toContain("VERIFIED")
+      expect(await receiptPreview(input)).toStartWith("COMPLETED — OUTPUT OBSERVED — NOT VERIFIED")
+      expect(await eventNames(input)).toEqual([
+        "operation.admitted",
+        "policy.ask",
+        "approval.granted",
+        "dispatch.requested",
+        "executor.accepted",
+        "effect.completed",
+      ])
+    },
+  )
+
+  test.skipIf(!onDarwin)("passes argv literally with no shell interpretation", async () => {
+    const sentinel = join(tmpdir(), `astra-policy-sentinel-${crypto.randomUUID()}`)
+    const input = await proposalCommandInput({
+      program: "/bin/echo",
+      arguments: [`hello; touch ${sentinel}`],
+      workingDirectory: "/",
+    })
+    try {
+      const result = await executeHostCommand(input)
+      expect(result).toMatchObject({ state: "completed", status: "completed_observed_not_verified" })
+      // The metacharacters are echoed literally; no shell ever ran them.
+      expect(result.output?.stdout).toBe(`hello; touch ${sentinel}\n`)
+      expect(await exists(sentinel)).toBeFalse()
+    } finally {
+      await rm(sentinel, { force: true })
+    }
+  })
+})
+
+async function proposalCommandInput(commandProposal: ProposedHostCommand): Promise<ExecuteHostCommandInput> {
+  const workspace = await temporaryDirectory("astra-host-command-workspace-")
+  const state = await temporaryDirectory("astra-host-command-state-")
+  await writeFile(join(workspace, "package.json"), "{}\n")
+  const report = await scanWorkspace(workspace)
+  const base = Date.now() - 1_000
+  const proposalInput = {
+    operationID: crypto.randomUUID(),
+    report,
+    policyAskedAt: new Date(base).toISOString(),
+    commandProposal,
+  }
+  return {
+    ...proposalInput,
+    ledgerFilename: join(state, "operations.sqlite"),
+    spoolFilename: join(state, "receipts.sqlite"),
+    proposal: await proposeHostCommand(proposalInput),
+    consent: { decision: "approved", decidedAt: new Date(base + 100).toISOString() },
+    recordingStartedAt: new Date(base + 200).toISOString(),
+  }
+}
 
 async function commandInput(decision: "approved" | "rejected"): Promise<ExecuteHostCommandInput> {
   const workspace = await temporaryDirectory("astra-host-command-workspace-")

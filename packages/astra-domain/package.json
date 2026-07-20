@@ -11,6 +11,7 @@
     "./operation-contract": "./src/operation-contract.ts",
     "./operation-view-control": "./src/operation-view-control.ts",
     "./execution-capability": "./src/execution-capability.ts",
+    "./host-command-policy": "./src/host-command-policy.ts",
     "./extension-capability": "./src/extension-capability.ts",
     "./extension-inventory-control": "./src/extension-inventory-control.ts",
     "./extension-inventory-operation": "./src/extension-inventory-operation.ts",

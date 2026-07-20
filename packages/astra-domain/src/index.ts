@@ -97,6 +97,24 @@ export type {
 } from "./execution-capability"
 
 export {
+  defaultHostCommandPolicy,
+  evaluateHostCommandPolicy,
+  hostCommandLimitCeilings,
+  hostCommandMaximumArguments,
+} from "./host-command-policy"
+
+export type {
+  GrantedHostCommand,
+  HostCommandEnvironmentVariable,
+  HostCommandLimits,
+  HostCommandPolicy,
+  HostCommandPolicyDecision,
+  HostCommandPolicyDenialReason,
+  HostCommandProgramRule,
+  ProposedHostCommand,
+} from "./host-command-policy"
+
+export {
   computeSkillActivationCapabilityDigest,
   isWorkspaceOpenCodeSkillPath,
   parseSkillActivationCapability,
