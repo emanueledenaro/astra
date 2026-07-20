@@ -12,6 +12,7 @@ export function AstraControlRail(props: {
   view: AstraWorkSessionView
   candidateAvailable: boolean
   providerOperation?: AstraProviderOperationView
+  workDecisionHasFocus?: boolean
 }) {
   return (
     <box width="100%" height="100%" flexDirection="column">
@@ -28,6 +29,7 @@ export function AstraControlRail(props: {
             api={props.api}
             operation={operation()}
             workStateUnavailable={props.view.status !== "available"}
+            workDecisionHasFocus={props.workDecisionHasFocus === true}
           />
         )}
       </Show>
@@ -43,7 +45,14 @@ export function AstraControlRail(props: {
           </Show>
         }
       >
-        {(projection) => <AvailableRail api={props.api} projection={projection()} candidateAvailable={props.candidateAvailable} />}
+        {(projection) => (
+          <AvailableRail
+            api={props.api}
+            projection={projection()}
+            candidateAvailable={props.candidateAvailable}
+            decisionControlsInProviderHeader={props.providerOperation !== undefined && props.workDecisionHasFocus === true}
+          />
+        )}
       </Show>
     </box>
   )
@@ -53,6 +62,7 @@ function ProviderOperationRail(props: {
   api: TuiPluginApi
   operation: AstraProviderOperationView
   workStateUnavailable: boolean
+  workDecisionHasFocus: boolean
 }) {
   return (
     <Section
@@ -69,8 +79,14 @@ function ProviderOperationRail(props: {
       <Show when={props.workStateUnavailable}>
         <RailRow label="WORK STATE" value="STATE UNAVAILABLE · PARENT STREAM LOST" api={props.api} />
       </Show>
-      <RailRow label="STATE" value={props.operation.statusLabel} api={props.api} />
-      <Show when={props.operation.decisionRequired}>
+      <Show
+        when={props.operation.decisionRequired && props.workDecisionHasFocus}
+        fallback={<RailRow label="STATE" value={props.operation.statusLabel} api={props.api} />}
+      >
+        <text fg={props.api.theme.current.warning}>WAITING — WORK DECISION HAS FOCUS</text>
+        <text fg={props.api.theme.current.warning}>WORK: A APPROVE · D REJECT</text>
+      </Show>
+      <Show when={props.operation.decisionRequired && !props.workDecisionHasFocus}>
         <text fg={props.api.theme.current.warning}>A APPROVE · D REJECT</text>
       </Show>
       <RailRow label="OPERATION" value={props.operation.operationID} api={props.api} />
@@ -106,6 +122,7 @@ function AvailableRail(props: {
   api: TuiPluginApi
   projection: AstraWorkSessionProjection
   candidateAvailable: boolean
+  decisionControlsInProviderHeader: boolean
 }) {
   const pending = () => props.projection.decisions.filter((decision) => decision.state === "pending")
   const showIntent = () => props.projection.objective !== null || props.projection.phase !== "idle"
@@ -131,7 +148,9 @@ function AvailableRail(props: {
               <Show when={pending().length > 1}>
                 <text fg={props.api.theme.current.textMuted}>{pending().length - 1} OTHER PENDING</text>
               </Show>
-              <text fg={props.api.theme.current.warning}>A APPROVE · D REJECT</text>
+              <Show when={!props.decisionControlsInProviderHeader}>
+                <text fg={props.api.theme.current.warning}>A APPROVE · D REJECT</text>
+              </Show>
             </Section>
           )}
         </Show>

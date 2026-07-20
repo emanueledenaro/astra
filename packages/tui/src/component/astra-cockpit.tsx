@@ -116,8 +116,12 @@ export function AstraCockpit(props: {
           if (!sideBySide() && !reviewOpen()) setCompactControl((value) => !value)
         },
       },
-      { name: "astra.work.approve", title: "Approve Parent Decision", category: "Astra", run: () => decide("approved") },
-      { name: "astra.work.reject", title: "Reject Parent Decision", category: "Astra", run: () => decide("rejected") },
+      ...(pending().length > 0
+        ? [
+            { name: "astra.work.approve", title: "Approve Parent Decision", category: "Astra", run: () => decide("approved") },
+            { name: "astra.work.reject", title: "Reject Parent Decision", category: "Astra", run: () => decide("rejected") },
+          ]
+        : []),
       { name: "astra.review.toggle", title: "Open Candidate Review", category: "Astra", run: toggleReview },
       { name: "astra.review.close", title: "Return to Astra Chat", category: "Astra", run: () => setReviewOpen(false) },
     ],
@@ -160,7 +164,8 @@ export function AstraCockpit(props: {
               api={props.api}
               authority={props.authority}
               client={providerClient}
-              bindingsSuspended={reviewOpen() || pending().length > 0}
+              bindingsSuspended={reviewOpen()}
+              workDecisionHasFocus={pending().length > 0}
               onActivity={setActivity}
             />
           </box>
@@ -185,6 +190,7 @@ export function AstraCockpit(props: {
             view={workView()}
             candidateAvailable={candidate() !== undefined}
             providerOperation={activity().providerOperation}
+            workDecisionHasFocus={pending().length > 0}
           />
         </box>
       </box>

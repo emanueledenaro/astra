@@ -178,6 +178,63 @@ test("shows the parent provider preview beside chat while work state is unavaila
   }
 })
 
+test("gives simultaneous A/D focus only to the pending work decision", async () => {
+  let providerDecisions = 0
+  const providerClient = {
+    catalog: () => Promise.resolve(catalogResult),
+    prepare: () =>
+      Promise.resolve({
+        schemaVersion: 1,
+        requestId: "10000000-0000-4000-8000-000000000001",
+        status: "prepared",
+        preview: providerPreview,
+      } as const),
+    decide: () => {
+      providerDecisions += 1
+      return Promise.reject(new Error("Provider decision must not run while work owns A/D"))
+    },
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderCockpit({
+    width: 140,
+    height: 34,
+    projection: workingProjection(),
+    providerClient,
+    prompt: "Keep this provider preview pending",
+  })
+  try {
+    await app.render.waitForFrame((value) => value.includes("CONVERSATION"))
+    app.dispatch("astra.chat.compose")
+    await app.render.waitForFrame(
+      (value) => value.includes("PROVIDER OPERATION") && value.includes("A APPROVE · D REJECT"),
+    )
+    await app.setWorkView(availableWorkView(decisionProjection()))
+    const focused = await app.render.waitForFrame((value) => value.includes("WAITING — WORK DECISION HAS FOCUS"))
+    expect(focused).toContain("WAITING — WORK DECISION HAS FOCUS")
+    expect(occurrences(focused, "A APPROVE · D REJECT")).toBe(1)
+    expect({
+      work: app.activeBindingCount("astra.work.reject"),
+      provider: app.activeBindingCount("astra.chat.reject"),
+    }).toEqual({ work: 1, provider: 0 })
+
+    app.dispatch("astra.chat.reject")
+    await Bun.sleep(10)
+    expect(providerDecisions).toBe(0)
+
+    await app.setWorkView(availableWorkView(resolvedDecisionProjection()))
+    const providerFocused = await app.render.waitForFrame(
+      (value) => !value.includes("WORK DECISION HAS FOCUS") && value.includes("A APPROVE · D REJECT"),
+    )
+    expect(occurrences(providerFocused, "A APPROVE · D REJECT")).toBe(1)
+    expect({
+      work: app.activeBindingCount("astra.work.reject"),
+      provider: app.activeBindingCount("astra.chat.reject"),
+    }).toEqual({ work: 0, provider: 1 })
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
 test("keeps the provider preview mounted in the compact control alternate", async () => {
   let catalogCalls = 0
   const providerClient = {
@@ -411,6 +468,7 @@ async function renderCockpit(options: RenderOptions) {
   )
   const decisions: Array<Readonly<{ decisionID: string; outcome: "approved" | "rejected" }>> = []
   let dispatch = (_command: string) => undefined
+  let activeBindingCount = (_command: string) => 0
   let catalogCalls = 0
   const fallbackProviderClient = {
     catalog() {
@@ -427,6 +485,8 @@ async function renderCockpit(options: RenderOptions) {
   function Harness() {
     const renderer = useRenderer()
     const keymap = createDefaultOpenTuiKeymap(renderer)
+    activeBindingCount = (command) =>
+      keymap.getCommands({ visibility: "registered", filter: { name: command } }).length
     const base = createTuiPluginApi({ keymap })
     const [dialog, setDialog] = createSignal<JSX.Element>()
     function TestDialogPrompt(props: { onConfirm?: (value: string) => void }) {
@@ -498,28 +558,39 @@ async function renderCockpit(options: RenderOptions) {
     dispatch: (command: string) => dispatch(command),
     decisions,
     catalogCalls: () => catalogCalls,
+    setWorkView: workSessionClient.emit,
+    activeBindingCount: (command: string) => activeBindingCount(command),
   }
+}
+
+type TestWorkSessionClient = AstraWorkSessionClient & {
+  emit: (view: AstraWorkSessionView) => Promise<void>
 }
 
 function createWorkSessionClient(
   projection: AstraWorkSessionProjection,
   streamView: AstraWorkSessionView | undefined,
   decisions: Array<Readonly<{ decisionID: string; outcome: "approved" | "rejected" }>>,
-): AstraWorkSessionClient {
+): TestWorkSessionClient {
   const available = {
     status: "available",
     projection,
     cursor: cursorForAstraWorkSessionProjection(projection),
   } as const
+  let streamConsumer: ((view: AstraWorkSessionView) => void | Promise<void>) | undefined
   return {
     snapshot: () => Promise.resolve(available),
     subscribe: async (consumer, options) => {
+      streamConsumer = consumer
       await consumer(streamView ?? available)
       await new Promise<void>((resolve) =>
         options?.signal?.addEventListener("abort", () => resolve(), {
           once: true,
         }),
       )
+    },
+    emit: async (view) => {
+      await streamConsumer?.(view)
     },
     decide: async (decisionID, outcome) => {
       decisions.push({ decisionID, outcome })
@@ -615,6 +686,22 @@ function decisionProjection() {
   )
 }
 
+function resolvedDecisionProjection() {
+  return advance(
+    decisionProjection(),
+    { type: "decision.resolved", payload: { decisionID: "decision-write", outcome: "rejected" } },
+    { type: "decision.resolved", payload: { decisionID: "decision-other", outcome: "rejected" } },
+  )
+}
+
+function availableWorkView(projection: AstraWorkSessionProjection): AstraWorkSessionView {
+  return {
+    status: "available",
+    projection,
+    cursor: cursorForAstraWorkSessionProjection(projection),
+  }
+}
+
 function reconciliationProjection() {
   return advance(workingProjection(), {
     type: "effect.ambiguous",
@@ -703,6 +790,10 @@ function lastContentLine(frame: string) {
       .filter((line) => line.trim())
       .at(-1) ?? ""
   )
+}
+
+function occurrences(value: string, expected: string) {
+  return value.split(expected).length - 1
 }
 
 const actor = { kind: "system", actorID: "astra-parent" } as const

@@ -245,11 +245,45 @@ test("keeps the consented conversation transcript across turns and across a cata
       (frame) => frame.includes("First observed answer") && frame.includes("Second observed answer"),
     )
     expect(completed).toContain("COMPLETED — RESPONSE OBSERVED — NOT VERIFIED")
+    expect(completed).not.toContain("a approve d reject")
+    expect(app.hasCommand("astra.chat.approve")).toBeFalse()
+    expect(app.hasCommand("astra.chat.reject")).toBeFalse()
 
     app.dispatch("astra.chat.reset")
     const reloaded = await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
     expect(reloaded).toContain("First observed answer")
     expect(reloaded).toContain("Second observed answer")
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
+test("removes provider decision controls after denial", async () => {
+  const client = {
+    catalog: () => Promise.resolve(catalogResult),
+    prepare: () => Promise.resolve({ schemaVersion: 1, requestId, status: "prepared", preview } as const),
+    decide: () =>
+      Promise.resolve({
+        schemaVersion: 1,
+        requestId,
+        proposalID,
+        operationID,
+        status: "denied_without_effect",
+        receiptID: null,
+      } as const),
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderSurface(client)
+
+  try {
+    await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
+    await prepareThroughDialog(app)
+    await app.render.waitForFrame((frame) => frame.includes("AWAITING EXPLICIT DECISION"))
+    app.dispatch("astra.chat.reject")
+    const denied = await app.render.waitForFrame((frame) => frame.includes("DENIED · ZERO NETWORK EFFECT"))
+    expect(denied).not.toContain("a approve d reject")
+    expect(app.hasCommand("astra.chat.approve")).toBeFalse()
+    expect(app.hasCommand("astra.chat.reject")).toBeFalse()
   } finally {
     app.render.renderer.destroy()
   }
@@ -325,9 +359,12 @@ async function renderSurface(
   }
   let route: TuiRouteDefinition | undefined
   let dispatch!: (command: string) => void
+  let hasCommand = (_command: string) => false
   function Harness() {
     const renderer = useRenderer()
     const keymap = createDefaultOpenTuiKeymap(renderer)
+    hasCommand = (command) =>
+      keymap.getCommands({ visibility: "registered", filter: { name: command } }).length > 0
     const registerLayer = keymap.registerLayer.bind(keymap)
     keymap.registerLayer = (layer) => {
       layer.commands?.forEach((command) => commands.set(command.name, command))
@@ -399,6 +436,7 @@ async function renderSurface(
     render,
     dispatch: (command: string) => dispatch(command),
     current: () => current,
+    hasCommand: (command: string) => hasCommand(command),
   }
 }
 

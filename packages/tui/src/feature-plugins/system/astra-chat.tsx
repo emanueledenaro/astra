@@ -96,6 +96,7 @@ export function AstraChatView(props: {
   returnRoute?: TuiRouteCurrent
   embedded?: boolean
   bindingsSuspended?: boolean
+  workDecisionHasFocus?: boolean
   onActivity?: (activity: AstraChatActivity) => void
 }) {
   const dimensions = useTerminalDimensions()
@@ -371,18 +372,22 @@ export function AstraChatView(props: {
         category: "Astra",
         run: compose,
       },
-      {
-        name: "astra.chat.approve",
-        title: "Approve Provider Turn",
-        category: "Astra",
-        run: () => decide("approve"),
-      },
-      {
-        name: "astra.chat.reject",
-        title: "Reject Provider Turn",
-        category: "Astra",
-        run: () => decide("reject"),
-      },
+      ...(providerDecisionEligible(state(), props)
+        ? [
+            {
+              name: "astra.chat.approve",
+              title: "Approve Provider Turn",
+              category: "Astra",
+              run: () => decide("approve"),
+            },
+            {
+              name: "astra.chat.reject",
+              title: "Reject Provider Turn",
+              category: "Astra",
+              run: () => decide("reject"),
+            },
+          ]
+        : []),
       {
         name: "astra.chat.reset",
         title: "Reload Chat Catalog",
@@ -400,8 +405,12 @@ export function AstraChatView(props: {
       { key: "v", cmd: "astra.chat.provider", desc: "Provider" },
       { key: "m", cmd: "astra.chat.model", desc: "Model" },
       { key: "p", cmd: "astra.chat.compose", desc: "Prompt" },
-      { key: "a", cmd: "astra.chat.approve", desc: "Approve" },
-      { key: "d", cmd: "astra.chat.reject", desc: "Reject" },
+      ...(providerDecisionEligible(state(), props)
+        ? [
+            { key: "a", cmd: "astra.chat.approve", desc: "Approve" },
+            { key: "d", cmd: "astra.chat.reject", desc: "Reject" },
+          ]
+        : []),
       { key: "r", cmd: "astra.chat.reset", desc: "Reload" },
       { key: "escape", cmd: "astra.chat.close", desc: "Close" },
     ],
@@ -424,8 +433,8 @@ export function AstraChatView(props: {
         <Show when={!props.embedded || dimensions().width >= 104}>
           <text fg={props.api.theme.current.textMuted}>
             {props.embedded
-              ? "p message · v provider · m model · a/d decision"
-              : "v provider m model p prompt a approve d reject r reload esc close"}
+              ? `p message · v provider · m model${providerDecisionEligible(state(), props) ? " · a/d decision" : ""}`
+              : `v provider m model p prompt${providerDecisionEligible(state(), props) ? " a approve d reject" : ""} r reload esc close`}
           </text>
         </Show>
       </box>
@@ -575,8 +584,16 @@ export function AstraChatView(props: {
       </Show>
       <Show when={props.embedded && state().status === "prepared"}>
         <box marginTop={1} flexDirection="column">
-          <text fg={props.api.theme.current.warning}>APPROVAL REQUIRED — review the Control Rail</text>
-          <text fg={props.api.theme.current.textMuted}>A approve · D reject · no network request has started</text>
+          <text fg={props.api.theme.current.warning}>
+            {props.workDecisionHasFocus
+              ? "WAITING — WORK DECISION HAS FOCUS"
+              : "APPROVAL REQUIRED — review the Control Rail"}
+          </text>
+          <text fg={props.api.theme.current.textMuted}>
+            {props.workDecisionHasFocus
+              ? "Resolve the work decision first · no network request has started"
+              : "A approve · D reject · no network request has started"}
+          </text>
         </box>
       </Show>
       <Show when={completedOf(state())}>
@@ -669,6 +686,13 @@ function Row(props: { label: string; value: string; api: TuiPluginApi }) {
 
 function decisionInFlight(state: ChatState) {
   return state.status === "preparing" || state.status === "deciding" || state.status === "progress"
+}
+
+function providerDecisionEligible(
+  state: ChatState,
+  props: Readonly<{ bindingsSuspended?: boolean; workDecisionHasFocus?: boolean }>,
+) {
+  return state.status === "prepared" && props.bindingsSuspended !== true && props.workDecisionHasFocus !== true
 }
 
 function modelOf(state: ChatState) {
