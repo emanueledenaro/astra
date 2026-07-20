@@ -648,6 +648,49 @@ describe("durable Astra work-session store", () => {
     }
   })
 
+  test("never acquires a retry after validation crosses the lock deadline", async () => {
+    const fixture = await makeFixture("state-root-lock-late-retry")
+    let markLocked!: () => void
+    let releaseHolder!: () => void
+    const locked = new Promise<void>((resolve) => { markLocked = resolve })
+    const release = new Promise<void>((resolve) => { releaseHolder = resolve })
+    const holder = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      physicalEntryLimit: 2,
+      afterStateRootLock: async () => {
+        markLocked()
+        await release
+      },
+    }).create({ ...fixture.createInput, sessionID: "late-retry-holder" })
+    let validationDelayed = false
+
+    try {
+      await locked
+      const waiterID = "late-retry-waiter"
+      const waiter = createWorkSessionStoreInternal({
+        stateRoot: fixture.stateRoot,
+        physicalEntryLimit: 2,
+        stateRootLockTimeoutMs: 20,
+        stateRootLockRetryDelayMs: 1,
+        beforeStateRootLockRetryValidation: async () => {
+          validationDelayed = true
+          releaseHolder()
+          await holder
+          await Bun.sleep(30)
+        },
+      })
+
+      await expect(waiter.create({ ...fixture.createInput, sessionID: waiterID })).rejects.toMatchObject({
+        code: "state_unavailable",
+      })
+      expect(validationDelayed).toBe(true)
+      expect(await exists(workSessionDatabasePathInternal(fixture.stateRoot, waiterID))).toBe(false)
+    } finally {
+      releaseHolder()
+      await holder
+    }
+  })
+
   test("fails closed without a session claim when the pinned state-root lock cannot be acquired", async () => {
     const fixture = await makeFixture("state-root-lock-failure")
     const before = await readdir(fixture.stateRoot)

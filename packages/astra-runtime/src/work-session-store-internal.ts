@@ -89,6 +89,7 @@ type WorkSessionStoreInternalOptions = Readonly<{
   stateRootLockRetryDelayMs?: number
   afterEventInsert?: () => void
   afterStateRootLock?: () => void | Promise<void>
+  beforeStateRootLockRetryValidation?: () => void | Promise<void>
   afterStateRootParentPin?: (parentPath: string, component: string) => void
   afterCreateFileBeforePin?: () => void
   afterFinalCreateIdentityCheck?: () => void
@@ -108,6 +109,7 @@ type RequiredWorkSessionStoreInternalOptions = Readonly<{
   stateRootLockRetryDelayMs: number
   afterEventInsert?: () => void
   afterStateRootLock?: () => void | Promise<void>
+  beforeStateRootLockRetryValidation?: () => void | Promise<void>
   afterStateRootParentPin?: (parentPath: string, component: string) => void
   afterCreateFileBeforePin?: () => void
   afterFinalCreateIdentityCheck?: () => void
@@ -278,6 +280,7 @@ async function createSession(
     expectedUID,
     options.nativeFailure,
     options.afterStateRootLock,
+    options.beforeStateRootLockRetryValidation,
     options.stateRootLockTimeoutMs,
     options.stateRootLockRetryDelayMs,
   )
@@ -1414,6 +1417,7 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     "stateRootLockRetryDelayMs",
     "afterEventInsert",
     "afterStateRootLock",
+    "beforeStateRootLockRetryValidation",
     "afterStateRootParentPin",
     "afterCreateFileBeforePin",
     "afterFinalCreateIdentityCheck",
@@ -1458,6 +1462,7 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
   for (const key of [
     "afterEventInsert",
     "afterStateRootLock",
+    "beforeStateRootLockRetryValidation",
     "afterStateRootParentPin",
     "afterCreateFileBeforePin",
     "afterFinalCreateIdentityCheck",
@@ -1483,6 +1488,9 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     ...(typeof record.afterEventInsert === "function" ? { afterEventInsert: record.afterEventInsert as () => void } : {}),
     ...(typeof record.afterStateRootLock === "function"
       ? { afterStateRootLock: record.afterStateRootLock as () => void | Promise<void> }
+      : {}),
+    ...(typeof record.beforeStateRootLockRetryValidation === "function"
+      ? { beforeStateRootLockRetryValidation: record.beforeStateRootLockRetryValidation as () => void | Promise<void> }
       : {}),
     ...(typeof record.afterStateRootParentPin === "function"
       ? { afterStateRootParentPin: record.afterStateRootParentPin as (parentPath: string, component: string) => void }
@@ -1519,6 +1527,7 @@ async function acquireLockedStateRoot(
   expectedUID: number,
   nativeFailure: RequiredWorkSessionStoreInternalOptions["nativeFailure"] | undefined,
   afterLock: RequiredWorkSessionStoreInternalOptions["afterStateRootLock"] | undefined,
+  beforeRetryValidation: RequiredWorkSessionStoreInternalOptions["beforeStateRootLockRetryValidation"] | undefined,
   timeoutMs: number,
   retryDelayMs: number,
 ): Promise<LockedStateRoot> {
@@ -1532,7 +1541,13 @@ async function acquireLockedStateRoot(
       throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock could not be acquired")
     }
     const deadline = performance.now() + timeoutMs
-    while (library.symbols.flock(rootHandle.fd, lockExclusive | lockNonBlocking) !== 0) {
+    let initialAttempt = true
+    while (true) {
+      if (!initialAttempt && performance.now() >= deadline) {
+        throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock acquisition timed out")
+      }
+      initialAttempt = false
+      if (library.symbols.flock(rootHandle.fd, lockExclusive | lockNonBlocking) === 0) break
       const errno = lastErrno(library)
       if (errno !== lockWouldBlockErrno) {
         throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock could not be acquired")
@@ -1542,9 +1557,7 @@ async function acquireLockedStateRoot(
         throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock acquisition timed out")
       }
       await waitForStateRootLock(Math.min(retryDelayMs, Math.max(1, Math.ceil(remainingMs))))
-      if (performance.now() >= deadline) {
-        throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock acquisition timed out")
-      }
+      await beforeRetryValidation?.()
       await assertHandleMatchesPath(rootHandle, stateRoot, expectedUID, true)
     }
     locked = true
