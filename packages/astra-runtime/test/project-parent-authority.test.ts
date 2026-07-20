@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
+import { lstat, mkdir, mkdtemp, realpath, rename, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import {
@@ -81,6 +81,19 @@ describe("project-parent authority capture", () => {
     })
   })
 
+  test("blocks capture when the parent is replaced after the final target observation", async () => {
+    const parent = await temporaryDirectory("astra-project-final-capture-race-")
+    const replacement = replacementAfterFinalTargetObservation(parent, "alpha")
+
+    expect(
+      await captureProjectParentAuthority(parent, "alpha", "2026-07-20T10:15:30.000Z", replacement.filesystem),
+    ).toEqual({
+      status: "blocked",
+      reason: "parent_identity_changed",
+    })
+    expect(replacement.targetObservations()).toBe(2)
+  })
+
   test("blocks when the absent target appears after capture", async () => {
     const parent = await temporaryDirectory("astra-project-stale-target-")
     const result = await captureProjectParentAuthority(parent, "alpha")
@@ -91,6 +104,19 @@ describe("project-parent authority capture", () => {
       status: "blocked",
       reason: "target_appeared",
     })
+  })
+
+  test("blocks revalidation when the parent is replaced after the final target observation", async () => {
+    const parent = await temporaryDirectory("astra-project-final-revalidation-race-")
+    const result = await captureProjectParentAuthority(parent, "alpha")
+    if (result.status !== "complete") throw new Error("Expected complete capture")
+    const replacement = replacementAfterFinalTargetObservation(parent, "alpha")
+
+    expect(await revalidateProjectParentAuthority(result.authority, replacement.filesystem)).toEqual({
+      status: "blocked",
+      reason: "parent_identity_changed",
+    })
+    expect(replacement.targetObservations()).toBe(2)
   })
 
   test("blocks a mismatched target path without touching either target", async () => {
@@ -117,4 +143,36 @@ async function lstatNames(path: string) {
   const names: Array<string> = []
   for await (const entry of new Bun.Glob("*").scan({ cwd: path, dot: true, onlyFiles: false })) names.push(entry)
   return names.sort()
+}
+
+function replacementAfterFinalTargetObservation(parent: string, targetName: string) {
+  const original = `${parent}-approved`
+  cleanup.push(() => rm(original, { recursive: true, force: true }))
+  let observations = 0
+  return {
+    filesystem: {
+      lstat: async (path: string) => {
+        try {
+          return await lstat(path)
+        } catch (cause) {
+          if (path === join(parent, targetName) && errorCode(cause) === "ENOENT") {
+            observations += 1
+            if (observations === 2) {
+              await rename(parent, original)
+              await mkdir(parent)
+            }
+          }
+          throw cause
+        }
+      },
+      realpath,
+    },
+    targetObservations: () => observations,
+  }
+}
+
+function errorCode(input: unknown) {
+  if (typeof input !== "object" || input === null) return null
+  const descriptor = Object.getOwnPropertyDescriptor(input, "code")
+  return descriptor && "value" in descriptor ? descriptor.value : null
 }

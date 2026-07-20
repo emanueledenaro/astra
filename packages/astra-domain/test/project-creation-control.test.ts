@@ -154,13 +154,28 @@ describe("project-parent authority ledger envelope", () => {
 
     expect(baseline).toMatchObject({
       kind: "workspace",
-      locationID: `project-parent-authority:${parentPath}`,
       workspaceIdentity: authority.parentIdentity,
       repository: { kind: "non_git" },
     })
+    expect(baseline.locationID).toMatch(/^project-parent-authority:[0-9a-f]{64}$/)
     expect(parseWorkspaceBaseline(baseline).ok).toBe(true)
     expect(JSON.stringify(baseline)).not.toContain("targetIdentity")
     expect(JSON.stringify(baseline)).not.toContain("childIdentity")
+  })
+
+  test("projects long space-bearing canonical parents through a fixed-size parser-safe location ID", () => {
+    const longParentPath = `/private/tmp/${Array.from({ length: 70 }, (_, index) => `long segment ${index}`).join("/")}`
+    const draft = { ...validDraft(), parentPath: longParentPath }
+    const authority = validAuthority({
+      parentPath: longParentPath,
+      targetPath: `${longParentPath}/alpha`,
+    })
+    const baseline = makeProjectCreationWorkspaceBaseline(authority, draft)
+
+    expect(baseline.locationID).toMatch(/^project-parent-authority:[0-9a-f]{64}$/)
+    expect(baseline.locationID.length).toBeLessThanOrEqual(1_024)
+    expect(baseline.locationID.trim()).toBe(baseline.locationID)
+    expect(parseWorkspaceBaseline(baseline).ok).toBe(true)
   })
 
   test("binds every draft and authority field into every ledger digest", () => {
@@ -168,31 +183,50 @@ describe("project-parent authority ledger envelope", () => {
     const draft = validDraft()
     const original = makeProjectCreationWorkspaceBaseline(authority, draft)
     const originalDigests = baselineDigests(original)
-    const draftChanges: ReadonlyArray<ProjectCreationDraft> = [
-      { ...draft, objective: "A changed objective" },
-      { ...draft, stack: "javascript" },
-      { ...draft, files: [{ path: "src/main.ts", content: "export {}\n" }] },
-      { ...draft, files: [...draft.files].reverse() },
-      { ...draft, initializeGit: false },
-    ]
-    const authorityChanges: ReadonlyArray<ProjectParentAuthority> = [
-      validAuthority({ observedAt: "2026-07-20T10:15:31.000Z" }),
-      validAuthority({ parentIdentity: { device: "42", inode: "9002" } }),
+    const changes: ReadonlyArray<Readonly<{ draft: ProjectCreationDraft; authority: ProjectParentAuthority }>> = [
+      { draft: { ...draft, objective: "A changed objective" }, authority },
+      { draft: { ...draft, stack: "javascript" }, authority },
+      {
+        draft: {
+          ...draft,
+          files: draft.files.map((file, index) => (index === 0 ? { ...file, path: "GUIDE.md" } : file)),
+        },
+        authority,
+      },
+      {
+        draft: {
+          ...draft,
+          files: draft.files.map((file, index) => (index === 0 ? { ...file, content: "# Changed Alpha\n" } : file)),
+        },
+        authority,
+      },
+      { draft: { ...draft, files: [...draft.files].reverse() }, authority },
+      { draft: { ...draft, initializeGit: false }, authority },
+      {
+        draft: { ...draft, name: "beta" },
+        authority: validAuthority({ targetName: "beta", targetPath: `${parentPath}/beta` }),
+      },
+      {
+        draft: { ...draft, parentPath: "/private/tmp/astra moved projects" },
+        authority: validAuthority({
+          parentPath: "/private/tmp/astra moved projects",
+          targetPath: "/private/tmp/astra moved projects/alpha",
+        }),
+      },
+      {
+        draft: { ...draft, name: "gamma" },
+        authority: validAuthority({ targetName: "gamma", targetPath: `${parentPath}/gamma` }),
+      },
+      { draft, authority: validAuthority({ parentIdentity: { device: "43", inode: "9001" } }) },
+      { draft, authority: validAuthority({ parentIdentity: { device: "42", inode: "9002" } }) },
+      { draft, authority: validAuthority({ observedAt: "2026-07-20T10:15:31.000Z" }) },
     ]
 
-    for (const changedDraft of draftChanges) {
+    for (const change of changes) {
       expect(
         allDigestsChanged(
           originalDigests,
-          baselineDigests(makeProjectCreationWorkspaceBaseline(authority, changedDraft)),
-        ),
-      ).toBe(true)
-    }
-    for (const changedAuthority of authorityChanges) {
-      expect(
-        allDigestsChanged(
-          originalDigests,
-          baselineDigests(makeProjectCreationWorkspaceBaseline(changedAuthority, draft)),
+          baselineDigests(makeProjectCreationWorkspaceBaseline(change.authority, change.draft)),
         ),
       ).toBe(true)
     }
@@ -229,14 +263,18 @@ function validDraft(): ProjectCreationDraft {
 }
 
 function validAuthority(
-  changes: Partial<Pick<ProjectParentAuthority, "observedAt" | "parentIdentity">> = {},
+  changes: Partial<
+    Pick<ProjectParentAuthority, "observedAt" | "parentIdentity" | "parentPath" | "targetName" | "targetPath">
+  > = {},
 ): ProjectParentAuthority {
+  const authorityParentPath = changes.parentPath ?? parentPath
+  const targetName = changes.targetName ?? "alpha"
   const sealed = sealProjectParentAuthority({
     schemaVersion: 1,
-    parentPath,
+    parentPath: authorityParentPath,
     parentIdentity: changes.parentIdentity ?? { device: "42", inode: "9001" },
-    targetPath: `${parentPath}/alpha`,
-    targetName: "alpha",
+    targetPath: changes.targetPath ?? `${authorityParentPath}/${targetName}`,
+    targetName,
     targetState: "absent",
     observedAt: changes.observedAt ?? observedAt,
     limits: projectCreationLimits,

@@ -226,7 +226,7 @@ export function makeProjectCreationWorkspaceBaseline(
   const material = { authority: authority.value, draft: draft.value }
   const baseline = {
     kind: "workspace",
-    locationID: `project-parent-authority:${authority.value.parentPath}`,
+    locationID: projectParentAuthorityLocationID(authority.value.parentPath),
     workspaceIdentity: authority.value.parentIdentity,
     trustDigest: digest("astra.project-parent.trust.v1", material),
     repository: { kind: "non_git", markerDigest: digest("astra.project-parent.non-git-envelope.v1", material) },
@@ -372,6 +372,10 @@ function exactKeys(input: Readonly<Record<string, unknown>>, expected: ReadonlyA
 
 function digest(domain: string, input: unknown): `sha256:${string}` {
   return `sha256:${createHash("sha256").update(`${domain}\0${canonicalJson(input)}`).digest("hex")}`
+}
+
+function projectParentAuthorityLocationID(parentPath: string) {
+  return `project-parent-authority:${digest("astra.project-parent.location.v1", { parentPath }).slice("sha256:".length)}`
 }
 
 function canonicalJson(input: unknown): string {
