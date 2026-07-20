@@ -45,6 +45,10 @@ export { parseAstraLaunchpadDecision, parseAstraLaunchpadSnapshot } from "./laun
 
 export type { AstraLaunchpadDecision, AstraLaunchpadParseResult, AstraLaunchpadSnapshot } from "./launchpad"
 
+export { parseAstraSystemDecision, parseAstraSystemSnapshot } from "./system-control"
+
+export type { AstraSystemControlParseResult, AstraSystemDecision, AstraSystemSnapshot } from "./system-control"
+
 export {
   controlledWriteBoundaryLabel,
   controlledWriteDemoTarget,

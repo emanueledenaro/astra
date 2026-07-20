@@ -15,6 +15,7 @@ import { createTerminalIO } from "./terminal-io"
 import { openAstraWorkspaceSession } from "./workspace-session"
 import { parseAstraArguments } from "./arguments"
 import { routeAstraLaunchpadDecision } from "./launchpad-routing"
+import { runAstraSystemControl } from "./system-control"
 
 type DeniedLedgerModule = Readonly<{
   recordDeniedControlledWrite: (
@@ -163,11 +164,7 @@ async function runSystemMode() {
     console.error("Astra System Mode requires an interactive terminal.")
     return 1
   }
-  const moduleName = ["@opencode-ai/tui", "astra/system-mode"].join("/")
-  const loaded: unknown = await import(moduleName)
-  if (!isSystemModeModule(loaded)) throw new Error("The Astra System Mode interface is unavailable")
-  await loaded.runAstraSystemMode()
-  return 0
+  return runAstraSystemControl()
 }
 
 async function runNoWorkspaceMode() {
@@ -367,15 +364,6 @@ function isGitInspectionModule(value: unknown): value is GitInspectionModule {
     typeof value.captureGitRepositoryBaseline === "function" &&
     "revalidateGitRepositoryBaseline" in value &&
     typeof value.revalidateGitRepositoryBaseline === "function"
-  )
-}
-
-function isSystemModeModule(value: unknown): value is Readonly<{ runAstraSystemMode: () => Promise<void> }> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "runAstraSystemMode" in value &&
-    typeof value.runAstraSystemMode === "function"
   )
 }
 
