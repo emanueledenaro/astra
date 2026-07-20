@@ -2,7 +2,6 @@ import { createHash } from "node:crypto"
 import { constants, lstatSync, realpathSync, type Dirent } from "node:fs"
 import {
   lstat,
-  mkdir,
   open,
   opendir,
   readdir,
@@ -86,8 +85,11 @@ type WorkSessionStoreInternalOptions = Readonly<{
   stateRoot: string
   expectedUID?: number
   physicalEntryLimit?: number
+  stateRootLockTimeoutMs?: number
+  stateRootLockRetryDelayMs?: number
   afterEventInsert?: () => void
-  afterStateRootLock?: () => void
+  afterStateRootLock?: () => void | Promise<void>
+  afterStateRootParentPin?: (parentPath: string, component: string) => void
   afterCreateFileBeforePin?: () => void
   afterFinalCreateIdentityCheck?: () => void
   afterProjectionRead?: () => void
@@ -102,8 +104,11 @@ type RequiredWorkSessionStoreInternalOptions = Readonly<{
   stateRoot: string
   expectedUID: number
   physicalEntryLimit: number
+  stateRootLockTimeoutMs: number
+  stateRootLockRetryDelayMs: number
   afterEventInsert?: () => void
-  afterStateRootLock?: () => void
+  afterStateRootLock?: () => void | Promise<void>
+  afterStateRootParentPin?: (parentPath: string, component: string) => void
   afterCreateFileBeforePin?: () => void
   afterFinalCreateIdentityCheck?: () => void
   afterProjectionRead?: () => void
@@ -192,7 +197,11 @@ const workSessionApplicationID = 0x41535452
 const workSessionSchemaVersion = 1
 const xattrCreate = 0x0002
 const lockExclusive = 0x02
+const lockNonBlocking = 0x04
 const lockUnlock = 0x08
+const lockWouldBlockErrno = 35
+const defaultStateRootLockTimeoutMs = 5_000
+const defaultStateRootLockRetryDelayMs = 10
 const maximumTombstoneBytes = 1_024
 const nativeFailures = new Set<NativeFailure>([
   "scrub",
@@ -262,12 +271,15 @@ async function createSession(
     event.value.workspaceIdentity,
     expectedUID,
     options.nativeFailure,
+    options.afterStateRootParentPin,
   )
   const lockedRoot = await acquireLockedStateRoot(
     stateRoot,
     expectedUID,
     options.nativeFailure,
     options.afterStateRootLock,
+    options.stateRootLockTimeoutMs,
+    options.stateRootLockRetryDelayMs,
   )
   try {
     await assertCreateCapacity(lockedRoot, expectedUID, options.physicalEntryLimit)
@@ -989,6 +1001,7 @@ async function prepareStateRoot(
   workspaceIdentity: WorkspaceIdentity,
   expectedUID: number,
   nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
+  afterParentPin?: RequiredWorkSessionStoreInternalOptions["afterStateRootParentPin"],
 ) {
   const plan = await assertStateRootPlacementBeforeCreate(
     stateRoot,
@@ -998,7 +1011,7 @@ async function prepareStateRoot(
     workspaceIdentity,
     expectedUID,
   )
-  await createStateRootComponentsDurably(plan, expectedUID, nativeFailure)
+  await createStateRootComponentsDurably(plan, expectedUID, nativeFailure, afterParentPin)
   await assertExistingStateRoot(stateRoot, expectedUID)
   await assertNoWorkspaceStateOverlap(workspaceRoot, workspaceIdentity, stateRoot, directory, filename)
 }
@@ -1110,49 +1123,105 @@ async function createStateRootComponentsDurably(
   plan: Readonly<{ existingAncestor: string; missing: ReadonlyArray<string> }>,
   expectedUID: number,
   nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
+  afterParentPin?: RequiredWorkSessionStoreInternalOptions["afterStateRootParentPin"],
 ) {
-  let parent = plan.existingAncestor
-  for (const component of plan.missing) {
-    const parentHandle = await open(
-      parent,
-      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-    ).catch((cause) => {
-      throw new WorkSessionStoreError("state_unavailable", "A state-root creation parent could not be pinned", cause)
-    })
-    try {
-      await assertCreationParentHandle(parentHandle, parent, expectedUID)
-      const child = join(parent, component)
-      await mkdir(child, { mode: 0o700 }).catch((cause) => {
-        if (!isNodeError(cause, "EEXIST")) throw cause
-      })
-      await assertPrivateDirectory(child, expectedUID, "new state-root component")
-      if (nativeFailure === "state-root-parent-fsync") {
-        throw new WorkSessionStoreError("state_unavailable", "Injected state-root parent publication failure")
+  if (plan.missing.length === 0) return
+  const library = openSessionLibrary()
+  const initialHandle = await open(
+    plan.existingAncestor,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  ).catch((cause) => {
+    library.close()
+    throw new WorkSessionStoreError("state_unavailable", "A state-root creation parent could not be pinned", cause)
+  })
+  let currentFD = initialHandle.fd
+  let currentPath = plan.existingAncestor
+  let currentUsesInitialHandle = true
+  let currentRequiresPrivateMode = false
+  try {
+    for (const component of plan.missing) {
+      await assertDirectoryFDMatchesPath(
+        currentFD,
+        currentPath,
+        expectedUID,
+        currentRequiresPrivateMode,
+      )
+      afterParentPin?.(currentPath, component)
+      const created = library.symbols.mkdirat(currentFD, cString(component), 0o700)
+      if (created !== 0 && lastErrno(library) !== 17) {
+        throw new WorkSessionStoreError("state_unavailable", "A state-root component could not be created beneath its pinned parent")
       }
-      await parentHandle.sync().catch((cause) => {
-        throw new WorkSessionStoreError("state_unavailable", "A state-root component was not durably published", cause)
-      })
-      parent = child
-    } finally {
-      await parentHandle.close().catch(() => undefined)
+      const childFD = library.symbols.openat(
+        currentFD,
+        cString(component),
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        0,
+      )
+      if (childFD < 0) {
+        throw new WorkSessionStoreError("state_unavailable", "A new state-root component could not be pinned")
+      }
+      const childPath = join(currentPath, component)
+      let promoted = false
+      try {
+        const childFacts = await Bun.file(childFD).stat()
+        assertSafePinnedFacts(childFacts, expectedUID, true)
+        if (
+          nativeFailure === "state-root-parent-fsync" ||
+          library.symbols.fsync(currentFD) !== 0
+        ) {
+          throw new WorkSessionStoreError("state_unavailable", "A state-root component was not durably published")
+        }
+        await assertDirectoryFDMatchesPath(
+          currentFD,
+          currentPath,
+          expectedUID,
+          currentRequiresPrivateMode,
+        )
+        await assertDirectoryFDMatchesPath(childFD, childPath, expectedUID, true)
+        if (currentUsesInitialHandle) {
+          await initialHandle.close()
+          currentUsesInitialHandle = false
+        } else {
+          library.symbols.close(currentFD)
+        }
+        currentFD = childFD
+        currentPath = childPath
+        currentRequiresPrivateMode = true
+        promoted = true
+      } finally {
+        if (!promoted) library.symbols.close(childFD)
+      }
     }
+  } catch (cause) {
+    if (cause instanceof WorkSessionStoreError) throw cause
+    throw new WorkSessionStoreError("state_unavailable", "The state-root component lineage is unavailable", cause)
+  } finally {
+    if (currentUsesInitialHandle) await initialHandle.close().catch(() => undefined)
+    else library.symbols.close(currentFD)
+    library.close()
   }
 }
 
-async function assertCreationParentHandle(
-  handle: Awaited<ReturnType<typeof open>>,
+async function assertDirectoryFDMatchesPath(
+  fd: number,
   path: string,
   expectedUID: number,
+  privateMode: boolean,
 ) {
-  const [pinned, current] = await Promise.all([handle.stat(), lstat(path)])
+  const [pinned, current, canonical] = await Promise.all([
+    Bun.file(fd).stat(),
+    lstat(path),
+    realpath(path),
+  ])
   if (
     !sameIdentity(pinned, current) ||
     !pinned.isDirectory() ||
     current.isSymbolicLink() ||
     pinned.uid !== expectedUID ||
-    (pinned.mode & 0o022) !== 0
+    (privateMode ? (pinned.mode & 0o077) !== 0 : (pinned.mode & 0o022) !== 0) ||
+    canonical !== path
   ) {
-    throw new WorkSessionStoreError("unsafe_state_path", "A state-root creation parent is unsafe")
+    throw new WorkSessionStoreError("state_unavailable", "A pinned state-root component changed lineage")
   }
 }
 
@@ -1341,8 +1410,11 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     "stateRoot",
     "expectedUID",
     "physicalEntryLimit",
+    "stateRootLockTimeoutMs",
+    "stateRootLockRetryDelayMs",
     "afterEventInsert",
     "afterStateRootLock",
+    "afterStateRootParentPin",
     "afterCreateFileBeforePin",
     "afterFinalCreateIdentityCheck",
     "afterProjectionRead",
@@ -1367,9 +1439,26 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
   ) {
     throw new WorkSessionStoreError("invalid_input", "The internal physical work-session limit is invalid")
   }
+  const stateRootLockTimeoutMs = Object.hasOwn(record, "stateRootLockTimeoutMs")
+    ? record.stateRootLockTimeoutMs
+    : defaultStateRootLockTimeoutMs
+  const stateRootLockRetryDelayMs = Object.hasOwn(record, "stateRootLockRetryDelayMs")
+    ? record.stateRootLockRetryDelayMs
+    : defaultStateRootLockRetryDelayMs
+  if (
+    !Number.isSafeInteger(stateRootLockTimeoutMs) ||
+    (stateRootLockTimeoutMs as number) < 1 ||
+    (stateRootLockTimeoutMs as number) > 30_000 ||
+    !Number.isSafeInteger(stateRootLockRetryDelayMs) ||
+    (stateRootLockRetryDelayMs as number) < 1 ||
+    (stateRootLockRetryDelayMs as number) > (stateRootLockTimeoutMs as number)
+  ) {
+    throw new WorkSessionStoreError("invalid_input", "The internal state-root lock timing is invalid")
+  }
   for (const key of [
     "afterEventInsert",
     "afterStateRootLock",
+    "afterStateRootParentPin",
     "afterCreateFileBeforePin",
     "afterFinalCreateIdentityCheck",
     "afterProjectionRead",
@@ -1389,9 +1478,14 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     stateRoot: requireCanonicalStateRoot(record.stateRoot),
     expectedUID: expectedUID as number,
     physicalEntryLimit: physicalEntryLimit as number,
+    stateRootLockTimeoutMs: stateRootLockTimeoutMs as number,
+    stateRootLockRetryDelayMs: stateRootLockRetryDelayMs as number,
     ...(typeof record.afterEventInsert === "function" ? { afterEventInsert: record.afterEventInsert as () => void } : {}),
     ...(typeof record.afterStateRootLock === "function"
-      ? { afterStateRootLock: record.afterStateRootLock as () => void }
+      ? { afterStateRootLock: record.afterStateRootLock as () => void | Promise<void> }
+      : {}),
+    ...(typeof record.afterStateRootParentPin === "function"
+      ? { afterStateRootParentPin: record.afterStateRootParentPin as (parentPath: string, component: string) => void }
       : {}),
     ...(typeof record.afterCreateFileBeforePin === "function"
       ? { afterCreateFileBeforePin: record.afterCreateFileBeforePin as () => void }
@@ -1423,8 +1517,10 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
 async function acquireLockedStateRoot(
   stateRoot: string,
   expectedUID: number,
-  nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
-  afterLock?: RequiredWorkSessionStoreInternalOptions["afterStateRootLock"],
+  nativeFailure: RequiredWorkSessionStoreInternalOptions["nativeFailure"] | undefined,
+  afterLock: RequiredWorkSessionStoreInternalOptions["afterStateRootLock"] | undefined,
+  timeoutMs: number,
+  retryDelayMs: number,
 ): Promise<LockedStateRoot> {
   const library = openSessionLibrary()
   let rootHandle: Awaited<ReturnType<typeof open>> | null = null
@@ -1432,8 +1528,24 @@ async function acquireLockedStateRoot(
   try {
     rootHandle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
     await assertHandleMatchesPath(rootHandle, stateRoot, expectedUID, true)
-    if (nativeFailure === "state-root-lock" || library.symbols.flock(rootHandle.fd, lockExclusive) !== 0) {
+    if (nativeFailure === "state-root-lock") {
       throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock could not be acquired")
+    }
+    const deadline = performance.now() + timeoutMs
+    while (library.symbols.flock(rootHandle.fd, lockExclusive | lockNonBlocking) !== 0) {
+      const errno = lastErrno(library)
+      if (errno !== lockWouldBlockErrno) {
+        throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock could not be acquired")
+      }
+      const remainingMs = deadline - performance.now()
+      if (remainingMs <= 0) {
+        throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock acquisition timed out")
+      }
+      await waitForStateRootLock(Math.min(retryDelayMs, Math.max(1, Math.ceil(remainingMs))))
+      if (performance.now() >= deadline) {
+        throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock acquisition timed out")
+      }
+      await assertHandleMatchesPath(rootHandle, stateRoot, expectedUID, true)
     }
     locked = true
     const pinned = Object.freeze({
@@ -1444,7 +1556,7 @@ async function acquireLockedStateRoot(
       locked: true as const,
     })
     await assertPinnedStateRoot(pinned, expectedUID)
-    afterLock?.()
+    await afterLock?.()
     await assertPinnedStateRoot(pinned, expectedUID)
     return pinned
   } catch (cause) {
@@ -1454,6 +1566,10 @@ async function acquireLockedStateRoot(
     if (cause instanceof WorkSessionStoreError) throw cause
     throw new WorkSessionStoreError("state_unavailable", "The state-root lock boundary is unavailable", cause)
   }
+}
+
+function waitForStateRootLock(delayMs: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, delayMs))
 }
 
 async function releaseLockedStateRoot(lockedRoot: LockedStateRoot) {

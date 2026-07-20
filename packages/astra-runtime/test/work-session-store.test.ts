@@ -569,6 +569,85 @@ describe("durable Astra work-session store", () => {
     expect(await readdir(fixture.stateRoot)).toHaveLength(1)
   })
 
+  test("retries a contended same-process lock asynchronously without blocking the event loop", async () => {
+    const fixture = await makeFixture("same-process-lock-progress")
+    let markLocked!: () => void
+    let releaseHolder!: () => void
+    const locked = new Promise<void>((resolve) => { markLocked = resolve })
+    const release = new Promise<void>((resolve) => { releaseHolder = resolve })
+    let holderDone = false
+    const holderStore = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      physicalEntryLimit: 2,
+      afterStateRootLock: async () => {
+        markLocked()
+        await release
+      },
+    })
+    const holder = holderStore
+      .create({ ...fixture.createInput, sessionID: "same-process-holder" })
+      .finally(() => { holderDone = true })
+
+    try {
+      await locked
+      await Bun.sleep(20)
+      expect(holderDone).toBe(false)
+      let heartbeat = false
+      setTimeout(() => { heartbeat = true }, 0)
+      const waiter = createWorkSessionStoreInternal({
+        stateRoot: fixture.stateRoot,
+        physicalEntryLimit: 2,
+      }).create({ ...fixture.createInput, sessionID: "same-process-waiter" })
+      await Bun.sleep(25)
+      expect(heartbeat).toBe(true)
+      expect(holderDone).toBe(false)
+      releaseHolder()
+      await expect(Promise.all([holder, waiter])).resolves.toHaveLength(2)
+    } finally {
+      releaseHolder()
+      await holder.catch(() => undefined)
+    }
+  })
+
+  test("times out a permanently contended state-root lock without a session claim", async () => {
+    const fixture = await makeFixture("state-root-lock-timeout")
+    let markLocked!: () => void
+    let releaseHolder!: () => void
+    const locked = new Promise<void>((resolve) => { markLocked = resolve })
+    const release = new Promise<void>((resolve) => { releaseHolder = resolve })
+    let holderDone = false
+    const holder = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      physicalEntryLimit: 2,
+      afterStateRootLock: async () => {
+        markLocked()
+        await release
+      },
+    })
+      .create({ ...fixture.createInput, sessionID: "timeout-holder" })
+      .finally(() => { holderDone = true })
+
+    try {
+      await locked
+      await Bun.sleep(20)
+      expect(holderDone).toBe(false)
+      const waiterID = "timeout-waiter"
+      const waiter = createWorkSessionStoreInternal({
+        stateRoot: fixture.stateRoot,
+        physicalEntryLimit: 2,
+        stateRootLockTimeoutMs: 25,
+        stateRootLockRetryDelayMs: 5,
+      })
+      await expect(waiter.create({ ...fixture.createInput, sessionID: waiterID })).rejects.toMatchObject({
+        code: "state_unavailable",
+      })
+      expect(await exists(workSessionDatabasePathInternal(fixture.stateRoot, waiterID))).toBe(false)
+    } finally {
+      releaseHolder()
+      await holder
+    }
+  })
+
   test("fails closed without a session claim when the pinned state-root lock cannot be acquired", async () => {
     const fixture = await makeFixture("state-root-lock-failure")
     const before = await readdir(fixture.stateRoot)
@@ -605,6 +684,30 @@ describe("durable Astra work-session store", () => {
 
     const created = await store.create(fixture.createInput)
     expect(await store.load(fixture.sessionID)).toEqual(created)
+  })
+
+  test("creates first-start components only below the pinned parent after a same-UID path replacement", async () => {
+    const parent = await temporaryDirectory("astra-session-parent-replacement-")
+    const stateRoot = join(parent, "Astra", "Sessions")
+    const displaced = join(parent, "Astra.displaced")
+    const replacement = join(parent, "Astra")
+    const fixture = await makeFixture("first-start-parent-replacement", { stateRoot })
+    let replaced = false
+    const store = createWorkSessionStoreInternal({
+      stateRoot,
+      afterStateRootParentPin: (parentPath, component) => {
+        if (component !== "Sessions") return
+        replaced = true
+        renameSync(parentPath, displaced)
+        mkdirSync(parentPath, { mode: 0o700 })
+      },
+    })
+
+    await expect(store.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(replaced).toBe(true)
+    expect(await exists(join(replacement, "Sessions"))).toBe(false)
+    expect(await exists(join(displaced, "Sessions"))).toBe(true)
+    expect(await exists(workSessionDatabasePathInternal(stateRoot, fixture.sessionID))).toBe(false)
   })
 
   test("does not delete a replacement SQLite family during failed-create cleanup", async () => {
