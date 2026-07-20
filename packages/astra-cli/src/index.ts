@@ -16,6 +16,8 @@ import { openAstraWorkspaceSession } from "./workspace-session"
 import { parseAstraArguments } from "./arguments"
 import { routeAstraLaunchpadDecision } from "./launchpad-routing"
 import { runAstraSystemControl } from "./system-control"
+import { parseAstraLaunchpadDecision } from "@astra/domain/launchpad"
+import type { GuidedProjectCreationOutcome } from "./project-creation-control"
 
 type DeniedLedgerModule = Readonly<{
   recordDeniedControlledWrite: (
@@ -175,10 +177,28 @@ async function runNoWorkspaceMode() {
   const moduleName = ["@opencode-ai/tui", "astra/no-workspace-mode"].join("/")
   const loaded: unknown = await import(moduleName)
   if (!isNoWorkspaceModeModule(loaded)) throw new Error("The Astra No Workspace interface is unavailable")
-  return routeAstraLaunchpadDecision(await loaded.runAstraNoWorkspaceMode(), {
-    openWorkspace: openLaunchpadWorkspace,
-    openSystem: runSystemMode,
-  })
+  while (true) {
+    const parsedDecision = parseAstraLaunchpadDecision(await loaded.runAstraNoWorkspaceMode())
+    if (!parsedDecision.ok) return 1
+    const decision = parsedDecision.value
+    if (decision.kind === "create-project") {
+      const outcome = await runLaunchpadProjectCreation()
+      if (outcome.kind === "launchpad") continue
+      if (outcome.kind === "open-workspace") return openLaunchpadWorkspace(outcome.path)
+      return outcome.exitCode
+    }
+    return routeAstraLaunchpadDecision(decision, {
+      createProject: async () => 1,
+      openWorkspace: openLaunchpadWorkspace,
+      openSystem: runSystemMode,
+    })
+  }
+}
+
+async function runLaunchpadProjectCreation() {
+  const loaded: unknown = await import("./project-creation-control")
+  if (!isGuidedProjectCreationModule(loaded)) return { kind: "failed", exitCode: 1 } as const
+  return loaded.runGuidedProjectCreation()
 }
 
 async function openLaunchpadWorkspace(workspace: string) {
@@ -375,6 +395,17 @@ function isNoWorkspaceModeModule(value: unknown): value is Readonly<{
     value !== null &&
     "runAstraNoWorkspaceMode" in value &&
     typeof value.runAstraNoWorkspaceMode === "function"
+  )
+}
+
+function isGuidedProjectCreationModule(value: unknown): value is Readonly<{
+  runGuidedProjectCreation: () => Promise<GuidedProjectCreationOutcome>
+}> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "runGuidedProjectCreation" in value &&
+    typeof value.runGuidedProjectCreation === "function"
   )
 }
 

@@ -22,17 +22,21 @@ describe("Astra CLI durable state", () => {
         calls.push("system")
         return 42
       },
+      createProject: async () => {
+        calls.push("project")
+        return 43
+      },
     }
 
     expect(await routeAstraLaunchpadDecision({ kind: "open-workspace", path: "/work/astra" }, dependencies)).toBe(41)
     expect(await routeAstraLaunchpadDecision({ kind: "open-system" }, dependencies)).toBe(42)
     expect(await routeAstraLaunchpadDecision({ kind: "exit" }, dependencies)).toBe(0)
-    expect(await routeAstraLaunchpadDecision({ kind: "create-project" }, dependencies)).toBe(1)
+    expect(await routeAstraLaunchpadDecision({ kind: "create-project" }, dependencies)).toBe(43)
     expect(await routeAstraLaunchpadDecision({ kind: "continue-session", sessionID: "session-1" }, dependencies)).toBe(
       1,
     )
     expect(await routeAstraLaunchpadDecision({ kind: "open-workspace", path: "relative" }, dependencies)).toBe(1)
-    expect(calls).toEqual(["workspace:/work/astra", "system"])
+    expect(calls).toEqual(["workspace:/work/astra", "system", "project"])
   })
 
   test("System Mode rejects a non-interactive terminal before creating any local state", async () => {

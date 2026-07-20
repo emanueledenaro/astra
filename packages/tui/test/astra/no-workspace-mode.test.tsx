@@ -13,7 +13,7 @@ const snapshot = {
   recentSessions: [{ sessionID: "session-1", workspaceRoot: "/work/astra", updatedAt: "2026-07-20T00:00:00.000Z" }],
 } as const
 
-test("renders the keyboard-first Launchpad with truthful unavailable actions", async () => {
+test("renders the keyboard-first Launchpad with Create available and Continue truthful", async () => {
   const app = await testRender(() => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={() => {}} />, {
     width: 88,
     height: 24,
@@ -29,7 +29,8 @@ test("renders the keyboard-first Launchpad with truthful unavailable actions", a
     expect(frame).toContain("[R] Continue session")
     expect(frame).toContain("[S] System")
     expect(frame).toContain("[Q] Exit")
-    expect(frame).toContain("NOT AVAILABLE YET")
+    expect(frame.replace(/\s+/g, " ")).toContain("CONTINUE NOT")
+    expect(frame).toContain("AVAILABLE YET")
     expect(frame).toContain("/work/astra")
   } finally {
     app.renderer.destroy()
@@ -129,7 +130,7 @@ test("keeps the Launchpad import graph inert", async () => {
   expect(source).not.toMatch(/process\.|Bun\.|node:|\.\/workspace|fetch\(|spawn\(|cwd\(|env\b/)
 })
 
-test("keeps disabled actions inert and returns System or Exit decisions locally", async () => {
+test("returns Create, System, or Exit decisions locally while Continue stays inert", async () => {
   const decisions: Array<string> = []
   const app = await testRender(() => (
     <AstraNoWorkspaceMode snapshot={snapshot} onDecision={(decision) => decisions.push(decision.kind)} />
@@ -139,7 +140,7 @@ test("keeps disabled actions inert and returns System or Exit decisions locally"
     app.mockInput.pressKey("r")
     app.mockInput.pressKey("s")
     app.mockInput.pressKey("q")
-    expect(decisions).toEqual(["open-system", "exit"])
+    expect(decisions).toEqual(["create-project", "open-system", "exit"])
   } finally {
     app.renderer.destroy()
   }

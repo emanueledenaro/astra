@@ -20,6 +20,7 @@ export * as GitControlMutation from "./git-control-mutation"
 export * as GitRepositoryBaseline from "./git-repository-baseline"
 export * as Launchpad from "./launchpad"
 export * as ProjectCreationControl from "./project-creation-control"
+export * as ProjectCreationUi from "./project-creation-ui"
 export * as SessionAuthority from "./session-authority"
 
 export {

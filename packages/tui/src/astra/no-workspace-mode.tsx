@@ -103,6 +103,7 @@ function AstraNoWorkspaceModeContent(props: {
     }
 
     if (isAstraNoWorkspaceModeExitKey(event)) return props.onDecision({ kind: "exit" })
+    if (key === "c") return props.onDecision({ kind: "create-project" })
     if (key === "o") return setOpening(true)
     if (key === "s") return props.onDecision({ kind: "open-system" })
   })
@@ -146,15 +147,14 @@ function AstraNoWorkspaceModeContent(props: {
                     <text fg={palette.muted}>Choose an action. Project effects remain unavailable here.</text>
                   </Show>
                   <text fg={palette.text}>
-                    <span style={{ fg: palette.primary }}>[C]</span> Create project{" "}
-                    <span style={{ fg: palette.warning }}>NOT AVAILABLE YET</span>
+                    <span style={{ fg: palette.primary }}>[C]</span> Create project
                   </text>
                   <text fg={palette.text}>
                     <span style={{ fg: palette.primary }}>[O]</span> Open workspace
                   </text>
                   <text fg={palette.text}>
                     <span style={{ fg: palette.primary }}>[R]</span> Continue session{" "}
-                    <span style={{ fg: palette.warning }}>NOT AVAILABLE YET</span>
+                    <span style={{ fg: palette.warning }}>CONTINUE NOT AVAILABLE YET</span>
                   </text>
                   <text fg={palette.text}>
                     <span style={{ fg: palette.primary }}>[S]</span> System
@@ -185,7 +185,7 @@ function AstraNoWorkspaceModeContent(props: {
             <span style={{ fg: palette.primary }}>[Q]</span> Exit
           </text>
           <Show when={!compact() && !opening()}>
-            <text fg={palette.muted}>Create and Continue are unavailable until their parent coordinators exist.</text>
+            <text fg={palette.muted}>Create is governed · Continue remains unavailable until session recovery exists.</text>
           </Show>
         </box>
       </box>
