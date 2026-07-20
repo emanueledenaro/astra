@@ -7,6 +7,7 @@ import { rootCertificates } from "node:tls"
 import { parseOperationID } from "@astra/domain/operation-contract"
 import { Effect } from "effect"
 import { digest } from "../src/controlled-write-authority"
+import { OpenAIResponsesOneTurnError } from "../src/openai-responses-one-turn"
 import { recoverProviderTurn, type ExecuteProviderTurnInput } from "../src/provider-turn-coordinator"
 import {
   providerTurnLoopbackPolicyDigest,
@@ -91,6 +92,35 @@ describe("trusted provider turn transport boundary", () => {
       response: { assistantText: "Hello from Astra", finishReason: "stop" },
     })
     expect(await eventNames(input)).toContain("effect.completed")
+  })
+
+  test("records an allowlisted provider parser reason without persisting private response data", async () => {
+    const privateResponse = "private provider response that must not be persisted"
+    const body = new TextEncoder().encode('{"input":"private"}')
+    const server = startServer(() =>
+      new Response(privateResponse, { headers: { "content-type": "text/event-stream" } }),
+    )
+    const input = await operationInput(server.url.origin, body)
+
+    const result = await executeProviderTurnWithTrustedObservedTransport(
+      input,
+      async () => wireValues(body),
+      () => {
+        throw new OpenAIResponsesOneTurnError("event_sequence_rejected")
+      },
+      {
+        mode: "test_only_loopback",
+        now: () => Date.parse(input.policyAskedAt) + 100,
+        async requestApproval() {
+          return "approve"
+        },
+      },
+    )
+
+    expect(result).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
+    const durable = JSON.stringify(await durableEvents(input))
+    expect(durable).toContain("PROVIDER_RESPONSE_EVENT_SEQUENCE_REJECTED")
+    expect(durable).not.toContain(privateResponse)
   })
 
   test("sends exact bytes once and only after durable consent and claim", async () => {

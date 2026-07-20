@@ -25,6 +25,7 @@ import {
   type ProviderTurnResolvedAddress,
 } from "./provider-turn-network-policy"
 import {
+  asProviderResponseTransportFailure,
   asProviderTransportFailure,
   ProviderTransportFailure,
   type ProviderTransportFailureCode,
@@ -244,7 +245,7 @@ function trustedObservedTransportAdapter(
           body: Uint8Array.from(response.body),
         })
       } catch (cause) {
-        throw asProviderTransportFailure(cause, "provider_response_rejected")
+        throw asProviderResponseTransportFailure(cause)
       }
       return observedFinishEvent(adapterRequest, response, evidence, completion)
     },
