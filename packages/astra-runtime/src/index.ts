@@ -10,15 +10,12 @@ export type { ControlledWritePlan } from "./controlled-write-plan"
 export type { WorkspaceActivationCheck, WorkspaceRevalidation } from "./workspace-preflight"
 export {
   executeDurableProjectScaffold,
-  projectScaffoldFaultPoints,
   recoverDurableProjectScaffold,
   verifyDurableProjectScaffold,
 } from "./project-creation-coordinator"
 export type {
   DurableProjectScaffoldInput,
   DurableProjectScaffoldResult,
-  ProjectScaffoldCoordinatorDependencies,
-  ProjectScaffoldFaultPoint,
 } from "./project-creation-coordinator"
 export { makeProjectScaffoldOperationFacts } from "./project-creation-operation-facts"
 export { expectedTreeDigest, verifyProjectScaffoldTree } from "./project-creation-verifier"

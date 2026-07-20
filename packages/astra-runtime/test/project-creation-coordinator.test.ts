@@ -14,6 +14,11 @@ import {
   verifyDurableProjectScaffold,
   type DurableProjectScaffoldInput,
 } from "../src/project-creation-coordinator"
+import {
+  createProjectScaffoldCoordinatorInternal,
+  type ProjectScaffoldCoordinatorInternalOptions,
+} from "../src/project-creation-coordinator-internal"
+import { makeProjectScaffoldOperationFacts } from "../src/project-creation-operation-facts"
 import { verifyProjectScaffoldTreeInternal } from "../src/project-creation-verifier-internal"
 
 const cleanup: Array<() => Promise<void>> = []
@@ -23,16 +28,25 @@ afterAll(async () => {
 })
 
 describe("durable project scaffold coordination", () => {
+  test("keeps state paths, clocks, fault injection, and observers outside the public package API", async () => {
+    const publicAPI = await import("../src/index")
+
+    expect(executeDurableProjectScaffold.length).toBe(1)
+    expect(recoverDurableProjectScaffold.length).toBe(1)
+    expect(verifyDurableProjectScaffold.length).toBe(1)
+    expect("createProjectScaffoldCoordinatorInternal" in publicAPI).toBe(false)
+    expect("projectScaffoldFaultPoints" in publicAPI).toBe(false)
+  })
+
   test("keeps rejection pure: no target, staging, ledger, spool, or host adapter", async () => {
     const fixture = await makeFixture("astra-project-reject-", "rejected")
     let hostEntries = 0
 
-    const result = await executeDurableProjectScaffold(fixture.input, {
+    const result = await fixture.coordinator({
       onHostAdapterEntered: () => {
         hostEntries += 1
       },
-      now: fixture.now,
-    })
+    }).execute(fixture.input)
 
     expect(result.status).toBe("denied_without_effect")
     expect(hostEntries).toBe(0)
@@ -40,6 +54,27 @@ describe("durable project scaffold coordination", () => {
     expect(await exists(fixture.ledger)).toBe(false)
     expect(await exists(fixture.spool)).toBe(false)
     expect(await readdir(fixture.parent)).toEqual([])
+  })
+
+  test("blocks a symlink state root before creating operation state or entering the adapter", async () => {
+    const fixture = await makeFixture("astra-project-state-root-link-")
+    const container = await realpath(await mkdtemp(join(tmpdir(), "astra-project-state-root-container-")))
+    const stateLink = join(container, "state")
+    cleanup.push(() => rm(container, { recursive: true, force: true }))
+    await symlink(fixture.state, stateLink)
+    let hostEntries = 0
+    const coordinator = createProjectScaffoldCoordinatorInternal({
+      stateRoot: stateLink,
+      now: fixture.now,
+      onHostAdapterEntered: () => {
+        hostEntries += 1
+      },
+    })
+
+    await expect(coordinator.execute(fixture.input)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(hostEntries).toBe(0)
+    expect(await exists(fixture.target)).toBe(false)
+    expect(await readdir(fixture.state)).toEqual([])
   })
 
   test("blocks a replaced parent before durable admission or adapter entry", async () => {
@@ -51,12 +86,11 @@ describe("durable project scaffold coordination", () => {
     let hostEntries = 0
 
     await expect(
-      executeDurableProjectScaffold(fixture.input, {
+      fixture.coordinator({
         onHostAdapterEntered: () => {
           hostEntries += 1
         },
-        now: fixture.now,
-      }),
+      }).execute(fixture.input),
     ).rejects.toMatchObject({ code: "invalid_input" })
     expect(hostEntries).toBe(0)
     expect(await exists(fixture.ledger)).toBe(false)
@@ -68,7 +102,7 @@ describe("durable project scaffold coordination", () => {
     const fixture = await makeFixture("astra-project-existing-target-")
     await writeFile(fixture.target, "preserve\n")
 
-    await expect(executeDurableProjectScaffold(fixture.input, { now: fixture.now })).rejects.toMatchObject({
+    await expect(fixture.coordinator().execute(fixture.input)).rejects.toMatchObject({
       code: "invalid_input",
     })
     expect(await readFile(fixture.target, "utf8")).toBe("preserve\n")
@@ -104,12 +138,11 @@ describe("durable project scaffold coordination", () => {
       let hostEntries = 0
 
       await expect(
-        executeDurableProjectScaffold(changed as DurableProjectScaffoldInput, {
+        fixture.coordinator({
           onHostAdapterEntered: () => {
             hostEntries += 1
           },
-          now: fixture.now,
-        }),
+        }).execute(changed as DurableProjectScaffoldInput),
       ).rejects.toMatchObject({ code: "invalid_input" })
       expect(hostEntries).toBe(0)
       expect(await exists(fixture.ledger)).toBe(false)
@@ -120,13 +153,14 @@ describe("durable project scaffold coordination", () => {
 
   test("records observation first and only independent exact-tree proof succeeds", async () => {
     const fixture = await makeFixture("astra-project-success-")
-    const observed = await executeDurableProjectScaffold(fixture.input, { now: fixture.now })
+    const coordinator = fixture.coordinator()
+    const observed = await coordinator.execute(fixture.input)
 
     expect(observed.status).toBe("effect_observed")
     expect(observed.state).toBe("effect_observed")
     expect(await readFile(join(fixture.target, "README.md"), "utf8")).toBe("# Alpha\n")
 
-    const verified = await verifyDurableProjectScaffold(fixture.input)
+    const verified = await coordinator.verify(fixture.input)
     expect(verified.status).toBe("verified")
     expect(verified.state).toBe("succeeded")
     expect(verified.evidence?.criteria).toEqual([
@@ -139,23 +173,21 @@ describe("durable project scaffold coordination", () => {
     let entries = 0
 
     await expect(
-      executeDurableProjectScaffold(fixture.input, {
+      fixture.coordinator({
         onHostAdapterEntered: () => {
           entries += 1
         },
         injectFault: async (point) => {
           if (point === "after_spool_before_ledger") throw new Error("simulated spool handoff interruption")
         },
-        now: fixture.now,
-      }),
+      }).execute(fixture.input),
     ).rejects.toMatchObject({ code: "state_unavailable" })
 
-    const recovered = await executeDurableProjectScaffold(fixture.input, {
+    const recovered = await fixture.coordinator({
       onHostAdapterEntered: () => {
         entries += 1
       },
-      now: fixture.now,
-    })
+    }).execute(fixture.input)
     expect(recovered.status).toBe("effect_observed")
     expect(entries).toBe(1)
     expect(await readFile(join(fixture.target, "README.md"), "utf8")).toBe("# Alpha\n")
@@ -166,16 +198,16 @@ describe("durable project scaffold coordination", () => {
     let now = fixture.now()
 
     await expect(
-      executeDurableProjectScaffold(fixture.input, {
+      fixture.coordinator({
         injectFault: async (point) => {
           if (point === "after_adapter_before_spool") throw new Error("simulated receipt loss")
         },
         now: () => now,
-      }),
+      }).execute(fixture.input),
     ).rejects.toMatchObject({ code: "state_unavailable" })
     now += 61_000
 
-    const recovered = await recoverDurableProjectScaffold(fixture.input, { now: () => now })
+    const recovered = await fixture.coordinator({ now: () => now }).recover(fixture.input)
     expect(recovered.status).toBe("reconciliation_required")
     expect(recovered.state).toBe("reconciliation_required")
     expect(await readFile(join(fixture.target, "README.md"), "utf8")).toBe("# Alpha\n")
@@ -183,10 +215,11 @@ describe("durable project scaffold coordination", () => {
 
   test("extra final entries cannot verify", async () => {
     const fixture = await makeFixture("astra-project-extra-entry-")
-    await executeDurableProjectScaffold(fixture.input, { now: fixture.now })
+    const coordinator = fixture.coordinator()
+    await coordinator.execute(fixture.input)
     await writeFile(join(fixture.target, "extra.txt"), "extra\n")
 
-    const verified = await verifyDurableProjectScaffold(fixture.input)
+    const verified = await coordinator.verify(fixture.input)
     expect(verified.status).not.toBe("verified")
     expect(verified.state).not.toBe("succeeded")
   })
@@ -211,10 +244,11 @@ describe("durable project scaffold coordination", () => {
     ["executable", async (target: string) => chmod(join(target, "README.md"), 0o700)],
   ] as const)("does not verify a %s final entry", async (label, mutate) => {
     const fixture = await makeFixture(`astra-project-${label}-`)
-    await executeDurableProjectScaffold(fixture.input, { now: fixture.now })
+    const coordinator = fixture.coordinator()
+    await coordinator.execute(fixture.input)
     await mutate(fixture.target)
 
-    const verified = await verifyDurableProjectScaffold(fixture.input)
+    const verified = await coordinator.verify(fixture.input)
     expect(verified.status).not.toBe("verified")
     expect(verified.state).not.toBe("succeeded")
   })
@@ -222,15 +256,14 @@ describe("durable project scaffold coordination", () => {
   test("two concurrent calls enter the host adapter at most once", async () => {
     const fixture = await makeFixture("astra-project-concurrent-")
     let entries = 0
-    const dependency = {
+    const coordinator = fixture.coordinator({
       onHostAdapterEntered: () => {
         entries += 1
       },
-      now: fixture.now,
-    }
+    })
     const results = await Promise.allSettled([
-      executeDurableProjectScaffold(fixture.input, dependency),
-      executeDurableProjectScaffold(fixture.input, dependency),
+      coordinator.execute(fixture.input),
+      coordinator.execute(fixture.input),
     ])
 
     expect(results.some((result) => result.status === "fulfilled" && result.value.status === "effect_observed")).toBe(true)
@@ -268,7 +301,7 @@ describe("durable project scaffold coordination", () => {
       decision: { ...fixture.input.decision, proposalDigest: preview.proposalDigest },
     }
 
-    const result = await executeDurableProjectScaffold(input, { now: fixture.now })
+    const result = await fixture.coordinator().execute(input)
     expect(result.status).toBe("effect_observed")
     expect(await exists(marker)).toBe(false)
     expect(await readFile(join(fixture.target, ".env"), "utf8")).toBe("ASTRA_MUST_NOT_LOAD=1\n")
@@ -277,7 +310,7 @@ describe("durable project scaffold coordination", () => {
 
   test("never follows a nested directory replaced by a symlink during verification", async () => {
     const fixture = await makeFixture("astra-project-verifier-race-")
-    await executeDurableProjectScaffold(fixture.input, { now: fixture.now })
+    await fixture.coordinator().execute(fixture.input)
     const target = await lstat(fixture.target)
     const outside = await realpath(await mkdtemp(join(tmpdir(), "astra-project-verifier-outside-")))
     cleanup.push(() => rm(outside, { recursive: true, force: true }))
@@ -302,6 +335,89 @@ describe("durable project scaffold coordination", () => {
     expect(verification.status).toBe("unknown")
     expect(verification.status).not.toBe("verified")
     expect(await readFile(join(outside, "index.ts"), "utf8")).toBe("outside secret\n")
+  })
+
+  test("does not verify a target name replaced during the second descriptor read", async () => {
+    const fixture = await makeFixture("astra-project-verifier-target-name-race-")
+    await fixture.coordinator().execute(fixture.input)
+    const target = await lstat(fixture.target)
+    const approvedTarget = `${fixture.target}-approved`
+    cleanup.push(() => rm(approvedTarget, { recursive: true, force: true }))
+    let visits = 0
+
+    const verification = await verifyProjectScaffoldTreeInternal(
+      fixture.input.authority,
+      fixture.input.preview,
+      { device: String(target.dev), inode: String(target.ino) },
+      {
+        beforeOpenEntry: async (relativePath) => {
+          if (relativePath !== "src/index.ts") return
+          visits += 1
+          if (visits !== 2) return
+          await rename(fixture.target, approvedTarget)
+          await mkdir(fixture.target)
+        },
+      },
+    )
+
+    expect(visits).toBe(2)
+    expect(verification.status).toBe("unknown")
+  })
+
+  test("opens the target only beneath the pinned parent descriptor", async () => {
+    const fixture = await makeFixture("astra-project-verifier-parent-race-")
+    await fixture.coordinator().execute(fixture.input)
+    const target = await lstat(fixture.target)
+    const approvedParent = `${fixture.parent}-approved`
+    const outside = await realpath(await mkdtemp(join(tmpdir(), "astra-project-verifier-parent-outside-")))
+    cleanup.push(() => rm(approvedParent, { recursive: true, force: true }))
+    cleanup.push(() => rm(outside, { recursive: true, force: true }))
+    await writeFile(join(outside, "secret.txt"), "outside secret\n")
+    let replaced = false
+
+    const verification = await verifyProjectScaffoldTreeInternal(
+      fixture.input.authority,
+      fixture.input.preview,
+      { device: String(target.dev), inode: String(target.ino) },
+      {
+        afterParentOpen: async () => {
+          if (replaced) return
+          replaced = true
+          await rename(fixture.parent, approvedParent)
+          await mkdir(fixture.parent)
+          await symlink(outside, fixture.target)
+        },
+      },
+    )
+
+    expect(replaced).toBe(true)
+    expect(verification.status).toBe("unknown")
+    expect(await readFile(join(outside, "secret.txt"), "utf8")).toBe("outside secret\n")
+  })
+
+  test("stops native enumeration before opening entries beyond the verification budget", async () => {
+    const fixture = await makeFixture("astra-project-verifier-budget-")
+    await fixture.coordinator().execute(fixture.input)
+    const target = await lstat(fixture.target)
+    await Promise.all(
+      Array.from({ length: 258 }, (_, index) => writeFile(join(fixture.target, `extra-${index}.txt`), "extra\n")),
+    )
+    let openedEntries = 0
+
+    const verification = await verifyProjectScaffoldTreeInternal(
+      fixture.input.authority,
+      fixture.input.preview,
+      { device: String(target.dev), inode: String(target.ino) },
+      {
+        beforeOpenEntry: async () => {
+          openedEntries += 1
+        },
+      },
+    )
+
+    expect(verification.status).toBe("unknown")
+    expect(verification.reason).toContain("entry limit")
+    expect(openedEntries).toBe(0)
   })
 })
 
@@ -331,8 +447,6 @@ async function makeFixture(prefix: string, decision: ProjectCreationDecision["de
     "2026-07-20T10:21:00.000Z",
   )
   const input: DurableProjectScaffoldInput = {
-    ledgerFilename: join(state, "operations.sqlite"),
-    spoolFilename: join(state, "receipts.sqlite"),
     authority: captured.authority,
     draft,
     preview,
@@ -344,13 +458,19 @@ async function makeFixture(prefix: string, decision: ProjectCreationDecision["de
     },
     recordingStartedAt: "2026-07-20T10:17:30.000Z",
   }
+  const operationID = makeProjectScaffoldOperationFacts(input).operationID
+  const operationStateDirectory = join(state, operationID)
+  const now = () => Date.parse("2026-07-20T10:18:00.000Z")
   return {
     parent,
+    state,
     target: join(parent, draft.name),
-    ledger: input.ledgerFilename,
-    spool: input.spoolFilename,
+    ledger: join(operationStateDirectory, "operations.sqlite"),
+    spool: join(operationStateDirectory, "receipts.sqlite"),
     input,
-    now: () => Date.parse("2026-07-20T10:18:00.000Z"),
+    now,
+    coordinator: (options: Omit<ProjectScaffoldCoordinatorInternalOptions, "stateRoot"> = {}) =>
+      createProjectScaffoldCoordinatorInternal({ stateRoot: state, now, ...options }),
   }
 }
 
@@ -361,4 +481,12 @@ async function exists(path: string) {
   } catch {
     return false
   }
+}
+
+if (false) {
+  const input = {} as DurableProjectScaffoldInput
+  // @ts-expect-error Public scaffold inputs cannot select ledger or spool paths.
+  void ({ ...input, ledgerFilename: "/tmp/operations.sqlite" } satisfies DurableProjectScaffoldInput)
+  // @ts-expect-error The public coordinator cannot accept a clock, observer, or fault-injection argument.
+  void executeDurableProjectScaffold(input, { now: () => 0 })
 }

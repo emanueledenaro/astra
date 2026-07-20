@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { constants } from "node:fs"
-import { open, realpath } from "node:fs/promises"
+import { lstat, open, realpath } from "node:fs/promises"
 import { dlopen, ptr, toArrayBuffer } from "bun:ffi"
 import type { ProjectCreationPreview, ProjectParentAuthority } from "@astra/domain/project-creation-control"
 import type { ContentDigest } from "@astra/domain/operation-contract"
@@ -8,6 +8,7 @@ import { canonicalJson, digest } from "./controlled-write-authority"
 import type { ProjectScaffoldTreeVerification } from "./project-creation-verifier"
 
 export type ProjectScaffoldVerifierInternalDependencies = Readonly<{
+  afterParentOpen?: () => Promise<void>
   beforeOpenEntry?: (relativePath: string) => Promise<void>
 }>
 
@@ -55,57 +56,86 @@ async function readTree(
     authority.parentPath,
     constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
   ).catch(() => null)
-  const target = await open(
-    authority.targetPath,
-    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-  ).catch(() => null)
-  if (!parent || !target) {
-    await parent?.close().catch(() => {})
-    await target?.close().catch(() => {})
-    return unavailable("parent_or_target_handle_unavailable")
-  }
+  if (!parent) return unavailable("parent_or_target_handle_unavailable")
+  const library = openDirectoryLibrary()
+  let targetFD = -1
   try {
     const parentBefore = await parent.stat()
-    const targetBefore = await target.stat()
     if (
       !parentBefore.isDirectory() ||
-      !targetBefore.isDirectory() ||
       String(parentBefore.dev) !== authority.parentIdentity.device ||
       String(parentBefore.ino) !== authority.parentIdentity.inode ||
-      String(targetBefore.dev) !== targetIdentity.device ||
-      String(targetBefore.ino) !== targetIdentity.inode ||
       (await realpath(authority.parentPath).catch(() => null)) !== authority.parentPath
     ) {
       return unavailable("parent_or_target_identity_changed")
     }
-    const library = openDirectoryLibrary()
-    try {
-      const entries = await readDirectory(
-        target.fd,
-        "",
-        preview.limits.maxFiles * preview.limits.maxPathSegments + 1,
-        library,
-        dependencies,
-      )
-      const parentAfter = await parent.stat()
-      const targetAfter = await target.stat()
-      if (
-        parentBefore.dev !== parentAfter.dev ||
-        parentBefore.ino !== parentAfter.ino ||
-        targetBefore.dev !== targetAfter.dev ||
-        targetBefore.ino !== targetAfter.ino
-      ) {
-        return unavailable("parent_or_target_changed_during_read")
-      }
-      return { available: true as const, entries: entries.sort((left, right) => left.path.localeCompare(right.path)) }
-    } finally {
-      library.close()
+    await dependencies.afterParentOpen?.()
+    targetFD = library.symbols.openat(
+      parent.fd,
+      ptr(Buffer.from(`${authority.targetName}\0`)),
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      0,
+    )
+    if (targetFD < 0) return unavailable("parent_or_target_handle_unavailable")
+    const targetBefore = await Bun.file(targetFD).stat()
+    const parentPathFacts = await lstat(authority.parentPath).catch(() => null)
+    if (
+      !targetBefore.isDirectory() ||
+      String(targetBefore.dev) !== targetIdentity.device ||
+      String(targetBefore.ino) !== targetIdentity.inode ||
+      !parentPathFacts?.isDirectory() ||
+      parentPathFacts.isSymbolicLink() ||
+      String(parentPathFacts.dev) !== authority.parentIdentity.device ||
+      String(parentPathFacts.ino) !== authority.parentIdentity.inode ||
+      (await realpath(authority.parentPath).catch(() => null)) !== authority.parentPath
+    ) {
+      return unavailable("parent_or_target_identity_changed")
     }
+    const entries = await readDirectory(
+      targetFD,
+      "",
+      preview.limits.maxFiles * preview.limits.maxPathSegments + 1,
+      library,
+      dependencies,
+    )
+    const parentAfter = await parent.stat()
+    const targetAfter = await Bun.file(targetFD).stat()
+    const parentPathAfter = await lstat(authority.parentPath).catch(() => null)
+    const reboundTargetFD = library.symbols.openat(
+      parent.fd,
+      ptr(Buffer.from(`${authority.targetName}\0`)),
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      0,
+    )
+    if (reboundTargetFD < 0) return unavailable("parent_or_target_changed_during_read")
+    let reboundTarget: Awaited<ReturnType<ReturnType<typeof Bun.file>["stat"]>>
+    try {
+      reboundTarget = await Bun.file(reboundTargetFD).stat()
+    } finally {
+      library.symbols.close(reboundTargetFD)
+    }
+    if (
+      parentBefore.dev !== parentAfter.dev ||
+      parentBefore.ino !== parentAfter.ino ||
+      targetBefore.dev !== targetAfter.dev ||
+      targetBefore.ino !== targetAfter.ino ||
+      !parentPathAfter?.isDirectory() ||
+      parentPathAfter.isSymbolicLink() ||
+      parentBefore.dev !== parentPathAfter.dev ||
+      parentBefore.ino !== parentPathAfter.ino ||
+      targetBefore.dev !== reboundTarget.dev ||
+      targetBefore.ino !== reboundTarget.ino ||
+      (await realpath(authority.parentPath).catch(() => null)) !== authority.parentPath
+    ) {
+      return unavailable("parent_or_target_changed_during_read")
+    }
+    return { available: true as const, entries: entries.sort((left, right) => left.path.localeCompare(right.path)) }
   } catch (cause) {
     return unavailable(cause instanceof Error ? cause.message.slice(0, 128) : "tree_read_failed")
   } finally {
+    if (targetFD >= 0) library.symbols.close(targetFD)
+    library.close()
     await parent.close().catch(() => {})
-    await target.close().catch(() => {})
   }
 }
 
@@ -129,7 +159,7 @@ async function readDirectory(
   dependencies: ProjectScaffoldVerifierInternalDependencies,
 ): Promise<Array<TreeEntry>> {
   if (remaining < 1) throw new TypeError("Project tree exceeds the verification entry limit")
-  const names = readDirectoryNames(directoryFD, library)
+  const names = readDirectoryNames(directoryFD, remaining, library)
   const entries: Array<TreeEntry> = []
   for (const name of names) {
     if (entries.length >= remaining) throw new TypeError("Project tree exceeds the verification entry limit")
@@ -183,7 +213,11 @@ async function readDirectory(
   return entries
 }
 
-function readDirectoryNames(directoryFD: number, library: ReturnType<typeof openDirectoryLibrary>) {
+function readDirectoryNames(
+  directoryFD: number,
+  maximumNames: number,
+  library: ReturnType<typeof openDirectoryLibrary>,
+) {
   const duplicate = library.symbols.dup(directoryFD)
   if (duplicate < 0) throw new TypeError("Project directory descriptor could not be duplicated")
   const directory = library.symbols.fdopendir(duplicate)
@@ -209,6 +243,7 @@ function readDirectoryNames(directoryFD: number, library: ReturnType<typeof open
       ) {
         throw new TypeError("Project directory entry name is unsafe")
       }
+      if (names.length >= maximumNames) throw new TypeError("Project tree exceeds the verification entry limit")
       names.push(name)
     }
   } finally {

@@ -45,6 +45,30 @@ describe("project creation draft", () => {
     })
   })
 
+  test.each(["line\nbreak.ts", "carriage\rreturn.ts", "tab\tname.ts", "c1\u0085name.ts"])(
+    "rejects control-bearing file path %j while preserving controls in content",
+    (path) => {
+      expect(parseProjectCreationDraft({ ...validDraft(), files: [{ path, content: "line\n\tcontent\r\n" }] })).toEqual({
+        ok: false,
+        reason: "file_path_invalid",
+      })
+    },
+  )
+
+  test.each(["alpha\nbeta", "alpha\rbeta", "alpha\tbeta", "alpha\u0085beta"])(
+    "rejects control-bearing target name %j",
+    (name) => {
+      expect(parseProjectCreationDraft({ ...validDraft(), name })).toEqual({ ok: false, reason: "name_invalid" })
+    },
+  )
+
+  test("rejects a control-bearing parent path", () => {
+    expect(parseProjectCreationDraft({ ...validDraft(), parentPath: "/private/tmp/projects\nother" })).toEqual({
+      ok: false,
+      reason: "parent_path_not_canonical",
+    })
+  })
+
   test("rejects duplicate proposed file paths", () => {
     expect(
       parseProjectCreationDraft({

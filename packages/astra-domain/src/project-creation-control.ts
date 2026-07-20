@@ -237,7 +237,7 @@ export function parseProjectCreationTargetName(input: unknown): ProjectCreationC
     input.trim() !== input ||
     input.includes("/") ||
     input.includes("\\") ||
-    !safeText(input) ||
+    !safePathText(input) ||
     Buffer.byteLength(input, "utf8") > projectCreationLimits.maxTargetNameBytes
   ) {
     return failure("name_invalid")
@@ -527,7 +527,7 @@ function parseProjectParentAuthorityInput(
 
 function parseCanonicalAbsolutePath(input: unknown): ProjectCreationControlResult<string> {
   if (typeof input !== "string" || !isAbsolute(input)) return failure("parent_path_not_absolute")
-  if (!safeText(input) || normalize(input) !== input) return failure("parent_path_not_canonical")
+  if (!safePathText(input) || normalize(input) !== input) return failure("parent_path_not_canonical")
   return success(input)
 }
 
@@ -536,7 +536,7 @@ function parseRelativeFilePath(input: unknown): ProjectCreationControlResult<str
   if (isAbsolute(input) || input.startsWith("\\") || /^[a-zA-Z]:/.test(input)) {
     return failure("file_path_not_relative")
   }
-  if (input.includes("\\") || !safeText(input) || input !== input.normalize("NFC")) {
+  if (input.includes("\\") || !safePathText(input) || input !== input.normalize("NFC")) {
     return failure("file_path_invalid")
   }
   const segments = input.split("/")
@@ -549,6 +549,10 @@ function parseRelativeFilePath(input: unknown): ProjectCreationControlResult<str
 
 function safeText(input: string) {
   return !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(input) && !/[\ud800-\udfff]/u.test(input)
+}
+
+function safePathText(input: string) {
+  return !/[\u0000-\u001f\u007f-\u009f]/u.test(input) && !/[\ud800-\udfff]/u.test(input)
 }
 
 function canonicalTimestamp(input: unknown): input is string {

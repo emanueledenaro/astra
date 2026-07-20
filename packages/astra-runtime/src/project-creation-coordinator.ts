@@ -1,4 +1,6 @@
-import { access, lstat } from "node:fs/promises"
+import { access, lstat, mkdir, realpath } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join, resolve } from "node:path"
 import {
   parseOperationEffectUncertainty,
   parseOperationEvidence,
@@ -9,9 +11,9 @@ import {
   type OperationReceipt,
 } from "@astra/domain/operation-contract"
 import {
-  executeProjectScaffold,
+  executeProjectScaffoldInternal,
   type ProjectScaffoldExecutionResult,
-} from "@astra/executor"
+} from "../../astra-executor/src/project-scaffold-internal"
 import type { OperationRecord } from "@astra/ledger"
 import { Effect } from "effect"
 import { canonicalJson, digest } from "./controlled-write-authority"
@@ -38,23 +40,31 @@ import {
 const claimLeaseMilliseconds = 60_000
 const minimumEffectLeaseMilliseconds = 1_000
 
-export const projectScaffoldFaultPoints = [
+const projectScaffoldFaultPointsInternal = [
   "after_claim_before_adapter",
   "after_adapter_before_spool",
   "after_spool_before_ledger",
   "after_ledger_before_ack",
 ] as const
 
-export type ProjectScaffoldFaultPoint = (typeof projectScaffoldFaultPoints)[number]
+type ProjectScaffoldFaultPointInternal = (typeof projectScaffoldFaultPointsInternal)[number]
 
-export type DurableProjectScaffoldInput = ProjectScaffoldOperationFactsInput &
-  Readonly<{ ledgerFilename: string; spoolFilename: string }>
+export type DurableProjectScaffoldInput = ProjectScaffoldOperationFactsInput
 
-export type ProjectScaffoldCoordinatorDependencies = Readonly<{
-  injectFault?: (point: ProjectScaffoldFaultPoint) => Promise<void>
+export type ProjectScaffoldCoordinatorInternalOptions = Readonly<{
+  stateRoot: string
+  injectFault?: (point: ProjectScaffoldFaultPointInternal) => Promise<void>
   onHostAdapterEntered?: () => void
   now?: () => number
 }>
+
+type StatefulProjectScaffoldInput = DurableProjectScaffoldInput &
+  Readonly<{
+    stateRoot: string
+    operationStateDirectory: string
+    ledgerFilename: string
+    spoolFilename: string
+  }>
 
 export type DurableProjectScaffoldResult = Readonly<{
   operationID: string
@@ -79,11 +89,56 @@ export class ProjectScaffoldCoordinationError extends Error {
   }
 }
 
-const activeProjectScaffolds = new Map<string, Promise<DurableProjectScaffoldResult>>()
+export function createProjectScaffoldCoordinatorInternal(options: ProjectScaffoldCoordinatorInternalOptions) {
+  const activeProjectScaffolds = new Map<string, Promise<DurableProjectScaffoldResult>>()
+  const now = options.now ?? Date.now
+  const stateRoot = options.stateRoot
+  const dependencies: ProjectScaffoldCoordinatorInternalOptions = Object.freeze({
+    stateRoot,
+    now,
+    ...(options.injectFault ? { injectFault: options.injectFault } : {}),
+    ...(options.onHostAdapterEntered ? { onHostAdapterEntered: options.onHostAdapterEntered } : {}),
+  })
+  return Object.freeze({
+    execute: async (input: DurableProjectScaffoldInput) =>
+      executeDurableProjectScaffoldWithState(bindStatePaths(input, stateRoot), dependencies, activeProjectScaffolds),
+    recover: async (input: DurableProjectScaffoldInput) =>
+      recoverDurableProjectScaffoldWithState(bindStatePaths(input, stateRoot), dependencies),
+    verify: async (input: DurableProjectScaffoldInput) =>
+      verifyDurableProjectScaffoldWithState(bindStatePaths(input, stateRoot), now),
+  })
+}
 
+const publicProjectScaffoldCoordinator = createProjectScaffoldCoordinatorInternal({
+  stateRoot: join(homedir(), "Library", "Application Support", "Astra", "Operations", "project-scaffold"),
+  now: Date.now,
+})
+
+/** Executes an approved scaffold with host state derived exclusively by Astra. */
 export async function executeDurableProjectScaffold(
   input: DurableProjectScaffoldInput,
-  dependencies: ProjectScaffoldCoordinatorDependencies = {},
+): Promise<DurableProjectScaffoldResult> {
+  return publicProjectScaffoldCoordinator.execute(input)
+}
+
+/** Recovers a scaffold using Astra-owned state and the real host clock. */
+export async function recoverDurableProjectScaffold(
+  input: DurableProjectScaffoldInput,
+): Promise<DurableProjectScaffoldResult> {
+  return publicProjectScaffoldCoordinator.recover(input)
+}
+
+/** Verifies a scaffold using Astra-owned state and the real host clock. */
+export async function verifyDurableProjectScaffold(
+  input: DurableProjectScaffoldInput,
+): Promise<DurableProjectScaffoldResult> {
+  return publicProjectScaffoldCoordinator.verify(input)
+}
+
+async function executeDurableProjectScaffoldWithState(
+  input: StatefulProjectScaffoldInput,
+  dependencies: ProjectScaffoldCoordinatorInternalOptions,
+  activeProjectScaffolds: Map<string, Promise<DurableProjectScaffoldResult>>,
 ): Promise<DurableProjectScaffoldResult> {
   let operationID: string
   try {
@@ -103,8 +158,8 @@ export async function executeDurableProjectScaffold(
 }
 
 async function executeDurableProjectScaffoldOnce(
-  input: DurableProjectScaffoldInput,
-  dependencies: ProjectScaffoldCoordinatorDependencies = {},
+  input: StatefulProjectScaffoldInput,
+  dependencies: ProjectScaffoldCoordinatorInternalOptions,
 ): Promise<DurableProjectScaffoldResult> {
   try {
     const facts = makeProjectScaffoldOperationFacts(input)
@@ -125,6 +180,7 @@ async function executeDurableProjectScaffoldOnce(
       throw new ProjectScaffoldCoordinationError("invalid_input", "The approved project scaffold has expired")
     }
 
+    if (await exists(input.stateRoot)) await assertPrivateStateDirectory(input.stateRoot, "state root")
     if (await exists(input.ledgerFilename)) {
       await assertSafeStateFile(facts.authority.parentPath, input.ledgerFilename)
       const existing = await runWithLedger(input.ledgerFilename, (ledger) =>
@@ -133,10 +189,10 @@ async function executeDurableProjectScaffoldOnce(
           return yield* ledger.getDispatchSnapshot(facts.dispatchRequestID)
         }),
       )
-      if (existing?.claim) return recoverDurableProjectScaffold(input, { now })
+      if (existing?.claim) return recoverDurableProjectScaffoldWithState(input, { ...dependencies, now })
     }
     await requireCurrentAuthority(facts)
-    await prepareOperationStateFiles(facts.authority.parentPath, input.ledgerFilename, input.spoolFilename)
+    await prepareProjectStateFiles(facts.authority.parentPath, input)
     const claimStartedAt = now()
     const claimed = await runWithCoordinatorLedger(
       input.ledgerFilename,
@@ -166,13 +222,13 @@ async function executeDurableProjectScaffoldOnce(
         }),
       clock,
     )
-    if (claimed.kind === "replayed") return recoverDurableProjectScaffold(input, { now })
+    if (claimed.kind === "replayed") return recoverDurableProjectScaffoldWithState(input, { ...dependencies, now })
     await dependencies.injectFault?.("after_claim_before_adapter")
 
     let bridgeAttempted = false
     let bridgeAccepted = false
     dependencies.onHostAdapterEntered?.()
-    const effect = await executeProjectScaffold(
+    const effect = await executeProjectScaffoldInternal(
       { authority: facts.authority, draft: facts.draft, preview: facts.preview },
       async (proposal) => {
         if (bridgeAttempted) return "already_claimed"
@@ -262,16 +318,19 @@ async function executeDurableProjectScaffoldOnce(
   }
 }
 
-export async function recoverDurableProjectScaffold(
-  input: DurableProjectScaffoldInput,
-  dependencies: Readonly<{ now?: () => number }> = {},
+async function recoverDurableProjectScaffoldWithState(
+  input: StatefulProjectScaffoldInput,
+  dependencies: ProjectScaffoldCoordinatorInternalOptions,
 ): Promise<DurableProjectScaffoldResult> {
   try {
     const facts = makeProjectScaffoldOperationFacts(input)
     if (facts.decision.decision !== "approved") {
       throw new ProjectScaffoldCoordinationError("invalid_input", "Only an approved scaffold can be recovered")
     }
-    await prepareOperationStateFiles(facts.authority.parentPath, input.ledgerFilename, input.spoolFilename)
+    if (!(await exists(input.ledgerFilename))) {
+      throw new ProjectScaffoldCoordinationError("recovery_unavailable", "No durable project scaffold is available")
+    }
+    await assertProjectStatePaths(input)
     const now = dependencies.now ?? Date.now
     const clock = () => new Date(now()).toISOString()
     if (await exists(input.spoolFilename)) await ingestPendingReceipt(input, facts, clock)
@@ -309,15 +368,19 @@ export async function recoverDurableProjectScaffold(
   }
 }
 
-export async function verifyDurableProjectScaffold(
-  input: DurableProjectScaffoldInput,
+async function verifyDurableProjectScaffoldWithState(
+  input: StatefulProjectScaffoldInput,
+  now: () => number,
 ): Promise<DurableProjectScaffoldResult> {
   try {
     const facts = makeProjectScaffoldOperationFacts(input)
     if (facts.decision.decision !== "approved") {
       throw new ProjectScaffoldCoordinationError("invalid_input", "A rejected scaffold cannot be verified")
     }
-    await assertSafeStateFile(facts.authority.parentPath, input.ledgerFilename)
+    if (!(await exists(input.ledgerFilename))) {
+      throw new ProjectScaffoldCoordinationError("recovery_unavailable", "No observed scaffold receipt is available")
+    }
+    await assertProjectStatePaths(input)
     const durable = await runWithLedger(input.ledgerFilename, (ledger) =>
       Effect.gen(function* () {
         yield* ledger.initialize()
@@ -348,7 +411,7 @@ export async function verifyDurableProjectScaffold(
       verificationPlanID: facts.verificationPlanID,
       verifier: { identity: projectScaffoldVerifier, version: "1", digest: projectScaffoldVerifierDigest },
       snapshotDigest: verification.snapshotDigest,
-      observedAt: new Date().toISOString(),
+      observedAt: new Date(now()).toISOString(),
       criteria: [
         {
           criterionID: "exact_project_tree",
@@ -358,27 +421,30 @@ export async function verifyDurableProjectScaffold(
       ],
       limitations: passed ? [] : [verification.reason ?? "project_tree_not_verified"],
     })
-    const ingested = await runWithVerificationLedger(input.ledgerFilename, (ledger) =>
-      Effect.gen(function* () {
-        yield* ledger.initialize()
-        return yield* ledger.ingestEvidence({
-          evidence,
-          startedEvent: {
-            eventID: facts.eventIDs.verificationStarted,
-            schemaVersion: 1,
-            correlationID: facts.correlationID,
-            redaction: "internal",
-            externalBlobDigest: null,
-          },
-          terminalEvent: {
-            eventID: facts.eventIDs.verificationTerminal,
-            schemaVersion: 1,
-            correlationID: facts.correlationID,
-            redaction: "internal",
-            externalBlobDigest: null,
-          },
-        })
-      }),
+    const ingested = await runWithVerificationLedger(
+      input.ledgerFilename,
+      (ledger) =>
+        Effect.gen(function* () {
+          yield* ledger.initialize()
+          return yield* ledger.ingestEvidence({
+            evidence,
+            startedEvent: {
+              eventID: facts.eventIDs.verificationStarted,
+              schemaVersion: 1,
+              correlationID: facts.correlationID,
+              redaction: "internal",
+              externalBlobDigest: null,
+            },
+            terminalEvent: {
+              eventID: facts.eventIDs.verificationTerminal,
+              schemaVersion: 1,
+              correlationID: facts.correlationID,
+              redaction: "internal",
+              externalBlobDigest: null,
+            },
+          })
+        }),
+      () => new Date(now()).toISOString(),
     )
     return durableResult(ingested.operation, durable.dispatch.receipt, ingested.evidence)
   } catch (cause) {
@@ -399,7 +465,7 @@ async function requireCurrentAuthority(facts: ReturnType<typeof makeProjectScaff
 }
 
 async function ingestPendingReceipt(
-  input: DurableProjectScaffoldInput,
+  input: StatefulProjectScaffoldInput,
   facts: ReturnType<typeof makeProjectScaffoldOperationFacts>,
   clock: () => string,
 ) {
@@ -457,7 +523,7 @@ async function acknowledgeReceipt(
 }
 
 async function recordUncertainty(
-  input: DurableProjectScaffoldInput,
+  input: StatefulProjectScaffoldInput,
   facts: ReturnType<typeof makeProjectScaffoldOperationFacts>,
   fencingToken: number,
   observedAt: string,
@@ -640,6 +706,60 @@ function requireContentDigest(input: unknown) {
   return parsed.value
 }
 
+function bindStatePaths(input: DurableProjectScaffoldInput, stateRootInput: string): StatefulProjectScaffoldInput {
+  let facts: ReturnType<typeof makeProjectScaffoldOperationFacts>
+  try {
+    facts = makeProjectScaffoldOperationFacts(input)
+  } catch (cause) {
+    throw new ProjectScaffoldCoordinationError("invalid_input", "The project scaffold binding is invalid", cause)
+  }
+  const stateRoot = resolve(stateRootInput)
+  if (stateRoot !== stateRootInput || /[\u0000-\u001f\u007f-\u009f]/u.test(stateRootInput)) {
+    throw new ProjectScaffoldCoordinationError("state_unavailable", "The Astra project state root is not canonical")
+  }
+  const operationStateDirectory = join(stateRoot, facts.operationID)
+  return Object.freeze({
+    ...input,
+    stateRoot,
+    operationStateDirectory,
+    ledgerFilename: join(operationStateDirectory, "operations.sqlite"),
+    spoolFilename: join(operationStateDirectory, "receipts.sqlite"),
+  })
+}
+
+async function prepareProjectStateFiles(workspace: string, input: StatefulProjectScaffoldInput) {
+  await mkdir(input.stateRoot, { recursive: true, mode: 0o700 })
+  await assertPrivateStateDirectory(input.stateRoot, "state root")
+  await mkdir(input.operationStateDirectory, { mode: 0o700 }).catch((cause) => {
+    if (!isNodeError(cause, "EEXIST")) throw cause
+  })
+  await assertPrivateStateDirectory(input.operationStateDirectory, "operation state directory")
+  await prepareOperationStateFiles(workspace, input.ledgerFilename, input.spoolFilename)
+}
+
+async function assertProjectStatePaths(input: StatefulProjectScaffoldInput) {
+  await assertPrivateStateDirectory(input.stateRoot, "state root")
+  await assertPrivateStateDirectory(input.operationStateDirectory, "operation state directory")
+  await assertSafeStateFile(input.authority.parentPath, input.ledgerFilename)
+  await assertSafeStateFile(input.authority.parentPath, input.spoolFilename)
+}
+
+async function assertPrivateStateDirectory(path: string, label: string) {
+  const facts = await lstat(path).catch((cause) => {
+    throw new ProjectScaffoldCoordinationError("state_unavailable", `The Astra ${label} is unavailable`, cause)
+  })
+  const owner = typeof process.getuid === "function" ? process.getuid() : facts.uid
+  if (
+    !facts.isDirectory() ||
+    facts.isSymbolicLink() ||
+    facts.uid !== owner ||
+    (facts.mode & 0o077) !== 0 ||
+    (await realpath(path).catch(() => null)) !== path
+  ) {
+    throw new ProjectScaffoldCoordinationError("state_unavailable", `The Astra ${label} is not private and canonical`)
+  }
+}
+
 async function exists(path: string) {
   try {
     await access(path)
@@ -647,6 +767,10 @@ async function exists(path: string) {
   } catch {
     return false
   }
+}
+
+function isNodeError(cause: unknown, code: string): cause is NodeJS.ErrnoException {
+  return cause instanceof Error && "code" in cause && cause.code === code
 }
 
 async function observeTarget(path: string): Promise<"absent" | "present" | "unavailable"> {

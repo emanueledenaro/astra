@@ -92,10 +92,11 @@ export function runWithCoordinatorLedger<A, E>(
 export function runWithVerificationLedger<A, E>(
   filename: string,
   use: (ledger: Effect.Success<ReturnType<typeof makeVerificationLedger>>) => Effect.Effect<A, E>,
+  clock: () => string = () => new Date().toISOString(),
 ) {
   return Effect.runPromise(
     Effect.gen(function* () {
-      const ledger = yield* makeVerificationLedger()
+      const ledger = yield* makeVerificationLedger(() => Effect.void, clock)
       return yield* use(ledger)
     }).pipe(Effect.provide(SqliteClient.layer({ filename, disableWAL: true })), Effect.scoped),
   )
