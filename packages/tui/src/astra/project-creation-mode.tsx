@@ -214,6 +214,10 @@ export function AstraProjectCreationReviewMode(props: {
             )}
           </For>
         </box>
+        <Show when={!compact()}>
+          <text fg={palette.muted}>Proposal fingerprint</text>
+          <text fg={palette.text}>{proposal.proposalDigest}</text>
+        </Show>
         <text fg={palette.warning}>No install · No network · Git: separate step</text>
         <text fg={palette.text}>
           {compact() ? "[A] Approve · [R] Reject · [Q] Cancel" : "[A] Approve exact scaffold · [R] Reject · [Q] Cancel"}
@@ -297,7 +301,7 @@ function ProjectCreationFrame(props: { compact: boolean; phase: string; children
           <text fg={palette.accent}>{props.phase}</text>
         </box>
         <box border borderStyle="rounded" borderColor={palette.border} backgroundColor={palette.panel} paddingLeft={props.compact ? 1 : 2} paddingRight={props.compact ? 1 : 2} flexDirection={props.compact ? "column" : "row"} gap={props.compact ? 0 : 3}>
-          <Show when={!props.compact && dimensions().width >= 86}>
+          <Show when={!props.compact && props.phase !== "APPROVAL" && dimensions().width >= 86}>
             <box flexDirection="column" flexShrink={0}>
               <For each={visual().lines}>{(line) => <text fg={palette.accent}>{line}</text>}</For>
               <text fg={palette.accent}>{visual().label}</text>

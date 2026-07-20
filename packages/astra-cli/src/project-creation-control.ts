@@ -136,7 +136,12 @@ export function createGuidedProjectCreationControlInternal(dependencies: GuidedP
         facts.receiptID,
         null,
       )
-      const progress = await dependencies.openProgress(initialProgress)
+      let progress: ProjectCreationProgressSurface | null = null
+      try {
+        progress = await dependencies.openProgress(initialProgress)
+      } catch {
+        // Presentation cannot authorize a host effect and has no state-machine authority.
+      }
       if (!progress) {
         return presentResult(
           dependencies,
@@ -150,7 +155,7 @@ export function createGuidedProjectCreationControlInternal(dependencies: GuidedP
         observed = await dependencies.execute(input)
         let result = observed
         if (observed.status === "effect_observed") {
-          requireProgressUpdate(
+          publishProgressBestEffort(
             progress,
             projectCreationProgress(
               "effect_observed",
@@ -160,7 +165,7 @@ export function createGuidedProjectCreationControlInternal(dependencies: GuidedP
               observed.receiptID,
             ),
           )
-          requireProgressUpdate(
+          publishProgressBestEffort(
             progress,
             projectCreationProgress(
               "verifying",
@@ -183,7 +188,7 @@ export function createGuidedProjectCreationControlInternal(dependencies: GuidedP
           observed?.receiptID ?? null,
         )
       } finally {
-        progress.close()
+        closeProgressBestEffort(progress)
       }
       return presentResult(dependencies, projected)
     },
@@ -346,11 +351,23 @@ function projectCreationProgress(
   }
 }
 
-function requireProgressUpdate(
+function publishProgressBestEffort(
   surface: ProjectCreationProgressSurface,
   progress: AstraProjectCreationProgress,
 ) {
-  if (!surface.update(progress)) throw new TypeError("Project creation progress surface rejected a typed snapshot")
+  try {
+    surface.update(progress)
+  } catch {
+    // The typed operation state remains authoritative in the CLI parent.
+  }
+}
+
+function closeProgressBestEffort(surface: ProjectCreationProgressSurface) {
+  try {
+    surface.close()
+  } catch {
+    // Renderer lifecycle failures cannot replace an already computed operation outcome.
+  }
 }
 
 function resultDetail(status: AstraProjectCreationResult["status"]) {

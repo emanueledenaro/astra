@@ -139,6 +139,22 @@ test("renders a realistic exact proposal and reachable approval controls in wide
   }
 })
 
+test("keeps the complete proposal fingerprint inspectable without rendering raw file content", async () => {
+  const app = await testRender(
+    () => <AstraProjectCreationReviewMode proposal={proposal} onDecision={() => {}} />,
+    { width: 100, height: 28 },
+  )
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("Proposal fingerprint")
+    expect(frame).toContain(proposal.proposalDigest)
+    expect(frame).not.toContain("Create a predictable tool.")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("returns review decisions bound to the rendered proposal", async () => {
   const decisions: Array<unknown> = []
   const app = await testRender(

@@ -231,6 +231,56 @@ describe("guided project creation parent control", () => {
     )
   })
 
+  test("verifies exactly once when progress updates return false or throw", async () => {
+    for (const progressUpdate of ["false", "throw"] as const) {
+      const calls: Array<string> = []
+      let presented: unknown = null
+      const control = createGuidedProjectCreationControlInternal(
+        dependencies(calls, {
+          review: (proposal) => ({ kind: "approve", proposalDigest: proposal.proposalDigest }),
+          progressUpdate,
+          presented: (value) => { presented = value },
+        }),
+      )
+
+      expect(await control.run()).toEqual({ kind: "launchpad" })
+      expect(calls.filter((call) => call === "verify")).toHaveLength(1)
+      expect(presented).toMatchObject({ status: "verified", evidenceID: expect.any(String) })
+    }
+  })
+
+  test("preserves the verified outcome when closing the progress surface throws", async () => {
+    const calls: Array<string> = []
+    let presented: unknown = null
+    const control = createGuidedProjectCreationControlInternal(
+      dependencies(calls, {
+        review: (proposal) => ({ kind: "approve", proposalDigest: proposal.proposalDigest }),
+        progressCloseFailure: new Error("renderer close failed"),
+        presented: (value) => { presented = value },
+      }),
+    )
+
+    expect(await control.run()).toEqual({ kind: "launchpad" })
+    expect(presented).toMatchObject({ status: "verified", evidenceID: expect.any(String) })
+  })
+
+  test("does not dispatch when the progress surface fails before the approved effect starts", async () => {
+    const calls: Array<string> = []
+    let presented: unknown = null
+    const control = createGuidedProjectCreationControlInternal(
+      dependencies(calls, {
+        review: (proposal) => ({ kind: "approve", proposalDigest: proposal.proposalDigest }),
+        progressOpenFailure: new Error("renderer open failed"),
+        presented: (value) => { presented = value },
+      }),
+    )
+
+    expect(await control.run()).toEqual({ kind: "launchpad" })
+    expect(calls).not.toContain("execute:approved")
+    expect(calls).not.toContain("verify")
+    expect(presented).toMatchObject({ status: "failed_without_effect", observedReceiptID: null })
+  })
+
   test("does not accept Open when execution is only observed", async () => {
     const calls: Array<string> = []
     const control = createGuidedProjectCreationControlInternal(
@@ -271,6 +321,9 @@ function dependencies(
     progress?: (snapshot: unknown) => void
     input?: (input: DurableProjectScaffoldInput) => void
     presented?: (result: unknown) => void
+    progressUpdate?: "false" | "throw"
+    progressCloseFailure?: Error
+    progressOpenFailure?: Error
   }> = {},
 ) {
   const times = [
@@ -296,14 +349,18 @@ function dependencies(
     openProgress: async (progress: unknown) => {
       calls.push("progress:open")
       options.progress?.(progress)
+      if (options.progressOpenFailure) throw options.progressOpenFailure
       return {
         update(next: unknown) {
           calls.push(`progress:${(next as { state: string }).state}`)
           options.progress?.(next)
+          if (options.progressUpdate === "throw") throw new Error("renderer update failed")
+          if (options.progressUpdate === "false") return false
           return true
         },
         close() {
           calls.push("progress:close")
+          if (options.progressCloseFailure) throw options.progressCloseFailure
         },
       }
     },
