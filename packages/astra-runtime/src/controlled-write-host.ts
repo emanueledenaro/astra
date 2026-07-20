@@ -10,6 +10,7 @@ import {
 } from "./controlled-write"
 import { makeControlledWriteHostArguments, type ControlledWriteCapabilityProposal } from "./controlled-write-capability"
 import type { ControlledWritePlan } from "./controlled-write-plan"
+import { readBoundedByteStream } from "./bounded-byte-stream"
 
 type HostStopReason = "timeout" | "stdout_limit_exceeded" | "stderr_limit_exceeded"
 
@@ -145,8 +146,8 @@ async function runBoundedHostProcess(
       await current.stdin.end()
       const [exitCode, stdout, stderr] = await Promise.all([
         exitedPromise,
-        readBounded(current.stdout, input.maxStdoutBytes, () => requestStop("stdout_limit_exceeded")),
-        readBounded(current.stderr, input.maxStderrBytes, () => requestStop("stderr_limit_exceeded")),
+        readBoundedByteStream(current.stdout, input.maxStdoutBytes, () => requestStop("stdout_limit_exceeded")),
+        readBoundedByteStream(current.stderr, input.maxStderrBytes, () => requestStop("stderr_limit_exceeded")),
       ])
       return {
         status: stopReason ? "effect_unknown" : "observed",
@@ -245,31 +246,6 @@ async function digestHandle(handle: Awaited<ReturnType<typeof open>>) {
     hash.update(buffer.subarray(0, result.bytesRead))
     offset += result.bytesRead
   }
-}
-
-async function readBounded(stream: ReadableStream<Uint8Array>, limit: number, onExceeded: () => void) {
-  const chunks: Array<Uint8Array> = []
-  let retained = 0
-  let exceeded = false
-  for await (const chunk of stream) {
-    const remaining = Math.max(0, limit - retained)
-    if (remaining > 0) {
-      const kept = chunk.byteLength <= remaining ? chunk : chunk.subarray(0, remaining)
-      chunks.push(kept)
-      retained += kept.byteLength
-    }
-    if (!exceeded && chunk.byteLength > remaining) {
-      exceeded = true
-      onExceeded()
-    }
-  }
-  const output = new Uint8Array(retained)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return output
 }
 
 function hostEvidence(

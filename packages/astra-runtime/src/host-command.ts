@@ -31,6 +31,7 @@ import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
 import type { AppendOperationEvent, OperationEventDraft, OperationRecord } from "@astra/ledger"
 import { captureGitRepositoryBaseline, revalidateGitRepositoryBaseline } from "@astra/git"
 import { Effect } from "effect"
+import { readBoundedByteStream } from "./bounded-byte-stream"
 import {
   canonicalJson,
   deterministicUUID,
@@ -1111,8 +1112,8 @@ async function runBoundedHostCommand(preview: HostCommandPreview): Promise<HostC
         exited = true
         return exitCode
       }),
-      readBounded(current.stdout, preview.limits.maxStdoutBytes, () => requestStop("stdout_limit_exceeded")),
-      readBounded(current.stderr, preview.limits.maxStderrBytes, () => requestStop("stderr_limit_exceeded")),
+      readBoundedByteStream(current.stdout, preview.limits.maxStdoutBytes, () => requestStop("stdout_limit_exceeded")),
+      readBoundedByteStream(current.stderr, preview.limits.maxStderrBytes, () => requestStop("stderr_limit_exceeded")),
     ]).catch(() => null)
     const hardStopped = new Promise<null>((resolve) => {
       hardStop = setTimeout(() => {
@@ -1195,31 +1196,6 @@ function deepFreeze<T>(input: T): T {
   if (typeof input !== "object" || input === null || Object.isFrozen(input)) return input
   for (const value of Object.values(input)) deepFreeze(value)
   return Object.freeze(input)
-}
-
-async function readBounded(stream: ReadableStream<Uint8Array>, limit: number, onExceeded: () => void) {
-  const chunks: Array<Uint8Array> = []
-  let retained = 0
-  let exceeded = false
-  for await (const chunk of stream) {
-    const remaining = Math.max(0, limit - retained)
-    if (remaining > 0) {
-      const kept = chunk.byteLength <= remaining ? chunk : chunk.subarray(0, remaining)
-      chunks.push(kept)
-      retained += kept.byteLength
-    }
-    if (!exceeded && chunk.byteLength > remaining) {
-      exceeded = true
-      onExceeded()
-    }
-  }
-  const output = new Uint8Array(retained)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return output
 }
 
 function durableResult(

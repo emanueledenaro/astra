@@ -23,6 +23,7 @@ import {
 import type { WorkspaceTrustReport } from "@astra/domain/workspace-trust"
 import type { AppendOperationEvent, OperationEventDraft, OperationRecord } from "@astra/ledger"
 import { Effect } from "effect"
+import { readBoundedByteStream } from "./bounded-byte-stream"
 import {
   computeExtensionInventoryCapabilityDigest,
   extensionInventoryAllowlist,
@@ -633,10 +634,10 @@ async function runBoundedExtensionInventory(
     timer = setTimeout(() => stop("timeout"), extensionInventoryLimits.timeoutMilliseconds)
     timer.unref?.()
 
-    const stdoutPromise = readBounded(requireReadableChildStream(runningChild.stdout), extensionInventoryLimits.maxProtocolBytes, () =>
+    const stdoutPromise = readBoundedByteStream(requireReadableChildStream(runningChild.stdout), extensionInventoryLimits.maxProtocolBytes, () =>
       stop("output_limit_exceeded"),
     )
-    const stderrPromise = readBounded(requireReadableChildStream(runningChild.stderr), extensionInventoryLimits.maxStderrBytes, () =>
+    const stderrPromise = readBoundedByteStream(requireReadableChildStream(runningChild.stderr), extensionInventoryLimits.maxStderrBytes, () =>
       stop("output_limit_exceeded"),
     )
     const [stdout, stderr, exitCode] = await Promise.all([stdoutPromise, stderrPromise, runningChild.exited])
@@ -1689,31 +1690,6 @@ function notifyRegistry(
   try {
     callback?.(snapshot)
   } catch {}
-}
-
-async function readBounded(stream: ReadableStream<Uint8Array>, limit: number, onExceeded: () => void) {
-  const chunks: Array<Uint8Array> = []
-  let retained = 0
-  let exceeded = false
-  for await (const chunk of stream) {
-    const remaining = Math.max(0, limit - retained)
-    if (remaining > 0) {
-      const kept = chunk.byteLength <= remaining ? chunk : chunk.subarray(0, remaining)
-      chunks.push(kept)
-      retained += kept.byteLength
-    }
-    if (!exceeded && chunk.byteLength > remaining) {
-      exceeded = true
-      onExceeded()
-    }
-  }
-  const output = new Uint8Array(retained)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return output
 }
 
 function killProcessGroup(child: Bun.Subprocess, signal: NodeJS.Signals) {
