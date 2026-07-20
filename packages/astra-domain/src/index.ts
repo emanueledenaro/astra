@@ -42,12 +42,17 @@ export * as WorkspaceTrust from "./workspace-trust"
 export type { AstraSessionAuthority, AstraSessionAuthorityParseResult } from "./session-authority"
 
 export {
+  computeProjectCreationProposalDigest,
   computeProjectParentObservationDigest,
+  makeProjectCreationPreview,
   makeProjectCreationWorkspaceBaseline,
   parseProjectCreationDraft,
+  parseProjectCreationDecision,
+  parseProjectCreationPreview,
   parseProjectCreationTargetName,
   parseProjectParentAuthority,
   projectCreationLimits,
+  projectCreationBoundaryLabel,
   sealProjectParentAuthority,
 } from "./project-creation-control"
 
@@ -55,7 +60,10 @@ export type {
   ProjectCreationControlReason,
   ProjectCreationControlResult,
   ProjectCreationDraft,
+  ProjectCreationDecision,
   ProjectCreationLimits,
+  ProjectCreationPreview,
+  ProjectCreationPreviewFile,
   ProjectCreationTextFile,
   ProjectParentAuthority,
   ProjectParentAuthorityInput,

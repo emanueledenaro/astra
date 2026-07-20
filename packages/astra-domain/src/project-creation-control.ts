@@ -11,6 +11,8 @@ export const projectCreationLimits = Object.freeze({
   maxPathSegments: 8,
 })
 
+export const projectCreationBoundaryLabel = "HOST EXECUTION — NO SANDBOX" as const
+
 export type ProjectCreationLimits = typeof projectCreationLimits
 
 export type ProjectCreationTextFile = Readonly<{
@@ -25,6 +27,39 @@ export type ProjectCreationDraft = Readonly<{
   stack: string
   files: ReadonlyArray<ProjectCreationTextFile>
   initializeGit: boolean
+}>
+
+export type ProjectCreationPreviewFile = Readonly<{
+  path: string
+  bytes: number
+  contentDigest: `sha256:${string}`
+}>
+
+export type ProjectCreationPreview = Readonly<{
+  schemaVersion: 1
+  boundary: typeof projectCreationBoundaryLabel
+  parentPath: string
+  parentIdentity: Readonly<{ device: string; inode: string }>
+  targetPath: string
+  targetName: string
+  authorityDigest: `sha256:${string}`
+  objectiveDigest: `sha256:${string}`
+  stack: string
+  initializeGitRequested: boolean
+  files: ReadonlyArray<ProjectCreationPreviewFile>
+  totalBytes: number
+  limits: ProjectCreationLimits
+  createdAt: string
+  expiresAt: string
+  nonce: string
+  proposalDigest: `sha256:${string}`
+}>
+
+export type ProjectCreationDecision = Readonly<{
+  proposalDigest: `sha256:${string}`
+  nonce: string
+  decision: "approved" | "rejected"
+  decidedAt: string
 }>
 
 export type ProjectParentAuthority = Readonly<{
@@ -74,6 +109,23 @@ export type ProjectCreationControlReason =
   | "limits_changed"
   | "observation_digest_invalid"
   | "observation_digest_mismatch"
+  | "preview_not_object"
+  | "unsupported_preview_field"
+  | "unsupported_preview_file_field"
+  | "boundary_invalid"
+  | "authority_digest_invalid"
+  | "objective_digest_invalid"
+  | "file_digest_invalid"
+  | "file_bytes_invalid"
+  | "total_bytes_invalid"
+  | "nonce_invalid"
+  | "timeline_invalid"
+  | "proposal_digest_invalid"
+  | "preview_binding_mismatch"
+  | "decision_not_object"
+  | "unsupported_decision_field"
+  | "decision_invalid"
+  | "decided_at_invalid"
 
 export type ProjectCreationControlResult<Value> =
   | Readonly<{ ok: true; value: Value }>
@@ -92,6 +144,27 @@ const authorityInputKeys = [
   "limits",
 ] as const
 const authorityKeys = [...authorityInputKeys, "observationDigest"] as const
+const previewFileKeys = ["path", "bytes", "contentDigest"] as const
+const previewInputKeys = [
+  "schemaVersion",
+  "boundary",
+  "parentPath",
+  "parentIdentity",
+  "targetPath",
+  "targetName",
+  "authorityDigest",
+  "objectiveDigest",
+  "stack",
+  "initializeGitRequested",
+  "files",
+  "totalBytes",
+  "limits",
+  "createdAt",
+  "expiresAt",
+  "nonce",
+] as const
+const previewKeys = [...previewInputKeys, "proposalDigest"] as const
+const decisionKeys = ["proposalDigest", "nonce", "decision", "decidedAt"] as const
 
 export function parseProjectCreationDraft(input: unknown): ProjectCreationControlResult<ProjectCreationDraft> {
   const record = readDataRecord(input)
@@ -170,6 +243,176 @@ export function parseProjectCreationTargetName(input: unknown): ProjectCreationC
     return failure("name_invalid")
   }
   return success(input)
+}
+
+export function makeProjectCreationPreview(
+  authorityInput: unknown,
+  draftInput: unknown,
+  createdAt: string,
+  nonce: string,
+  expiresAt: string,
+): ProjectCreationPreview {
+  const authority = parseProjectParentAuthority(authorityInput)
+  if (!authority.ok) throw new TypeError(`Invalid project-parent authority: ${authority.reason}`)
+  const draft = parseProjectCreationDraft(draftInput)
+  if (!draft.ok) throw new TypeError(`Invalid project creation draft: ${draft.reason}`)
+  if (
+    draft.value.parentPath !== authority.value.parentPath ||
+    draft.value.name !== authority.value.targetName ||
+    join(draft.value.parentPath, draft.value.name) !== authority.value.targetPath
+  ) {
+    throw new TypeError("The project draft does not match its parent authority")
+  }
+  if (!canonicalTimestamp(createdAt) || !canonicalTimestamp(expiresAt) || Date.parse(expiresAt) <= Date.parse(createdAt)) {
+    throw new TypeError("The project creation preview timeline is invalid")
+  }
+  if (!validNonce(nonce)) throw new TypeError("The project creation preview nonce is invalid")
+
+  const files = draft.value.files.map((file) =>
+    Object.freeze({
+      path: file.path,
+      bytes: Buffer.byteLength(file.content, "utf8"),
+      contentDigest: contentDigest(file.content),
+    }),
+  )
+  const material = {
+    schemaVersion: 1,
+    boundary: projectCreationBoundaryLabel,
+    parentPath: authority.value.parentPath,
+    parentIdentity: authority.value.parentIdentity,
+    targetPath: authority.value.targetPath,
+    targetName: authority.value.targetName,
+    authorityDigest: authority.value.observationDigest,
+    objectiveDigest: contentDigest(draft.value.objective),
+    stack: draft.value.stack,
+    initializeGitRequested: draft.value.initializeGit,
+    files,
+    totalBytes: files.reduce((total, file) => total + file.bytes, 0),
+    limits: projectCreationLimits,
+    createdAt,
+    expiresAt,
+    nonce,
+  } as const
+  return deepFreeze({ ...material, proposalDigest: computeProjectCreationProposalDigest(material) })
+}
+
+export function parseProjectCreationPreview(
+  input: unknown,
+): ProjectCreationControlResult<ProjectCreationPreview> {
+  const record = readDataRecord(input)
+  if (!record.ok) return failure(record.reason === "not_object" ? "preview_not_object" : record.reason)
+  if (!exactKeys(record.value, previewKeys)) return failure("unsupported_preview_field")
+  if (record.value.schemaVersion !== 1) return failure("schema_unsupported")
+  if (record.value.boundary !== projectCreationBoundaryLabel) return failure("boundary_invalid")
+  const parentPath = parseCanonicalAbsolutePath(record.value.parentPath)
+  if (!parentPath.ok) return parentPath
+  const identity = readDataRecord(record.value.parentIdentity)
+  if (
+    !identity.ok ||
+    !exactKeys(identity.value, ["device", "inode"]) ||
+    !decimalIdentity(identity.value.device) ||
+    !decimalIdentity(identity.value.inode)
+  ) {
+    return failure(identity.ok || identity.reason === "not_object" ? "parent_identity_invalid" : identity.reason)
+  }
+  const targetName = parseProjectCreationTargetName(record.value.targetName)
+  if (!targetName.ok) return targetName
+  if (record.value.targetPath !== join(parentPath.value, targetName.value)) return failure("preview_binding_mismatch")
+  if (!validDigest(record.value.authorityDigest)) return failure("authority_digest_invalid")
+  if (!validDigest(record.value.objectiveDigest)) return failure("objective_digest_invalid")
+  if (
+    typeof record.value.stack !== "string" ||
+    Buffer.byteLength(record.value.stack, "utf8") > 64 ||
+    !/^[a-z0-9][a-z0-9._+-]*$/.test(record.value.stack)
+  ) {
+    return failure("stack_invalid")
+  }
+  if (typeof record.value.initializeGitRequested !== "boolean") return failure("initialize_git_invalid")
+  const filesInput = readDataArray(record.value.files)
+  if (!filesInput.ok) return failure(filesInput.reason === "accessor_not_allowed" ? filesInput.reason : "files_not_array")
+  if (filesInput.value.length > projectCreationLimits.maxFiles) return failure("too_many_files")
+  const seen = new Set<string>()
+  const files: Array<ProjectCreationPreviewFile> = []
+  for (const fileInput of filesInput.value) {
+    const file = readDataRecord(fileInput)
+    if (!file.ok) return failure(file.reason === "not_object" ? "file_not_object" : file.reason)
+    if (!exactKeys(file.value, previewFileKeys)) return failure("unsupported_preview_file_field")
+    const path = parseRelativeFilePath(file.value.path)
+    if (!path.ok) return path
+    if (seen.has(path.value)) return failure("duplicate_file_path")
+    if (!Number.isSafeInteger(file.value.bytes) || (file.value.bytes as number) < 0 || (file.value.bytes as number) > projectCreationLimits.maxFileBytes) {
+      return failure("file_bytes_invalid")
+    }
+    if (!validDigest(file.value.contentDigest)) return failure("file_digest_invalid")
+    seen.add(path.value)
+    files.push(Object.freeze({ path: path.value, bytes: file.value.bytes as number, contentDigest: file.value.contentDigest }))
+  }
+  const totalBytes = files.reduce((total, file) => total + file.bytes, 0)
+  if (
+    !Number.isSafeInteger(record.value.totalBytes) ||
+    record.value.totalBytes !== totalBytes ||
+    totalBytes > projectCreationLimits.maxTotalBytes
+  ) {
+    return failure("preview_binding_mismatch")
+  }
+  if (!fixedLimits(record.value.limits)) return failure("limits_changed")
+  if (
+    !canonicalTimestamp(record.value.createdAt) ||
+    !canonicalTimestamp(record.value.expiresAt) ||
+    Date.parse(record.value.expiresAt) <= Date.parse(record.value.createdAt)
+  ) {
+    return failure("timeline_invalid")
+  }
+  if (!validNonce(record.value.nonce)) return failure("nonce_invalid")
+  if (!validDigest(record.value.proposalDigest)) return failure("proposal_digest_invalid")
+  const material = {
+    schemaVersion: 1,
+    boundary: projectCreationBoundaryLabel,
+    parentPath: parentPath.value,
+    parentIdentity: Object.freeze({ device: identity.value.device, inode: identity.value.inode }),
+    targetPath: record.value.targetPath as string,
+    targetName: targetName.value,
+    authorityDigest: record.value.authorityDigest,
+    objectiveDigest: record.value.objectiveDigest,
+    stack: record.value.stack,
+    initializeGitRequested: record.value.initializeGitRequested,
+    files: Object.freeze(files),
+    totalBytes,
+    limits: projectCreationLimits,
+    createdAt: record.value.createdAt,
+    expiresAt: record.value.expiresAt,
+    nonce: record.value.nonce,
+  } as const
+  if (record.value.proposalDigest !== computeProjectCreationProposalDigest(material)) {
+    return failure("preview_binding_mismatch")
+  }
+  return success(deepFreeze({ ...material, proposalDigest: record.value.proposalDigest }))
+}
+
+export function parseProjectCreationDecision(
+  input: unknown,
+): ProjectCreationControlResult<ProjectCreationDecision> {
+  const record = readDataRecord(input)
+  if (!record.ok) return failure(record.reason === "not_object" ? "decision_not_object" : record.reason)
+  if (!exactKeys(record.value, decisionKeys)) return failure("unsupported_decision_field")
+  if (!validDigest(record.value.proposalDigest)) return failure("proposal_digest_invalid")
+  if (!validNonce(record.value.nonce)) return failure("nonce_invalid")
+  if (record.value.decision !== "approved" && record.value.decision !== "rejected") return failure("decision_invalid")
+  if (!canonicalTimestamp(record.value.decidedAt)) return failure("decided_at_invalid")
+  return success(
+    Object.freeze({
+      proposalDigest: record.value.proposalDigest,
+      nonce: record.value.nonce,
+      decision: record.value.decision,
+      decidedAt: record.value.decidedAt,
+    }),
+  )
+}
+
+export function computeProjectCreationProposalDigest(
+  input: Omit<ProjectCreationPreview, "proposalDigest">,
+): `sha256:${string}` {
+  return digest("astra.project-creation.preview.v1", input)
 }
 
 export function sealProjectParentAuthority(
@@ -316,6 +559,18 @@ function canonicalTimestamp(input: unknown): input is string {
 
 function decimalIdentity(input: unknown): input is string {
   return typeof input === "string" && /^(?:0|[1-9][0-9]*)$/.test(input) && input.length <= 32
+}
+
+function validDigest(input: unknown): input is `sha256:${string}` {
+  return typeof input === "string" && /^sha256:[0-9a-f]{64}$/.test(input)
+}
+
+function validNonce(input: unknown): input is string {
+  return typeof input === "string" && /^[0-9a-f]{32}$/.test(input)
+}
+
+function contentDigest(input: string): `sha256:${string}` {
+  return `sha256:${createHash("sha256").update(Buffer.from(input, "utf8")).digest("hex")}`
 }
 
 function fixedLimits(input: unknown): input is ProjectCreationLimits {

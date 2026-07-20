@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test"
 import { parseWorkspaceBaseline } from "../src/operation-contract"
 import {
+  makeProjectCreationPreview,
   makeProjectCreationWorkspaceBaseline,
+  parseProjectCreationDecision,
   parseProjectCreationDraft,
+  parseProjectCreationPreview,
+  projectCreationBoundaryLabel,
   projectCreationLimits,
   sealProjectParentAuthority,
   type ProjectCreationDraft,
@@ -245,6 +249,106 @@ describe("project-parent authority ledger envelope", () => {
 
     expect(() => makeProjectCreationWorkspaceBaseline(authority, validDraft())).toThrow("accessor_not_allowed")
     expect(accesses).toBe(0)
+  })
+})
+
+describe("project scaffold consent contract", () => {
+  test("binds the exact bounded scaffold and host boundary into a frozen preview", () => {
+    const preview = makeProjectCreationPreview(
+      validAuthority(),
+      validDraft(),
+      "2026-07-20T10:16:00.000Z",
+      "0123456789abcdef0123456789abcdef",
+      "2026-07-20T10:21:00.000Z",
+    )
+
+    expect(preview).toMatchObject({
+      schemaVersion: 1,
+      boundary: projectCreationBoundaryLabel,
+      parentPath,
+      parentIdentity: { device: "42", inode: "9001" },
+      targetPath: `${parentPath}/alpha`,
+      targetName: "alpha",
+      authorityDigest: validAuthority().observationDigest,
+      stack: "typescript",
+      initializeGitRequested: true,
+      totalBytes: 18,
+    })
+    expect(preview.files.map((file) => ({ path: file.path, bytes: file.bytes }))).toEqual([
+      { path: "README.md", bytes: 8 },
+      { path: "src/index.ts", bytes: 10 },
+    ])
+    expect(preview.files.every((file) => /^sha256:[0-9a-f]{64}$/.test(file.contentDigest))).toBe(true)
+    expect(preview.objectiveDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(preview.proposalDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+    expect(parseProjectCreationPreview(preview)).toEqual({ ok: true, value: preview })
+    expect(Object.isFrozen(preview)).toBe(true)
+    expect(Object.isFrozen(preview.files)).toBe(true)
+    expect(preview.files.every(Object.isFrozen)).toBe(true)
+  })
+
+  test("rejects a changed preview and changes consent when any draft resource changes", () => {
+    const original = makeProjectCreationPreview(
+      validAuthority(),
+      validDraft(),
+      "2026-07-20T10:16:00.000Z",
+      "0123456789abcdef0123456789abcdef",
+      "2026-07-20T10:21:00.000Z",
+    )
+    expect(parseProjectCreationPreview({ ...original, targetPath: `${parentPath}/other` })).toEqual({
+      ok: false,
+      reason: "preview_binding_mismatch",
+    })
+    expect(parseProjectCreationPreview({ ...original, totalBytes: original.totalBytes + 1 })).toEqual({
+      ok: false,
+      reason: "preview_binding_mismatch",
+    })
+
+    const changed = makeProjectCreationPreview(
+      validAuthority(),
+      {
+        ...validDraft(),
+        files: [
+          { path: "README.md", content: "# Changed\n" },
+          { path: "src/index.ts", content: "export {}\n" },
+        ],
+      },
+      original.createdAt,
+      original.nonce,
+      original.expiresAt,
+    )
+    expect(changed.proposalDigest).not.toBe(original.proposalDigest)
+    expect(changed.files[0]?.contentDigest).not.toBe(original.files[0]?.contentDigest)
+  })
+
+  test("accepts only an exact explicit approval or rejection bound to the preview", () => {
+    const preview = makeProjectCreationPreview(
+      validAuthority(),
+      validDraft(),
+      "2026-07-20T10:16:00.000Z",
+      "0123456789abcdef0123456789abcdef",
+      "2026-07-20T10:21:00.000Z",
+    )
+    const approved = {
+      proposalDigest: preview.proposalDigest,
+      nonce: preview.nonce,
+      decision: "approved",
+      decidedAt: "2026-07-20T10:17:00.000Z",
+    } as const
+
+    expect(parseProjectCreationDecision(approved)).toEqual({ ok: true, value: approved })
+    expect(parseProjectCreationDecision({ ...approved, decision: "automatic" })).toEqual({
+      ok: false,
+      reason: "decision_invalid",
+    })
+    expect(parseProjectCreationDecision({ ...approved, proposalDigest: `sha256:${"0".repeat(64)}` })).toEqual({
+      ok: true,
+      value: { ...approved, proposalDigest: `sha256:${"0".repeat(64)}` },
+    })
+    expect(parseProjectCreationDecision({ ...approved, remote: true })).toEqual({
+      ok: false,
+      reason: "unsupported_decision_field",
+    })
   })
 })
 
