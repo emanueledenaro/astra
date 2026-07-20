@@ -24,15 +24,15 @@ Current implementation status:
 | `astra .`           | Working local macOS product path                                    |
 | `astra /path`       | Working; intermediate path aliases are canonicalized before opening |
 | `astra open <path>` | Working compatibility alias                                         |
-| `astra`             | Working inert No Workspace mode in a terminal; help in non-TTY use  |
-| `astra system`      | Working inert System Mode; no workspace or effect authority         |
+| `astra`             | Working Launchpad in a terminal; help in non-TTY use                 |
+| `astra system`      | Working global Control Center without workspace authority            |
 
 ## Current local demo
 
 The current macOS checkpoint includes:
 
-- a real no-argument `astra` home with `NO WORKSPACE • EFFECTS DENIED` and no directory scan;
-- a dedicated `astra system` surface with `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED`, no workspace admission, and local keyboard exit;
+- a real no-argument Launchpad for creating a governed local project, opening a workspace, or entering System;
+- a dedicated `astra system` Control Center for provider, extension, session, receipt, backend, and review-mode facts without workspace authority;
 - a real terminal Workspace Gate with the Lynx identity;
 - bounded static preflight without workspace code, provider, plugin, MCP, LSP, formatter, shell, or normal OpenCode bootstrap;
 - explicit `read-only`, `inspect Git`, `activate once`, and `exit` decisions with no persistent trust;
@@ -45,7 +45,8 @@ The current macOS checkpoint includes:
 - clear `READ ONLY • EFFECTS DENIED` and `ACTIVE ONCE • GOVERNED EFFECTS ONLY` states;
 - an inherited prompt that stays disabled while `ctrl+p` opens the governed action surface;
 - an Astra cockpit with the conversation on the left and live workspace, operation, provider, Git, permission, and current parent-agent state on the right;
-- parent-governed Anthropic chat with per-turn consent and parent-only in-memory history;
+- selectable certified Anthropic, OpenAI API-key, and OpenAI Codex OAuth chat routes with per-turn consent and parent-owned durable history;
+- exact provider/model recovery and verified transcript reload after restarting Astra on the same workspace;
 - an explicit `/connect` handoff that previews the credential-store write, captures and exactly reads back the secret in the trusted parent, and returns to the same workspace session;
 - governed Git stage, unstage, and exact local commit in one activated session;
 - governed host shell with an exact script/cwd/environment preview, local approval or rejection, bounded output, durable receipts, and explicit unrestricted-host warnings;
@@ -72,7 +73,7 @@ bun run --cwd packages/astra-cli verify:demo
 ```
 
 > [!IMPORTANT]
-> Astra is not yet a work-ready release candidate. `Activate once` enables only parent-governed actions with an exact preview and explicit consent. The governed shell executes an approved exact script through `/bin/zsh -f -c` and truthfully declares unrestricted host filesystem and network authority; its output is observed, never independently verified. The inherited OpenCode prompt, general file editing, LSP, formatters, arbitrary plugin code, MCP tool invocation, and destructive or remote Git actions remain blocked. Current chat is Anthropic-only; its API credential can be configured with Astra `/connect`, but live provider chat has not yet been verified on this Mac. `/connect` uses exact post-write readback but is still a setup handoff without a durable Operation receipt, and the UI says so before consent. Every connected host effect is labelled `HOST EXECUTION — NO SANDBOX`. General sandboxing is preserved as future work and deferred to hardening. The inherited OpenCode documentation below describes the compatibility baseline, not a released Astra product.
+> Astra is not yet a work-ready release candidate. `Activate once` enables only parent-governed actions with an exact preview and explicit consent. The governed shell executes an approved exact script through `/bin/zsh -f -c` and truthfully declares unrestricted host filesystem and network authority; its output is observed, never independently verified. The inherited OpenCode prompt, general file editing, LSP, formatters, arbitrary plugin code, MCP tool invocation, and destructive or remote Git actions remain blocked. Live two-turn OpenAI chat through the inherited Codex OAuth credential has been observed on this Mac, including restart recovery and rejection without network dispatch. `/connect` currently configures Anthropic and uses exact post-write readback, but remains a setup handoff without a durable Operation receipt. Every connected host effect is labelled `HOST EXECUTION — NO SANDBOX`. General sandboxing is preserved as future work and deferred to hardening. The inherited OpenCode documentation below describes the compatibility baseline, not a released Astra product.
 
 See [UPSTREAM.md](UPSTREAM.md) for the exact source baseline, license provenance, and remote policy.
 See [docs/astra/ROADMAP.md](docs/astra/ROADMAP.md) for the current product sequence.

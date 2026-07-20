@@ -1,6 +1,6 @@
 # Astra Product Roadmap
 
-Updated: 2026-07-19
+Updated: 2026-07-20
 
 ## Product rule
 
@@ -32,7 +32,7 @@ Astra may execute directly on the host before the general sandbox is ready, but 
 
 ## Current checkpoint
 
-Updated 2026-07-19. The Workspace Gate, safe OpenCode TUI, read-only Git observer,
+Updated 2026-07-20. The Workspace Gate, safe OpenCode TUI, read-only Git observer,
 durable ledger, receipt spool, recovery, and independent verification are consolidated
 on the `astra` mainline, now joined by governed multi-turn chat (per-turn consent),
 git stage/unstage/commit in the TUI, and read-only operation/evidence/recovery views.
@@ -44,8 +44,9 @@ the left and live operational control on the right. The familiar `/connect` comm
 now previews an Anthropic credential write, hands hidden input to the trusted parent,
 requires exact post-write readback, and reopens the same session; cancellation without
 a write was observed in a real PTY. This setup handoff does not yet produce a durable
-Operation receipt and says so before consent. Live chat remains unverified because no
-Anthropic credential is configured. Next from section 1: full provider-registry
-support, a durable credential-setup receipt, live-chat verification, general verified
-file effects, MCP tool invocation with capability grants, then live delegated-agent
-telemetry, richer extension views, and hardening.
+Operation receipt and says so before consent. Certified Anthropic, OpenAI API-key, and
+OpenAI Codex OAuth routes are selectable. Live two-turn Codex chat, durable transcript
+reload, exact provider recovery, and rejection without dispatch are observed on macOS.
+Next from section 1: final independent review, general verified file effects, a durable
+credential-setup receipt, MCP tool invocation with capability grants, live
+delegated-agent telemetry, richer extension views, and hardening.

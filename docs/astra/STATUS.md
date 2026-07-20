@@ -1,8 +1,27 @@
 # Astra Delivery Status
 
-Updated: 2026-07-19 (local Astra cockpit checkpoint; not pushed)
+Updated: 2026-07-20 (Astra cockpit integration checkpoint; pushed to `astra-cockpit`)
+
+## 2026-07-20 delta
+
+- Real OpenAI chat through the inherited Codex OAuth credential completed two
+  consented turns. The second answer used the first turn's durable context.
+- Restarting Astra on the same workspace restores the exact transcript and the
+  last provider, credential profile, and model. Workspace path rebinding does not
+  resume the old session.
+- A real rejected provider turn recorded only admission, policy, and rejection;
+  it produced no dispatch, executor claim, effect event, or conversation turn.
+- The 140x34 cockpit shows chat on the left and the live Control Rail on the right.
+  The 80x24 layout keeps chat usable and exposes control through its compact path.
+- The four cross-package `ReadableStream` type errors are closed by one shared
+  bounded reader. The complete pre-push typecheck is now green: 37/37 tasks.
+- All current Astra package suites, Astra-focused TUI suites, and `verify:demo`
+  pass. Exact evidence is recorded below.
 
 ## 2026-07-19 delta
+
+This section records the previous checkpoint; the 2026-07-20 delta above supersedes
+its chat, provider, persistence, and verification limits.
 
 - The recovered development line plus audit fixes merged into the protected `astra`
   mainline (PR #4); the day's product slices merged next (PR #5).
@@ -13,7 +32,7 @@ Updated: 2026-07-19 (local Astra cockpit checkpoint; not pushed)
   commit prepare time instead of failing mid-effect.
 - New product surfaces, each parent-side behind per-operation approval: governed local
   git commit in the TUI, read-only operation/evidence/recovery views, and consented
-  multi-turn chat (history in parent memory only, per-turn approval and grant).
+  multi-turn chat (then held in parent memory only, with per-turn approval and grant).
 - Lynx v2 illustrated identity (flat-vector SVG states + logo, checksummed manifest)
   replaces the pixel-art direction.
 - macOS operation storage now uses bounded SQLite busy handling and avoids unsafe
@@ -46,7 +65,7 @@ Produce a local Astra release candidate that is functional, independently verifi
 
 ## Bottom line
 
-Astra launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. `astra system` opens a separate inert System Mode without admitting or scanning a workspace and keeps `SYSTEM MODE • NO WORKSPACE • EFFECTS DENIED` visible. Read-only and Activate once are bound to a private session authority. The inherited OpenCode prompt and ungoverned effects remain blocked, while the `ctrl+p` command surface exposes parent-governed chat, host shell, controlled write, Git stage/unstage/local commit, literal workspace search, extension inventory, skill activation, MCP activation, and operation evidence.
+Astra launches a real Workspace Gate and TUI on macOS through `astra .` or `astra /path`. `astra` opens the project Launchpad, while `astra system` opens the global Control Center without admitting a workspace or granting workspace effects. Read-only and Activate once are bound to a private session authority. The inherited OpenCode prompt and ungoverned effects remain blocked, while the `ctrl+p` command surface exposes parent-governed chat, host shell, controlled write, Git stage/unstage/local commit, literal workspace search, extension inventory, skill activation, MCP activation, and operation evidence.
 
 This is a verified local product checkpoint, not a work-ready release candidate. Governed effects cross the Operation Kernel through explicit previews and consent, durable authority, receipts, recovery, and scoped verification where an independent criterion exists. Every active workspace surface keeps `HOST EXECUTION — NO SANDBOX` visible and does not claim host network isolation or OS-enforced filesystem scope.
 
@@ -55,11 +74,11 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 ## Repository
 
 - Path: `/Users/emanueledenaro/Documents/progetti/Astra`
-- Branch: `astra-cockpit` (local only; based on the local macOS readiness checkpoint)
+- Branch: `astra-cockpit` (tracks `origin/astra-cockpit`)
 - OpenCode baseline: `453b61e27b2f6c2752a60dd7d8412bdcf4e0aa3d`
 - History: full clone; MIT license, attribution, and provider source registry preserved
 - Remotes: `origin` is the Astra fork; `upstream` fetches OpenCode and has push disabled
-- External state: no push, publication, release, signing, notarization, or deploy from this worktree
+- External state: development commits were pushed to `origin/astra-cockpit`; no publication, release, signing, notarization, or deploy
 
 ## Working product surface
 
@@ -68,8 +87,8 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 | `astra .`           | Opens the current directory through the real Workspace Gate                 |
 | `astra /path`       | Opens an explicit path; safe intermediate aliases become canonical          |
 | `astra open <path>` | Compatibility alias                                                         |
-| `astra`             | Opens inert No Workspace mode in a TTY; prints help without a TTY           |
-| `astra system`      | Opens inert System Mode; no workspace authority, control socket, or effects |
+| `astra`             | Opens the Launchpad in a TTY; prints help without a TTY                      |
+| `astra system`      | Opens the global Control Center without workspace authority                 |
 | `R`                 | Opens TUI with `READ ONLY • EFFECTS DENIED`                                 |
 | `G`                 | Runs bounded sandboxed Git inspection with visible progress                 |
 | `A`                 | Activates one session after a current baseline; only governed actions exist |
@@ -120,7 +139,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ### TUI and Lynx
 
-- `astra system` dynamically loads a dedicated TUI only after a TTY check; it does not open a workspace or create Astra state and exits with `Q`, `Esc`, or `Ctrl-C`.
+- `astra system` dynamically loads a dedicated global Control Center only after a TTY check; it does not open a workspace and exits with `Q`, `Esc`, or `Ctrl-C`.
 - The public launcher disables cwd-controlled Bun config, preload, `.env`, and auto-install before Astra starts. System Mode stays in that inert process and does not bootstrap workspace services.
 - The real Workspace Gate and safe OpenCode-derived TUI render on macOS.
 - The Astra cockpit places conversation on the left and a live Control Rail on the
@@ -134,23 +153,17 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 - Toolchain: Bun `1.3.14`; frozen install succeeds.
 - The linked `astra` command was run with no arguments from `/tmp`; the real PTY displayed `NO WORKSPACE • EFFECTS DENIED`, stated that no directory was scanned, and exited locally with `Q`.
-- Domain: 122 tests, 2,450 expectations; typecheck passes.
-- Ledger: 54 tests, 506 expectations; typecheck passes.
-- Runtime: 209 tests, 919 expectations; typecheck passes.
-- Executor: 8 tests, 24 expectations; typecheck passes.
+- Domain: 182 tests, 2,818 expectations; typecheck passes.
+- Ledger: 54 tests, 468 expectations; typecheck passes.
+- Runtime: 316 tests, 1,267 expectations; typecheck passes.
+- Executor: 19 tests, 56 expectations; typecheck passes.
 - Git: 96 tests, 361 expectations; typecheck passes.
-- CLI: 189 tests, 979 expectations; typecheck passes.
-- TUI: 308 pass, 1 platform skip, 1,021 expectations; typecheck passes. Existing KV fixture warnings are noisy but non-failing.
-- The earlier connected-product gate remains green; the current cockpit and `/connect`
-  increment adds five passing TUI tests plus focused domain, CLI, and OpenCode tests.
-- OpenCode `/connect` adapter and TUI-exit focused tests: 14 pass, 32 expectations.
-- Inherited OpenCode full suite: 3,211 pass, 22 skip, 1 todo, 1 fail, and 1
-  between-test error. `test/server/httpapi-v2-pty.test.ts` timed out after 5,000 ms;
-  the expected `{ status: "exited", exitCode: 4 }` still reported `status: "running"`.
-- OpenCode typecheck reaches four pre-existing cross-package `TS2504` errors in
-  `astra-runtime` because its `ReadableStream` type lacks `Symbol.asyncIterator` in
-  controlled write, extension inventory, workspace search, and host command. The
-  `/connect`-specific type error found during review was corrected.
+- CLI: 223 tests, 1,114 expectations; typecheck passes.
+- Astra-focused TUI: 142 tests, 700 expectations; typecheck passes.
+- Current focused total: 1,032 tests and 6,784 expectations, with zero failures.
+- Complete monorepo pre-push typecheck: 37/37 tasks successful across 43 packages.
+- The inherited OpenCode full test suite was not rerun in this checkpoint. Its older
+  recorded PTY timing failure remains historical evidence, not a current green claim.
 - The preserved sandbox prototype has 12 passing tests and 59 expectations, but is excluded from the working-product gate until its open timeout and cleanup findings are resolved during hardening.
 - `git diff --check` passes; changed files pass Prettier after formatting.
 - `verify:demo` reports `DEMO MATRIX PASS`: hostile read-only open produced zero effects, denial was durable with no dispatch, one approved create-only host effect reached independent exact verification, the network canary received zero requests during that fixture, and no trust was persisted.
@@ -158,13 +171,22 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 - Real PTY fixture: `G -> A` opened `ACTIVE ONCE • GOVERNED EFFECTS ONLY`; Git stage reached `VERIFIED • SELECTED INDEX + PRESERVATION`; two rejected commit previews produced no Git effect; the approved commit reached `VERIFIED • COMMIT BYTES + REPOSITORY STATE` with exact subject `test: verify exact TUI message` and author `Astra Smoke <astra-smoke@example.invalid>`.
 - The Operations view loaded the current commit and stage records from the durable ledger and exposed their event sequence, receipt, verifier evidence, and exact criterion without running an action.
 - Real governed-shell PTY fixture: rejecting `touch denied-marker` left the workspace unchanged and produced a durable `DENIED` operation with no dispatch. Approving `printf 'astra-shell-smoke\n'` crossed the parent Operation Kernel once, displayed stdout and exit `0`, and produced a durable `COMPLETED` operation with no verification fact. The TUI kept `HOST EXECUTION — NO SANDBOX`, `HOST FILESYSTEM UNRESTRICTED`, `HOST NETWORK UNRESTRICTED`, and `NOT VERIFIED` visible.
-- Governed chat accepted the exact local prompt but stopped at `BLOCKED • NO EFFECT CLAIMED` with `credential unavailable` before preview, credential handoff, or network dispatch. Multi-turn live chat therefore remains unobserved on this Mac.
+- Real governed OpenAI/Codex chat completed two turns with exact outputs
+  `ASTRA-ONE`. Both ledger records ended `COMPLETED — RESPONSE OBSERVED — NOT
+  VERIFIED`; the second preview bound one prior turn and returned the same token from
+  conversation context.
+- Restarting the 80x24 product restored both turns and selected
+  `OpenAI/gpt-5.4`. A separate rejected prompt produced operation
+  `2d743f67-ea5d-457a-ae40-f7c76f65f5f0` with no dispatch or effect event.
+- A real 140x34 PTY rendered conversation on the left and the validated live Control
+  Rail on the right. Before its first snapshot the rail showed state unavailable,
+  then transitioned to `IDLE` instead of inventing state.
 - Real `/connect` PTY smoke showed the write/network/secret preview, transferred control
   to the trusted parent, used hidden input, and returned to the same active cockpit
   after cancellation. No credential was added or changed in that smoke.
-- Local technical review found and closed an ambiguous provider-storage failure path:
-  Astra now reports uncertain credential state without a false success and returns to
-  the cockpit. No independent review has yet been run for this local increment.
+- Local technical review found and closed ambiguous provider-storage and provider
+  response paths. No independent final review has yet been run for the complete
+  2026-07-20 increment.
 - Real large-repository diagnosis proved that the earlier false `STALE` result was a timeout. With realistic bounded limits, two captures produced the same digest.
 - Independent security review confirmed closure of the three safe-opening P1 findings: inherited project/Git startup, child authority replacement, and nested-symlink read escape.
 - The latest independent review also confirmed closure of workspace Bun startup execution and generic safe-start Git process bypasses; no P0/P1 remains in the reviewed host checkpoint.
@@ -176,7 +198,7 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 | General effect bridge       | Partial: chat, host shell, controlled write, git stage/unstage/commit, and search are governed; general verified file changes are next                                                                                                                             |
 | macOS sandbox               | Deferred to hardening; prototype preserved and backend boundary remains injectable                                                                                                                                                                                 |
 | Git Control Plane mutations | Stage/unstage/commit shipped (commit is macOS-only, packed refs blocked at prepare); branch, fetch, merge/rebase, recovery actions missing                                                                                                                         |
-| Providers and credentials   | Governed Anthropic chat and explicit parent-owned `/connect` are wired; `/connect` has exact readback but no durable Operation receipt yet; successful storage, live chat, provider selection, streaming, and non-Anthropic providers remain unverified or missing |
+| Providers and credentials   | Certified Anthropic, OpenAI API-key, and OpenAI Codex OAuth routes are selectable; live Codex chat and restart recovery are observed; `/connect` has exact readback but no durable Operation receipt; broader OpenCode provider parity remains |
 | Plugins, skills, and MCP    | Inventory, quarantine, skill activation, and observed remote MCP activation shipped; MCP tool invocation, plugin containment, and capability grants for extensions missing                                                                                         |
 | Complete TUI/CLI            | Operation/evidence/recovery views shipped (dispatched operations only — ledger list API pending); agent queue and richer provider/extension views missing                                                                                                          |
 | Upstream compatibility      | Intake workflow, drift gates, parity, and rehearsal missing                                                                                                                                                                                                        |
@@ -192,16 +214,14 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Blockers
 
-- Live chat verification requires completing Astra `/connect` with an Anthropic API
-  credential. No credential was read, added, or modified during this checkpoint.
 - Real Linux and Windows verification will require those environments; interfaces and reproducible tests must be prepared locally first.
 - Public release actions remain intentionally blocked pending explicit product-owner authorization.
 
 ## Next executable work
 
-1. Generalize chat from the current Anthropic-only path to the preserved OpenCode provider registry and authentication sources without exposing credentials to the child TUI.
-2. Move credential-store setup behind a durable Operation receipt while preserving the trusted-parent secret boundary.
-3. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
+1. Run one independent final review of the integrated cockpit and close any P0/P1 finding.
+2. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
+3. Move credential-store setup behind a durable Operation receipt while preserving the trusted-parent secret boundary.
 4. Add MCP tool invocation and extension capability grants while keeping plugin code quarantined by default.
 5. Complete branch/fetch/merge recovery flows, keeping push and destructive Git actions behind separate authorization.
 6. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.
