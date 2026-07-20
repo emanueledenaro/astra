@@ -129,9 +129,23 @@ describe("parent provider control", () => {
   test("dispatches the exact certified Codex OAuth adapter without weakening preview authority", async () => {
     const fixture = await makeFixture("activate-once")
     const privatePrompt = "Use the certified Codex OAuth route"
+    const credentialBroker = createParentProviderCredentialBroker({
+      auth: {
+        get: async (providerID) => {
+          expect(providerID).toBe("openai")
+          return {
+            type: "oauth",
+            access: "oauth-parent-only",
+            refresh: "refresh-parent-only",
+            expires: Date.now() + 60_000,
+            accountId: "account-parent-only",
+          }
+        },
+      },
+    })
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
-      credentialBroker: openAIBroker(),
+      credentialBroker,
       conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, resolveWire, parse, dependencies) => {
@@ -170,6 +184,39 @@ describe("parent provider control", () => {
     expect(await control.decide(prepared.preview.proposalID, "approve", () => {})).toMatchObject({
       status: "response_observed_not_verified",
       response: { assistantText: "Codex route observed" },
+    })
+  })
+
+  test("prepares the exact certified OpenAI API-key adapter with the real credential broker", async () => {
+    const fixture = await makeFixture("activate-once")
+    const credentialBroker = createParentProviderCredentialBroker({
+      auth: {
+        get: async (providerID) => {
+          expect(providerID).toBe("openai")
+          return { type: "api", key: "sk-openai-parent-only" }
+        },
+      },
+    })
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker,
+      conversationHistory: historyPort().port,
+      randomUUID: uuidSequence(),
+      execute: async () => {
+        throw new Error("Prepare must not dispatch provider transport")
+      },
+    })
+
+    const prepared = await control.prepare("openai", "openai-api-key", "gpt-5.2-codex", "Use the API key route")
+
+    if (prepared.status !== "prepared") throw new Error(prepared.reason)
+    expect(prepared.preview).toMatchObject({
+      providerID: "openai",
+      modelID: "gpt-5.2-codex",
+      adapter: { adapterID: "openai.responses.api-key.v1", assurance: "CERTIFIED" },
+      destination: { origin: "https://api.openai.com", path: "/v1/responses" },
+      credential: { profile: "openai-api-key", headerName: "authorization" },
+      headerNames: ["accept", "authorization", "content-type"],
     })
   })
 
@@ -844,46 +891,6 @@ function catalog() {
           },
         },
       ],
-    },
-  }
-}
-
-function openAIBroker(): ParentProviderCredentialBroker {
-  const grant = {
-    providerID: "openai" as const,
-    credentialProfile: "openai-codex-oauth" as const,
-    credentialHandle: `cred_${"3".repeat(64)}`,
-    accountFingerprint: `sha256:${"4".repeat(64)}`,
-    headerName: "authorization" as const,
-    additionalHeaderNames: ["chatgpt-account-id"],
-    expiresAt: Date.now() + 60_000,
-    sessionID: "10000000-0000-4000-8000-000000000001",
-  }
-  return {
-    async issueForSession(_sessionID, selection) {
-      if (selection?.providerID !== "openai" || selection.credentialProfile !== "openai-codex-oauth") {
-        return {
-          ok: false,
-          error: { code: "credential_unavailable", message: "OpenAI credential is unavailable." },
-        }
-      }
-      return { ok: true, grant }
-    },
-    revoke() {
-      return true
-    },
-    takeForParentTransport() {
-      return {
-        ok: true,
-        credential: {
-          providerID: "openai",
-          credentialProfile: "openai-codex-oauth",
-          headerName: "authorization",
-          headerValue: "Bearer oauth-parent-only",
-          additionalHeaders: [["chatgpt-account-id", "account-parent-only"]] as const,
-          accountFingerprint: grant.accountFingerprint,
-        },
-      }
     },
   }
 }

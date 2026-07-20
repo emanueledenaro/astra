@@ -38,6 +38,7 @@ type CredentialRecord = Readonly<{
   credentialProfile: CertifiedProviderCredentialProfile
   headerName: "x-api-key" | "authorization"
   headerValue: string
+  additionalHeaderNames: ReadonlyArray<string>
   additionalHeaders: ReadonlyArray<readonly [name: string, value: string]>
   accountFingerprint: string
   sessionID: string
@@ -204,6 +205,7 @@ export function createParentProviderCredentialBroker(
           credentialHandle,
           accountFingerprint,
           headerName: credential.headerName,
+          additionalHeaderNames: credential.additionalHeaders.map(([name]) => name),
           expiresAt,
           sessionID,
         }),

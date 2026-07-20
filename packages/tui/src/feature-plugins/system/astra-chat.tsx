@@ -32,6 +32,13 @@ type ChatContext = Readonly<{
   selection: ProviderTurnSelection
 }>
 
+export type ProviderSelectionChoice = Readonly<{
+  title: string
+  description: string
+  value: string
+  selection: ProviderTurnSelection
+}>
+
 type ChatState =
   | Readonly<{ status: "loading_catalog" }>
   | (Readonly<{ status: "ready" }> & ChatContext)
@@ -159,29 +166,20 @@ export function AstraChatView(props: {
   const selectProvider = () => {
     const current = state()
     if (current.status !== "ready") return
-    const providers = current.catalog.providers.filter(
-      (provider) => provider.assurance === "CERTIFIED" && provider.dispatchable,
-    )
+    const choices = providerSelectionChoices(current.catalog)
     props.api.ui.dialog.replace(() => (
       <props.api.ui.DialogSelect
-        title="Select certified provider"
-        current={current.selection.providerID}
-        options={providers.flatMap((provider) => {
-          const selection = selectionForProvider(provider)
-          return selection
-            ? [
-                {
-                  title: provider.providerName,
-                  description: `${provider.assurance} · ${selection.credentialProfile}`,
-                  value: provider.providerID,
-                  onSelect: () => {
-                    setState({ ...current, selection })
-                    props.api.ui.dialog.clear()
-                  },
-                },
-              ]
-            : []
-        })}
+        title="Select certified provider credential"
+        current={providerSelectionValue(current.selection)}
+        options={choices.map((choice) => ({
+          title: choice.title,
+          description: choice.description,
+          value: choice.value,
+          onSelect: () => {
+            setState({ ...current, selection: choice.selection })
+            props.api.ui.dialog.clear()
+          },
+        }))}
       />
     ))
   }
@@ -758,38 +756,69 @@ function unverifiedProviderLabel(state: ChatState) {
 }
 
 function initialSelection(catalog: ProviderControlCatalog): ProviderTurnSelection | undefined {
-  for (const provider of catalog.providers) {
-    const selection = selectionForProvider(provider)
-    if (selection) return selection
-  }
-  return undefined
+  return providerSelectionChoices(catalog)[0]?.selection
 }
 
-function selectionForProvider(
+function selectionsForProvider(
   provider: ProviderControlCatalog["providers"][number],
-): ProviderTurnSelection | undefined {
-  if (provider.assurance !== "CERTIFIED" || !provider.dispatchable || !provider.models[0]) return undefined
+): ReadonlyArray<ProviderTurnSelection> {
+  if (provider.assurance !== "CERTIFIED" || !provider.dispatchable || !provider.models[0]) return []
   if (provider.providerID === "anthropic" && provider.credentialProfiles.includes("anthropic-api-key")) {
-    return {
-      providerID: "anthropic",
-      credentialProfile: "anthropic-api-key",
-      modelID: provider.models[0].id,
-    }
+    return [
+      {
+        providerID: "anthropic",
+        credentialProfile: "anthropic-api-key",
+        modelID: provider.models[0].id,
+      },
+    ]
   }
   if (provider.providerID === "openai") {
-    const profile = provider.credentialProfiles.includes("openai-codex-oauth")
-      ? "openai-codex-oauth"
-      : provider.credentialProfiles.includes("openai-api-key")
-        ? "openai-api-key"
-        : undefined
-    if (profile)
-      return {
+    const selections: ProviderTurnSelection[] = []
+    if (provider.credentialProfiles.includes("openai-api-key")) {
+      selections.push({
         providerID: "openai",
-        credentialProfile: profile,
+        credentialProfile: "openai-api-key",
         modelID: provider.models[0].id,
-      }
+      })
+    }
+    if (provider.credentialProfiles.includes("openai-codex-oauth")) {
+      selections.push({
+        providerID: "openai",
+        credentialProfile: "openai-codex-oauth",
+        modelID: provider.models[0].id,
+      })
+    }
+    return selections
   }
-  return undefined
+  return []
+}
+
+/** Returns one explicit TUI choice for every certified credential route. */
+export function providerSelectionChoices(catalog: ProviderControlCatalog): ReadonlyArray<ProviderSelectionChoice> {
+  return catalog.providers.flatMap((provider) =>
+    selectionsForProvider(provider).map((selection) => ({
+      title: providerSelectionTitle(selection),
+      description: providerSelectionDescription(selection),
+      value: providerSelectionValue(selection),
+      selection,
+    })),
+  )
+}
+
+function providerSelectionTitle(selection: ProviderTurnSelection) {
+  if (selection.providerID === "anthropic") return "Anthropic · API key"
+  return selection.credentialProfile === "openai-api-key" ? "OpenAI · API key" : "OpenAI · Codex account"
+}
+
+function providerSelectionDescription(selection: ProviderTurnSelection) {
+  if (selection.providerID === "anthropic") return "CERTIFIED · OpenCode credential · Anthropic API billing"
+  return selection.credentialProfile === "openai-api-key"
+    ? "CERTIFIED · OpenCode credential · OpenAI API billing"
+    : "CERTIFIED · OpenCode credential · Codex OAuth subscription"
+}
+
+function providerSelectionValue(selection: ProviderTurnSelection) {
+  return `${selection.providerID}:${selection.credentialProfile}`
 }
 
 function transcriptTurns(transcript: ProviderConversationTranscript): ReadonlyArray<ChatTurn> {

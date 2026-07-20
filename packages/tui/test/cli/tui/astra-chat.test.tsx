@@ -2,18 +2,101 @@
 
 import type { ProviderTurnPreview } from "@astra/domain/provider-control"
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
-import type { TuiPluginApi, TuiRouteCurrent, TuiRouteDefinition } from "@opencode-ai/plugin/tui"
+import type {
+  TuiDialogSelectProps,
+  TuiPluginApi,
+  TuiRouteCurrent,
+  TuiRouteDefinition,
+} from "@opencode-ai/plugin/tui"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { testRender, useRenderer } from "@opentui/solid"
 import { expect, test } from "bun:test"
 import { createSignal, onMount, type JSX } from "solid-js"
 import type { AstraProviderClient } from "../../../src/astra/provider-client"
-import { registerAstraChat } from "../../../src/feature-plugins/system/astra-chat"
+import {
+  providerSelectionChoices,
+  registerAstraChat,
+} from "../../../src/feature-plugins/system/astra-chat"
 import { TuiConfigProvider } from "../../../src/config"
 import { OpencodeKeymapProvider } from "../../../src/keymap"
 import { TestTuiContexts } from "../../fixture/tui-environment"
 import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+
+test("offers explicit certified OpenAI API-key and Codex OAuth credential choices", () => {
+  const choices = providerSelectionChoices(catalogResult.catalog)
+
+  expect(choices.map((choice) => choice.title)).toEqual([
+    "Anthropic · API key",
+    "OpenAI · API key",
+    "OpenAI · Codex account",
+  ])
+  expect(choices.map((choice) => choice.selection)).toEqual([
+    {
+      providerID: "anthropic",
+      credentialProfile: "anthropic-api-key",
+      modelID,
+    },
+    {
+      providerID: "openai",
+      credentialProfile: "openai-api-key",
+      modelID: "gpt-5.2-codex",
+    },
+    {
+      providerID: "openai",
+      credentialProfile: "openai-codex-oauth",
+      modelID: "gpt-5.2-codex",
+    },
+  ])
+  expect(choices.map((choice) => choice.value)).toEqual([
+    "anthropic:anthropic-api-key",
+    "openai:openai-api-key",
+    "openai:openai-codex-oauth",
+  ])
+  expect(choices.every((choice) => choice.description.includes("CERTIFIED"))).toBeTrue()
+})
+
+test("applies the exact OpenAI credential profile selected through the provider dialog", async () => {
+  for (const credentialProfile of ["openai-api-key", "openai-codex-oauth"] as const) {
+    let selected = false
+    let preparedSelection: Parameters<AstraProviderClient["prepare"]>[0] | undefined
+    const client = {
+      catalog: () => Promise.resolve(catalogResult),
+      prepare(selection) {
+        preparedSelection = selection
+        return Promise.resolve({
+          schemaVersion: 1,
+          requestId,
+          status: "blocked",
+          reason: "credential_unavailable",
+        } as const)
+      },
+      decide: () => Promise.reject(new Error("No proposal must be decided")),
+      dispose() {},
+    } satisfies AstraProviderClient
+    const app = await renderSurface(client, {
+      selectDialogValue: `openai:${credentialProfile}`,
+      onDialogSelection: () => {
+        selected = true
+      },
+    })
+
+    try {
+      await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
+      app.dispatch("astra.chat.provider")
+      await waitUntil(() => selected)
+      app.dispatch("astra.chat.compose")
+      await waitUntil(() => preparedSelection !== undefined)
+      expect(preparedSelection).toEqual({
+        providerID: "openai",
+        credentialProfile,
+        modelID: "gpt-5.2-codex",
+      })
+    } finally {
+      app.render.renderer.destroy()
+    }
+  }
+})
 
 test("renders skill metadata only and rejects a prepared proposal before reset or close", async () => {
   const decisions: Array<Readonly<{ decision: string; finish: () => void }>> = []
@@ -225,7 +308,13 @@ function TestDialogPrompt(props: { onConfirm?: (value: string) => void }) {
   return null
 }
 
-async function renderSurface(client: AstraProviderClient) {
+async function renderSurface(
+  client: AstraProviderClient,
+  options: Readonly<{
+    selectDialogValue?: string
+    onDialogSelection?: () => void
+  }> = {},
+) {
   const commands = new Map<
     string,
     NonNullable<Parameters<TuiPluginApi["keymap"]["registerLayer"]>[0]["commands"]>[number]
@@ -246,6 +335,15 @@ async function renderSurface(client: AstraProviderClient) {
     }
     const base = createTuiPluginApi({ keymap })
     const [dialog, setDialog] = createSignal<JSX.Element>()
+    function TestDialogSelect<Value>(props: TuiDialogSelectProps<Value>) {
+      onMount(() => {
+        if (!options.selectDialogValue) return
+        const choice = props.options.find((candidate) => candidate.value === options.selectDialogValue)
+        choice?.onSelect?.()
+        if (choice) options.onDialogSelection?.()
+      })
+      return null
+    }
     const dialogApi = {
       ...base.ui.dialog,
       replace(render: () => JSX.Element) {
@@ -258,7 +356,12 @@ async function renderSurface(client: AstraProviderClient) {
     }
     const api = {
       ...base,
-      ui: { ...base.ui, dialog: dialogApi, DialogPrompt: TestDialogPrompt },
+      ui: {
+        ...base.ui,
+        dialog: dialogApi,
+        DialogPrompt: TestDialogPrompt,
+        ...(options.selectDialogValue ? { DialogSelect: TestDialogSelect } : {}),
+      },
       route: {
         register(routes) {
           route = routes.find((candidate) => candidate.name === "astra-chat") ?? route

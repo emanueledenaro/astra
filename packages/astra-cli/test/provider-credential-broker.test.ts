@@ -48,6 +48,7 @@ describe("parent provider credential broker", () => {
       providerID: "openai",
       credentialProfile: "openai-api-key",
       headerName: "authorization",
+      additionalHeaderNames: [],
     })
     expect(broker.takeForParentTransport(api.grant)).toMatchObject({
       ok: true,
@@ -71,6 +72,7 @@ describe("parent provider credential broker", () => {
       providerID: "openai",
       credentialProfile: "openai-codex-oauth",
       headerName: "authorization",
+      additionalHeaderNames: ["chatgpt-account-id"],
     })
     expect(JSON.stringify(oauth.grant)).not.toContain("acct-work")
     expect(broker.takeForParentTransport(oauth.grant)).toMatchObject({
