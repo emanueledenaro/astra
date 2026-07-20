@@ -26,6 +26,8 @@
     "./mcp-pinned-fetch": "./src/mcp-pinned-fetch.ts",
     "./mcp-activation-coordinator": "./src/mcp-activation-coordinator.ts",
     "./anthropic-one-turn": "./src/anthropic-one-turn.ts",
+    "./openai-responses-one-turn": "./src/openai-responses-one-turn.ts",
+    "./provider-adapter-registry": "./src/provider-adapter-registry.ts",
     "./provider-turn-coordinator": "./src/provider-turn-coordinator.ts",
     "./provider-turn-network-policy": "./src/provider-turn-network-policy.ts",
     "./provider-turn-operation-facts": "./src/provider-turn-operation-facts.ts",

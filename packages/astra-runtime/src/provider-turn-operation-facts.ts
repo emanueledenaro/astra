@@ -46,10 +46,15 @@ export type ProviderTurnPlan = Readonly<{
   providerID: string
   modelID: string
   variant: string | null
+  adapter: Readonly<{
+    adapterID: string
+    adapterDigest: string
+  }>
   origin: string
   transportPolicy: "https_only" | "test_only_loopback_http"
   networkPolicy: ProviderTurnNetworkPolicy
   credential: Readonly<{
+    profile: string
     handle: string
     accountFingerprint: string
     headerName: string
@@ -65,6 +70,7 @@ export type ProviderTurnPlan = Readonly<{
     digest: string
     bytes: number
     contextBindingDigest?: string | null
+    historyDigest: string
   }>
   executionBoundary: "network_egress_host_no_sandbox"
   createdAt: string
@@ -81,10 +87,13 @@ export type ProviderTurnPreview = Readonly<{
     providerID: string
     modelID: string
     variant: string | null
+    adapterID: string
+    adapterDigest: ContentDigest
     origin: string
     transportPolicy: ProviderTurnPlan["transportPolicy"]
   }>
   credential: Readonly<{
+    profile: string
     handle: string
     accountFingerprint: ContentDigest
     headerName: string
@@ -95,6 +104,7 @@ export type ProviderTurnPreview = Readonly<{
     digest: ContentDigest
     bytes: number
     contextBindingDigest: ContentDigest | null
+    historyDigest: ContentDigest
   }>
   executionBoundary: "network_egress_host_no_sandbox"
   boundaryLabel: typeof providerTurnExecutionBoundaryLabel
@@ -141,10 +151,15 @@ export function snapshotProviderTurnOperationFactsInput(
     providerID: requireString(source.plan.providerID),
     modelID: requireString(source.plan.modelID),
     variant: source.plan.variant === null ? null : requireString(source.plan.variant),
+    adapter: {
+      adapterID: requireString(source.plan.adapter.adapterID),
+      adapterDigest: requireString(source.plan.adapter.adapterDigest),
+    },
     origin: requireString(source.plan.origin),
     transportPolicy: source.plan.transportPolicy,
     networkPolicy: snapshotProviderTurnNetworkPolicy(source.plan.networkPolicy),
     credential: {
+      profile: requireString(source.plan.credential.profile),
       handle: requireString(source.plan.credential.handle),
       accountFingerprint: requireString(source.plan.credential.accountFingerprint),
       headerName: requireString(source.plan.credential.headerName),
@@ -164,6 +179,7 @@ export function snapshotProviderTurnOperationFactsInput(
         source.plan.logicalPayload.contextBindingDigest === null
           ? null
           : requireString(source.plan.logicalPayload.contextBindingDigest),
+      historyDigest: requireString(source.plan.logicalPayload.historyDigest),
     },
     executionBoundary: source.plan.executionBoundary,
     createdAt: requireString(source.plan.createdAt),
@@ -240,10 +256,13 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       providerID: input.plan.providerID,
       modelID: input.plan.modelID,
       variant: input.plan.variant,
+      adapterID: input.plan.adapter.adapterID,
+      adapterDigest: requireContentDigest(input.plan.adapter.adapterDigest),
       origin: input.plan.origin,
       transportPolicy: input.plan.transportPolicy,
     },
     credential: {
+      profile: input.plan.credential.profile,
       handle: input.plan.credential.handle,
       accountFingerprint: requireContentDigest(input.plan.credential.accountFingerprint),
       headerName: input.plan.credential.headerName,
@@ -262,6 +281,7 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       contextBindingDigest: input.plan.logicalPayload.contextBindingDigest
         ? requireContentDigest(input.plan.logicalPayload.contextBindingDigest)
         : null,
+      historyDigest: requireContentDigest(input.plan.logicalPayload.historyDigest),
     },
     executionBoundary: input.plan.executionBoundary,
     boundaryLabel: providerTurnExecutionBoundaryLabel,
@@ -282,6 +302,8 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
   const resources = [
     `workspace:${input.report.root}`,
     `provider:${input.plan.providerID}/${input.plan.modelID}`,
+    `provider-adapter:${input.plan.adapter.adapterID}/${input.plan.adapter.adapterDigest}`,
+    `credential-profile:${input.plan.credential.profile}`,
     `credential:${input.plan.credential.handle}`,
     `provider-account:${input.plan.credential.accountFingerprint}`,
     `network-origin:${input.plan.origin}`,
@@ -333,13 +355,15 @@ export function makeProviderTurnOperationFacts(source: ProviderTurnOperationFact
       targetDescriptors: [
         { resource: resources[0], mode: "identity_guard" },
         { resource: resources[1], mode: "execute_once" },
-        { resource: resources[2], mode: "credential_handle_guard" },
-        { resource: resources[3], mode: "account_fingerprint_guard" },
-        { resource: resources[4], mode: "origin_guard" },
-        { resource: resources[5], mode: "send_logical_payload" },
-        { resource: resources[6], mode: "dns_policy_guard" },
-        { resource: resources[7], mode: "resolver_implementation_guard" },
-        { resource: resources[8], mode: "transport_implementation_guard" },
+        { resource: resources[2], mode: "adapter_digest_guard" },
+        { resource: resources[3], mode: "credential_profile_guard" },
+        { resource: resources[4], mode: "credential_handle_guard" },
+        { resource: resources[5], mode: "account_fingerprint_guard" },
+        { resource: resources[6], mode: "origin_guard" },
+        { resource: resources[7], mode: "send_logical_payload" },
+        { resource: resources[8], mode: "dns_policy_guard" },
+        { resource: resources[9], mode: "resolver_implementation_guard" },
+        { resource: resources[10], mode: "transport_implementation_guard" },
       ],
       partialEffect: "reconciliation_required",
       completionCriteria: [completionCriterion],
@@ -558,6 +582,8 @@ function requireInput(input: ProviderTurnOperationFactsInput) {
   requireBoundedIdentifier(input.plan.providerID, "provider ID")
   requireBoundedIdentifier(input.plan.modelID, "model ID")
   if (input.plan.variant !== null) requireBoundedIdentifier(input.plan.variant, "model variant")
+  requireBoundedIdentifier(input.plan.adapter.adapterID, "adapter ID")
+  requireContentDigest(input.plan.adapter.adapterDigest)
   requireCanonicalOrigin(input.plan.origin, input.plan.transportPolicy)
   validateProviderTurnNetworkPolicy(input.plan.networkPolicy, {
     origin: input.plan.origin,
@@ -566,6 +592,7 @@ function requireInput(input: ProviderTurnOperationFactsInput) {
   requireCredentialBinding(input.plan.credential, input.plan.wireRequest.headerNames)
   requireWireRequest(input.plan.wireRequest)
   requireContentDigest(input.plan.logicalPayload.digest)
+  requireContentDigest(input.plan.logicalPayload.historyDigest)
   if (
     input.plan.logicalPayload.contextBindingDigest !== undefined &&
     input.plan.logicalPayload.contextBindingDigest !== null
@@ -591,6 +618,7 @@ function requireCredentialBinding(
   headerNames: ProviderTurnPlan["wireRequest"]["headerNames"],
 ) {
   requireBoundedIdentifier(input.handle, "credential handle")
+  requireBoundedIdentifier(input.profile, "credential profile")
   requireContentDigest(input.accountFingerprint)
   if (!isCanonicalHeaderName(input.headerName) || !headerNames.includes(input.headerName)) {
     throw new TypeError("The provider credential header must be bound to the request")

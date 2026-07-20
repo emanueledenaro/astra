@@ -33,10 +33,8 @@ import {
   providerTurnTransportImplementationDigest,
 } from "@astra/runtime/provider-turn-network-policy"
 import type { DurableProviderTurnResult, ExecuteProviderTurnInput } from "@astra/runtime/provider-turn-coordinator"
-import {
-  makeProviderTurnOperationFacts,
-  providerTurnAdapterDigest,
-} from "@astra/runtime/provider-turn-operation-facts"
+import { makeProviderTurnOperationFacts } from "@astra/runtime/provider-turn-operation-facts"
+import { resolveCertifiedProviderAdapter } from "@astra/runtime/provider-adapter-registry"
 import {
   executeProviderTurnWithTrustedObservedTransport,
   type TrustedObservedProviderCompletion,
@@ -57,6 +55,7 @@ const maximumPreparedOperations = 16
 const requestTimeoutMilliseconds = 30_000
 const maximumResponseBytes = 1_048_576
 const maxTokens = 1_024
+const anthropicProviderAdapter = requireAnthropicProviderAdapter()
 
 type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }>
 type StripEnvelope<Input> = Input extends unknown ? Omit<Input, "schemaVersion" | "requestId"> : never
@@ -164,7 +163,17 @@ export function createAstraProviderControl(
       const proposalID = uuid()
       const operationID = uuid()
       const createdAt = new Date(now()).toISOString()
-      const facts = operationFacts(session, state, request, credential.grant, operationID, uuid(), modelID, createdAt)
+      const facts = operationFacts(
+        session,
+        state,
+        request,
+        credential.grant,
+        operationID,
+        uuid(),
+        modelID,
+        durableConversation.historyDigest,
+        createdAt,
+      )
       const skillContext = skillBundle ? publicSkillContext(skillBundle) : null
       const contextBindingDigest = skillContext ? computeProviderSkillContextBindingDigest(skillContext) : null
       if (request.evidence.skillContextBindingDigest !== contextBindingDigest) {
@@ -292,7 +301,7 @@ export function createAstraProviderControl(
           receiptID: result.receiptID,
           providerID: proposal.facts.plan.providerID,
           modelID: proposal.facts.plan.modelID,
-          adapterDigest: providerHistoryDigest(providerTurnAdapterDigest),
+          adapterDigest: providerHistoryDigest(anthropicProviderAdapter.adapterDigest),
           credentialProfile: "anthropic-api-key",
           accountFingerprint: providerHistoryDigest(proposal.grant.accountFingerprint),
           destination: proposal.request.destination,
@@ -350,8 +359,12 @@ const fixedProviderContextDigest = `sha256:${Bun.CryptoHasher.hash(
 )}` as const
 
 function providerHistoryDigest(input: string): `sha256:${string}` {
-  if (!/^sha256:[0-9a-f]{64}$/u.test(input)) throw new Error("Provider evidence digest is invalid")
-  return input as `sha256:${string}`
+  if (!isProviderHistoryDigest(input)) throw new Error("Provider evidence digest is invalid")
+  return input
+}
+
+function isProviderHistoryDigest(input: string): input is `sha256:${string}` {
+  return /^sha256:[0-9a-f]{64}$/u.test(input)
 }
 
 function revokeCredential(broker: ParentProviderCredentialBroker, grant: ProviderCredentialGrant) {
@@ -367,13 +380,6 @@ function validatedModelCatalog(
     modelIDs: catalog.models.map((model) => model.id),
     validationSourceDigest: result.catalog.provenance.providerContentDigest,
   })
-}
-
-function conversationHistoryBytes(turns: ReadonlyArray<AnthropicConversationTurn>) {
-  return turns.reduce(
-    (bytes, turn) => bytes + Buffer.byteLength(turn.userText, "utf8") + Buffer.byteLength(turn.assistantText, "utf8"),
-    0,
-  )
 }
 
 function buildRequest(
@@ -421,6 +427,7 @@ function operationFacts(
   operationID: string,
   messageID: string,
   modelID: string,
+  historyDigest: `sha256:${string}`,
   createdAt: string,
 ): ExecuteProviderTurnInput {
   return {
@@ -434,6 +441,10 @@ function operationFacts(
       providerID: "anthropic",
       modelID,
       variant: null,
+      adapter: {
+        adapterID: anthropicProviderAdapter.adapterID,
+        adapterDigest: anthropicProviderAdapter.adapterDigest,
+      },
       origin: request.destination.origin,
       transportPolicy: "https_only",
       networkPolicy: {
@@ -445,6 +456,7 @@ function operationFacts(
         transportImplementationDigest: providerTurnTransportImplementationDigest,
       },
       credential: {
+        profile: anthropicProviderAdapter.credentialProfile,
         handle: grant.credentialHandle,
         accountFingerprint: grant.accountFingerprint,
         headerName: grant.headerName,
@@ -460,6 +472,7 @@ function operationFacts(
         digest: request.evidence.requestDigest,
         bytes: request.evidence.requestBytes,
         contextBindingDigest: request.evidence.skillContextBindingDigest,
+        historyDigest,
       },
       executionBoundary: "network_egress_host_no_sandbox",
       createdAt,
@@ -469,6 +482,12 @@ function operationFacts(
     policyAskedAt: createdAt,
     recordingStartedAt: createdAt,
   }
+}
+
+function requireAnthropicProviderAdapter() {
+  const adapter = resolveCertifiedProviderAdapter("anthropic", "anthropic-api-key")
+  if (!adapter) throw new Error("The certified Anthropic adapter is unavailable")
+  return adapter
 }
 
 function parseTrustedResponse(response: TrustedObservedProviderRawResponse): TrustedObservedProviderCompletion {

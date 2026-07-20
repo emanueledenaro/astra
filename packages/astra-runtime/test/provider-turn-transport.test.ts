@@ -119,7 +119,11 @@ describe("trusted provider turn transport boundary", () => {
         mode: "test_only_loopback",
         now: () => Date.parse(input.policyAskedAt) + 100,
         async requestApproval(preview) {
-          expect(preview.credential).toEqual({ ...credentialBinding(), headerName: "authorization" })
+          expect(preview.credential).toEqual({
+            profile: "openai-api-key",
+            ...credentialBinding(),
+            headerName: "authorization",
+          })
           expect(preview.wireRequest).toEqual({
             method: "POST",
             path: "/v1/chat/completions",
@@ -555,10 +559,15 @@ async function operationInput(
       providerID: "openai",
       modelID: "gpt-5",
       variant: null,
+      adapter: {
+        adapterID: "openai.responses.api-key.v1",
+        adapterDigest: rawDigest(new TextEncoder().encode("certified OpenAI adapter")),
+      },
       origin,
       transportPolicy: "test_only_loopback_http",
       networkPolicy: loopbackNetworkPolicy(origin),
       credential: {
+        profile: "openai-api-key",
         handle: credentialBinding().handle,
         accountFingerprint: credentialBinding().accountFingerprint,
         headerName: "authorization",
@@ -570,7 +579,11 @@ async function operationInput(
         timeoutMilliseconds: limits.timeoutMilliseconds ?? 1_000,
         maximumResponseBytes: limits.maximumResponseBytes ?? 1_024,
       },
-      logicalPayload: { digest: rawDigest(body), bytes: body.byteLength },
+      logicalPayload: {
+        digest: rawDigest(body),
+        bytes: body.byteLength,
+        historyDigest: rawDigest(new TextEncoder().encode("provider conversation history")),
+      },
       executionBoundary: "network_egress_host_no_sandbox",
       createdAt: new Date(base).toISOString(),
     },

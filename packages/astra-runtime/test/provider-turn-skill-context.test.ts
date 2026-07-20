@@ -22,10 +22,12 @@ describe("provider turn skill-context authority", () => {
       ...skillAuthority.preview.logicalPayload,
       digest: String(skillAuthority.preview.logicalPayload.digest),
       contextBindingDigest: String(skillAuthority.preview.logicalPayload.contextBindingDigest),
+      historyDigest: String(skillAuthority.preview.logicalPayload.historyDigest),
     }).toEqual({
       digest: withSkill.plan.logicalPayload.digest,
       bytes: withSkill.plan.logicalPayload.bytes,
       contextBindingDigest,
+      historyDigest: withSkill.plan.logicalPayload.historyDigest,
     })
     expect(String(skillAuthority.adapterRequest.logicalPayload.contextBindingDigest)).toBe(contextBindingDigest)
     expect(skillAuthority.capabilityDigest).not.toBe(plainAuthority.capabilityDigest)
@@ -60,6 +62,10 @@ function facts(contextBindingDigest: string | null, operationID = crypto.randomU
       providerID: "anthropic",
       modelID: "claude-haiku-4-5-20251001",
       variant: null,
+      adapter: {
+        adapterID: "anthropic.messages.api-key.v1",
+        adapterDigest: digest("certified Anthropic adapter"),
+      },
       origin: "https://api.anthropic.com",
       transportPolicy: "https_only",
       networkPolicy: {
@@ -71,6 +77,7 @@ function facts(contextBindingDigest: string | null, operationID = crypto.randomU
         transportImplementationDigest: providerTurnTransportImplementationDigest,
       },
       credential: {
+        profile: "anthropic-api-key",
         handle: "auth:anthropic:primary",
         accountFingerprint: digest("provider account"),
         headerName: "x-api-key",
@@ -86,6 +93,7 @@ function facts(contextBindingDigest: string | null, operationID = crypto.randomU
         digest: digest("private skill instructions and user prompt"),
         bytes: 42,
         contextBindingDigest,
+        historyDigest: digest("provider conversation history"),
       },
       executionBoundary: "network_egress_host_no_sandbox",
       createdAt,

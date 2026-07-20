@@ -403,8 +403,22 @@ describe("provider turn Operation coordinator", () => {
         ...fixture.input,
         plan: {
           ...fixture.input.plan,
+          adapter: { ...fixture.input.plan.adapter, adapterDigest: digest("other certified adapter") },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
           origin: "https://other.example.test",
           networkPolicy: httpsNetworkPolicy("https://other.example.test"),
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          credential: { ...fixture.input.plan.credential, profile: "openai-codex-oauth" },
         },
       },
       {
@@ -464,7 +478,14 @@ describe("provider turn Operation coordinator", () => {
         ...fixture.input,
         plan: {
           ...fixture.input.plan,
-          logicalPayload: { digest: digest("other logical payload"), bytes: fixture.input.plan.logicalPayload.bytes },
+          logicalPayload: { ...fixture.input.plan.logicalPayload, digest: digest("other logical payload") },
+        },
+      },
+      {
+        ...fixture.input,
+        plan: {
+          ...fixture.input.plan,
+          logicalPayload: { ...fixture.input.plan.logicalPayload, historyDigest: digest("other conversation") },
         },
       },
       {
@@ -842,10 +863,15 @@ async function operationInput() {
       providerID: "openai",
       modelID: "gpt-5",
       variant: "high",
+      adapter: {
+        adapterID: "openai.responses.api-key.v1",
+        adapterDigest: digest("certified OpenAI Responses API-key adapter"),
+      },
       origin: "https://api.example.test",
       transportPolicy: "https_only",
       networkPolicy: httpsNetworkPolicy("https://api.example.test"),
       credential: {
+        profile: "openai-api-key",
         handle: "auth:openai:primary",
         accountFingerprint: digest("provider-account:fixture@example.test"),
         headerName: "authorization",
@@ -857,7 +883,11 @@ async function operationInput() {
         timeoutMilliseconds: 10_000,
         maximumResponseBytes: 1_048_576,
       },
-      logicalPayload: { digest: digest("logical payload without raw prompt storage"), bytes: 47 },
+      logicalPayload: {
+        digest: digest("logical payload without raw prompt storage"),
+        bytes: 47,
+        historyDigest: digest("empty provider history"),
+      },
       executionBoundary: "network_egress_host_no_sandbox",
       createdAt: new Date(base).toISOString(),
     },
