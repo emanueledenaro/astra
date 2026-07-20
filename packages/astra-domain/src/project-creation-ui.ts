@@ -56,9 +56,20 @@ export type AstraProjectCreationResult = Readonly<{
   status: AstraProjectCreationResultStatus
   targetPath: string
   operationID: string | null
-  receiptID: string | null
+  expectedReceiptID: string | null
+  observedReceiptID: string | null
   evidenceID: string | null
   detail: string
+}>
+
+export type AstraProjectCreationProgress = Readonly<{
+  schemaVersion: 1
+  state: "dispatching" | "effect_observed" | "verifying"
+  boundary: typeof astraProjectCreationBoundary
+  targetPath: string
+  operationID: string
+  expectedReceiptID: string
+  observedReceiptID: string | null
 }>
 
 export type AstraProjectCreationResultDecision =
@@ -177,7 +188,8 @@ export function parseAstraProjectCreationResult(
     "status",
     "targetPath",
     "operationID",
-    "receiptID",
+    "expectedReceiptID",
+    "observedReceiptID",
     "evidenceID",
     "detail",
   ])
@@ -185,20 +197,70 @@ export function parseAstraProjectCreationResult(
   const targetPath = absolutePath(record.targetPath)
   const detail = boundedSafeText(record.detail, 2_048)
   const operationID = nullableID(record.operationID)
-  const receiptID = nullableID(record.receiptID)
+  const expectedReceiptID = nullableID(record.expectedReceiptID)
+  const observedReceiptID = nullableID(record.observedReceiptID)
   const evidenceID = nullableID(record.evidenceID)
-  if (!targetPath || !detail || operationID === undefined || receiptID === undefined || evidenceID === undefined) {
+  if (
+    !targetPath ||
+    !detail ||
+    operationID === undefined ||
+    expectedReceiptID === undefined ||
+    observedReceiptID === undefined ||
+    evidenceID === undefined ||
+    (observedReceiptID !== null && observedReceiptID !== expectedReceiptID)
+  ) {
     return invalid()
   }
-  if (record.status === "verified" && (!operationID || !receiptID || !evidenceID)) return invalid()
+  if (record.status === "verified" && (!operationID || !expectedReceiptID || !observedReceiptID || !evidenceID)) {
+    return invalid()
+  }
   return valid({
     schemaVersion: 1,
     status: record.status,
     targetPath,
     operationID,
-    receiptID,
+    expectedReceiptID,
+    observedReceiptID,
     evidenceID,
     detail,
+  })
+}
+
+export function parseAstraProjectCreationProgress(
+  input: unknown,
+): AstraProjectCreationUiParseResult<AstraProjectCreationProgress> {
+  const record = exact(input, [
+    "schemaVersion",
+    "state",
+    "boundary",
+    "targetPath",
+    "operationID",
+    "expectedReceiptID",
+    "observedReceiptID",
+  ])
+  if (
+    !record ||
+    record.schemaVersion !== 1 ||
+    (record.state !== "dispatching" && record.state !== "effect_observed" && record.state !== "verifying") ||
+    record.boundary !== astraProjectCreationBoundary
+  ) {
+    return invalid()
+  }
+  const targetPath = absolutePath(record.targetPath)
+  const operationID = nullableID(record.operationID)
+  const expectedReceiptID = nullableID(record.expectedReceiptID)
+  const observedReceiptID = nullableID(record.observedReceiptID)
+  if (!targetPath || !operationID || !expectedReceiptID || observedReceiptID === undefined) return invalid()
+  if (record.state === "dispatching" && observedReceiptID !== null) return invalid()
+  if (record.state !== "dispatching" && observedReceiptID !== expectedReceiptID) return invalid()
+  return valid({
+    schemaVersion: 1,
+    state: record.state,
+    boundary: astraProjectCreationBoundary,
+    targetPath,
+    operationID,
+    expectedReceiptID,
+    observedReceiptID,
   })
 }
 

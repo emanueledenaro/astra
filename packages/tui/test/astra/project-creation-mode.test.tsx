@@ -17,13 +17,13 @@ const proposal = {
   objective: "Create a predictable tool.",
   stack: "typescript-bun",
   files: [
-    {
-      path: "README.md",
-      bytes: 21,
-      contentDigest: `sha256:${"a".repeat(64)}`,
-    },
+    { path: "README.md", bytes: 100, contentDigest: `sha256:${"a".repeat(64)}` },
+    { path: ".gitignore", bytes: 19, contentDigest: `sha256:${"b".repeat(64)}` },
+    { path: "package.json", bytes: 67, contentDigest: `sha256:${"c".repeat(64)}` },
+    { path: "tsconfig.json", bytes: 180, contentDigest: `sha256:${"d".repeat(64)}` },
+    { path: "src/index.ts", bytes: 40, contentDigest: `sha256:${"e".repeat(64)}` },
   ],
-  totalBytes: 21,
+  totalBytes: 406,
   initializeGit: false,
   installsDependencies: false,
   usesNetwork: false,
@@ -35,7 +35,8 @@ const observed = {
   status: "effect_observed",
   targetPath: proposal.targetPath,
   operationID: "6c7535da-29a5-4c29-a5f7-52f1de9d8771",
-  receiptID: "8d36420e-5417-4adb-8ed2-bc445a8f0974",
+  expectedReceiptID: "8d36420e-5417-4adb-8ed2-bc445a8f0974",
+  observedReceiptID: "8d36420e-5417-4adb-8ed2-bc445a8f0974",
   evidenceID: null,
   detail: "The effect was observed and has not been independently verified.",
 } as const
@@ -112,8 +113,8 @@ test("accepts lowercase q as project input while uppercase Q remains cancel", as
   }
 })
 
-test("renders exact proposal resources and excluded effects in wide and compact terminals", async () => {
-  for (const dimensions of [{ width: 100, height: 28 }, { width: 48, height: 16 }]) {
+test("renders a realistic exact proposal and reachable approval controls in wide and compact terminals", async () => {
+  for (const dimensions of [{ width: 100, height: 28 }, { width: 58, height: 22 }]) {
     const app = await testRender(
       () => <AstraProjectCreationReviewMode proposal={proposal} onDecision={() => {}} />,
       dimensions,
@@ -124,10 +125,14 @@ test("renders exact proposal resources and excluded effects in wide and compact 
       expect(frame).toContain("PROPOSAL > APPROVAL")
       expect(frame).toContain("HOST EXECUTION — NO SANDBOX")
       expect(frame).toContain("README.md")
-      expect(frame).toContain("21 bytes")
+      expect(frame).toContain("5 files")
+      expect(frame).toContain("406 bytes")
       expect(frame).toContain("No install · No network")
       expect(frame).toContain("Git: separate")
       expect(frame).toContain("step")
+      expect(frame).toContain("[A] Approve")
+      expect(frame).toContain("[R] Reject")
+      expect(frame).toContain("[Q] Cancel")
     } finally {
       app.renderer.destroy()
     }
@@ -152,7 +157,16 @@ test("returns review decisions bound to the rendered proposal", async () => {
 })
 
 test("keeps operation state visible without offering input", async () => {
-  const app = await testRender(() => <AstraProjectCreationOperationMode proposal={proposal} />, {
+  const progress = {
+    schemaVersion: 1,
+    state: "dispatching",
+    boundary: "HOST EXECUTION — NO SANDBOX",
+    targetPath: proposal.targetPath,
+    operationID: observed.operationID,
+    expectedReceiptID: observed.expectedReceiptID,
+    observedReceiptID: null,
+  } as const
+  const app = await testRender(() => <AstraProjectCreationOperationMode progress={progress} />, {
     width: 72,
     height: 18,
   })
@@ -164,6 +178,34 @@ test("keeps operation state visible without offering input", async () => {
     expect(frame).toContain("HOST EXECUTION — NO SANDBOX")
     expect(frame).toContain("/Users/developer/Projects/")
     expect(frame).toContain("alpha-tool")
+    expect(frame).toContain("Operation")
+    expect(frame).toContain(progress.operationID)
+    expect(frame).toContain("Expected receipt")
+    expect(frame).toContain(progress.expectedReceiptID)
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("progress rendering cannot receive or invoke an Operation callback", async () => {
+  let effects = 0
+  const hostile = {
+    schemaVersion: 1,
+    state: "dispatching",
+    boundary: "HOST EXECUTION — NO SANDBOX",
+    targetPath: proposal.targetPath,
+    operationID: observed.operationID,
+    expectedReceiptID: observed.expectedReceiptID,
+    observedReceiptID: null,
+    operation: () => {
+      effects += 1
+    },
+  }
+  const app = await testRender(() => <AstraProjectCreationOperationMode progress={hostile} />)
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).toContain("Project creation data unavailable")
+    expect(effects).toBe(0)
   } finally {
     app.renderer.destroy()
   }
@@ -205,6 +247,32 @@ test("never offers Open for observed-only results and offers it for exact verifi
   }
 })
 
+test("keeps operation and expected-versus-observed receipt IDs visible in compact results", async () => {
+  const uncertain = {
+    ...observed,
+    status: "reconciliation_required",
+    observedReceiptID: null,
+    detail: "The response is missing and reconciliation is required.",
+  } as const
+  const app = await testRender(
+    () => <AstraProjectCreationResultMode result={uncertain} onDecision={() => {}} />,
+    { width: 48, height: 20 },
+  )
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("Operation")
+    expect(frame).toContain(uncertain.operationID.slice(0, 18))
+    expect(frame).toContain(uncertain.operationID.slice(18))
+    expect(frame).toContain("Expected receipt")
+    expect(frame).toContain(uncertain.expectedReceiptID.slice(0, 18))
+    expect(frame).toContain(uncertain.expectedReceiptID.slice(18))
+    expect(frame).toContain("Observed receipt · none")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("keeps every project creation renderer import graph inert", async () => {
   const source = await readFile(new URL("../../src/astra/project-creation-mode.tsx", import.meta.url), "utf8")
   const imports = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map((match) => match[1])
@@ -217,6 +285,8 @@ test("keeps every project creation renderer import graph inert", async () => {
     "../component/lynx-model",
   ])
   expect(source).not.toMatch(/process\.|Bun\.|node:|@astra\/runtime|ledger|fetch\(|spawn\(|cwd\(|env\b/)
+  expect(source).not.toContain("withAstraProjectCreationProgress")
+  expect(source).not.toMatch(/operation\s*\(\s*\)/)
 })
 
 test("fails closed instead of rendering hostile terminal controls or raw content", async () => {

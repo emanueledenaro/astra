@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import {
   parseAstraProjectCreationDetailsDecision,
   parseAstraProjectCreationProposal,
+  parseAstraProjectCreationProgress,
   parseAstraProjectCreationResult,
   parseAstraProjectCreationResultDecision,
   parseAstraProjectCreationReviewDecision,
@@ -103,7 +104,8 @@ describe("Astra guided project creation UI protocol", () => {
       status: "effect_observed",
       targetPath: proposal.targetPath,
       operationID: "6c7535da-29a5-4c29-a5f7-52f1de9d8771",
-      receiptID: "8d36420e-5417-4adb-8ed2-bc445a8f0974",
+      expectedReceiptID: "8d36420e-5417-4adb-8ed2-bc445a8f0974",
+      observedReceiptID: "8d36420e-5417-4adb-8ed2-bc445a8f0974",
       evidenceID: null,
       detail: "The effect was observed and has not been independently verified.",
     } as const
@@ -140,11 +142,34 @@ describe("Astra guided project creation UI protocol", () => {
       status: "verified",
       targetPath: proposal.targetPath,
       operationID: "6c7535da-29a5-8c29-a5f7-52f1de9d8771",
-      receiptID: "8d36420e-5417-8adb-8ed2-bc445a8f0974",
+      expectedReceiptID: "8d36420e-5417-8adb-8ed2-bc445a8f0974",
+      observedReceiptID: "8d36420e-5417-8adb-8ed2-bc445a8f0974",
       evidenceID: "6c4b0a1a-231a-8a17-b366-b0a2358c090d",
       detail: "The exact project tree matched independent evidence.",
     } as const
 
     expect(parseAstraProjectCreationResult(result)).toEqual({ ok: true, value: result })
+  })
+
+  test("parses parent-owned progress snapshots without carrying an effect callback", () => {
+    const dispatching = {
+      schemaVersion: 1,
+      state: "dispatching",
+      boundary: "HOST EXECUTION — NO SANDBOX",
+      targetPath: proposal.targetPath,
+      operationID: "6c7535da-29a5-8c29-a5f7-52f1de9d8771",
+      expectedReceiptID: "8d36420e-5417-8adb-8ed2-bc445a8f0974",
+      observedReceiptID: null,
+    } as const
+    const verifying = {
+      ...dispatching,
+      state: "verifying",
+      observedReceiptID: dispatching.expectedReceiptID,
+    } as const
+
+    expect(parseAstraProjectCreationProgress(dispatching)).toEqual({ ok: true, value: dispatching })
+    expect(parseAstraProjectCreationProgress(verifying)).toEqual({ ok: true, value: verifying })
+    expect(parseAstraProjectCreationProgress({ ...dispatching, operation: () => "effect" }).ok).toBeFalse()
+    expect(parseAstraProjectCreationProgress({ ...verifying, observedReceiptID: null }).ok).toBeFalse()
   })
 })

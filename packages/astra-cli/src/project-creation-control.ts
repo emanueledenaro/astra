@@ -11,12 +11,14 @@ import {
   parseAstraProjectCreationDetailsDecision,
   parseAstraProjectCreationResultDecision,
   parseAstraProjectCreationReviewDecision,
+  type AstraProjectCreationProgress,
   type AstraProjectCreationProposal,
   type AstraProjectCreationRequest,
   type AstraProjectCreationResult,
 } from "@astra/domain/project-creation-ui"
 import {
   executeDurableProjectScaffold,
+  makeProjectScaffoldOperationFacts,
   verifyDurableProjectScaffold,
   type DurableProjectScaffoldInput,
 } from "@astra/runtime"
@@ -34,6 +36,11 @@ type ProjectCreationKernelResult = Readonly<{
   evidence: Readonly<{ evidenceID: string }> | null
 }>
 
+type ProjectCreationProgressSurface = Readonly<{
+  update: (progress: AstraProjectCreationProgress) => boolean
+  close: () => void
+}>
+
 export type GuidedProjectCreationOutcome =
   | Readonly<{ kind: "launchpad" }>
   | Readonly<{ kind: "open-workspace"; path: string }>
@@ -48,7 +55,7 @@ type GuidedProjectCreationDependencies = Readonly<{
     observedAt: string,
   ) => Promise<ProjectParentAuthorityCaptureResult>
   reviewProposal: (proposal: AstraProjectCreationProposal) => Promise<unknown>
-  withProgress: <Value>(proposal: AstraProjectCreationProposal, operation: () => Promise<Value>) => Promise<Value>
+  openProgress: (progress: AstraProjectCreationProgress) => Promise<ProjectCreationProgressSurface | null>
   execute: (input: DurableProjectScaffoldInput) => Promise<ProjectCreationKernelResult>
   verify: (input: DurableProjectScaffoldInput) => Promise<ProjectCreationKernelResult>
   showResult: (result: AstraProjectCreationResult) => Promise<unknown>
@@ -72,7 +79,8 @@ export function createGuidedProjectCreationControlInternal(dependencies: GuidedP
           status: "failed_without_effect",
           targetPath: join(request.parentPath, request.name),
           operationID: null,
-          receiptID: null,
+          expectedReceiptID: null,
+          observedReceiptID: null,
           evidenceID: null,
           detail: `Project creation blocked before dispatch: ${captured.reason.replaceAll("_", " ")}.`,
         })
@@ -106,26 +114,78 @@ export function createGuidedProjectCreationControlInternal(dependencies: GuidedP
         },
         recordingStartedAt: dependencies.now(),
       }
+      const facts = makeProjectScaffoldOperationFacts(input)
       if (reviewed.value.kind === "reject") {
         try {
-          return presentResult(dependencies, projectCreationResult(await dependencies.execute(input), preview.targetPath))
+          return presentResult(
+            dependencies,
+            projectCreationResult(await dependencies.execute(input), preview.targetPath, null),
+          )
         } catch {
-          return presentResult(dependencies, failureResult(preview.targetPath, "failed_without_effect", null))
+          return presentResult(
+            dependencies,
+            failureResult(preview.targetPath, "failed_without_effect", facts.operationID, null, null),
+          )
         }
       }
 
+      const initialProgress = projectCreationProgress(
+        "dispatching",
+        proposal,
+        facts.operationID,
+        facts.receiptID,
+        null,
+      )
+      const progress = await dependencies.openProgress(initialProgress)
+      if (!progress) {
+        return presentResult(
+          dependencies,
+          failureResult(preview.targetPath, "failed_without_effect", facts.operationID, facts.receiptID, null),
+        )
+      }
+
       let observed: ProjectCreationKernelResult | null = null
+      let projected: AstraProjectCreationResult
       try {
-        const result = await dependencies.withProgress(proposal, async () => {
-          observed = await dependencies.execute(input)
-          if (observed.status !== "effect_observed") return observed
-          return dependencies.verify(input)
-        })
-        return presentResult(dependencies, projectCreationResult(result, preview.targetPath))
+        observed = await dependencies.execute(input)
+        let result = observed
+        if (observed.status === "effect_observed") {
+          requireProgressUpdate(
+            progress,
+            projectCreationProgress(
+              "effect_observed",
+              proposal,
+              facts.operationID,
+              facts.receiptID,
+              observed.receiptID,
+            ),
+          )
+          requireProgressUpdate(
+            progress,
+            projectCreationProgress(
+              "verifying",
+              proposal,
+              facts.operationID,
+              facts.receiptID,
+              observed.receiptID,
+            ),
+          )
+          result = await dependencies.verify(input)
+        }
+        projected = projectCreationResult(result, preview.targetPath, facts.receiptID)
       } catch (cause) {
         const status = observed || !isKnownNoEffectFailure(cause) ? "reconciliation_required" : "failed_without_effect"
-        return presentResult(dependencies, failureResult(preview.targetPath, status, observed))
+        projected = failureResult(
+          preview.targetPath,
+          status,
+          facts.operationID,
+          facts.receiptID,
+          observed?.receiptID ?? null,
+        )
+      } finally {
+        progress.close()
       }
+      return presentResult(dependencies, projected)
     },
   })
 }
@@ -210,7 +270,7 @@ export async function runGuidedProjectCreation(): Promise<GuidedProjectCreationO
     collectDetails: loaded.runAstraProjectCreationDetailsMode,
     captureAuthority: captureProjectParentAuthority,
     reviewProposal: loaded.runAstraProjectCreationReviewMode,
-    withProgress: loaded.withAstraProjectCreationProgress,
+    openProgress: loaded.openAstraProjectCreationProgressMode,
     execute: executeDurableProjectScaffold,
     verify: verifyDurableProjectScaffold,
     showResult: loaded.runAstraProjectCreationResultMode,
@@ -232,13 +292,18 @@ async function presentResult(
     : { kind: "exit", exitCode: 1 }
 }
 
-function projectCreationResult(result: ProjectCreationKernelResult, targetPath: string): AstraProjectCreationResult {
+function projectCreationResult(
+  result: ProjectCreationKernelResult,
+  targetPath: string,
+  expectedReceiptID: string | null,
+): AstraProjectCreationResult {
   return {
     schemaVersion: 1,
     status: result.status,
     targetPath,
     operationID: result.operationID,
-    receiptID: result.receiptID,
+    expectedReceiptID,
+    observedReceiptID: result.receiptID,
     evidenceID: result.evidence?.evidenceID ?? null,
     detail: resultDetail(result.status),
   }
@@ -247,17 +312,45 @@ function projectCreationResult(result: ProjectCreationKernelResult, targetPath: 
 function failureResult(
   targetPath: string,
   status: "failed_without_effect" | "reconciliation_required",
-  observed: ProjectCreationKernelResult | null,
+  operationID: string | null,
+  expectedReceiptID: string | null,
+  observedReceiptID: string | null,
 ): AstraProjectCreationResult {
   return {
     schemaVersion: 1,
     status,
     targetPath,
-    operationID: observed?.operationID ?? null,
-    receiptID: observed?.receiptID ?? null,
+    operationID,
+    expectedReceiptID,
+    observedReceiptID,
     evidenceID: null,
     detail: resultDetail(status),
   }
+}
+
+function projectCreationProgress(
+  state: AstraProjectCreationProgress["state"],
+  proposal: AstraProjectCreationProposal,
+  operationID: string,
+  expectedReceiptID: string,
+  observedReceiptID: string | null,
+): AstraProjectCreationProgress {
+  return {
+    schemaVersion: 1,
+    state,
+    boundary: proposal.boundary,
+    targetPath: proposal.targetPath,
+    operationID,
+    expectedReceiptID,
+    observedReceiptID,
+  }
+}
+
+function requireProgressUpdate(
+  surface: ProjectCreationProgressSurface,
+  progress: AstraProjectCreationProgress,
+) {
+  if (!surface.update(progress)) throw new TypeError("Project creation progress surface rejected a typed snapshot")
 }
 
 function resultDetail(status: AstraProjectCreationResult["status"]) {
@@ -277,7 +370,7 @@ function isKnownNoEffectFailure(cause: unknown) {
 type ProjectCreationTuiModule = Readonly<{
   runAstraProjectCreationDetailsMode: GuidedProjectCreationDependencies["collectDetails"]
   runAstraProjectCreationReviewMode: GuidedProjectCreationDependencies["reviewProposal"]
-  withAstraProjectCreationProgress: GuidedProjectCreationDependencies["withProgress"]
+  openAstraProjectCreationProgressMode: GuidedProjectCreationDependencies["openProgress"]
   runAstraProjectCreationResultMode: GuidedProjectCreationDependencies["showResult"]
 }>
 
@@ -289,8 +382,8 @@ function isProjectCreationTuiModule(input: unknown): input is ProjectCreationTui
     typeof input.runAstraProjectCreationDetailsMode === "function" &&
     "runAstraProjectCreationReviewMode" in input &&
     typeof input.runAstraProjectCreationReviewMode === "function" &&
-    "withAstraProjectCreationProgress" in input &&
-    typeof input.withAstraProjectCreationProgress === "function" &&
+    "openAstraProjectCreationProgressMode" in input &&
+    typeof input.openAstraProjectCreationProgressMode === "function" &&
     "runAstraProjectCreationResultMode" in input &&
     typeof input.runAstraProjectCreationResultMode === "function"
   )

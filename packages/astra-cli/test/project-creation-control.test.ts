@@ -138,7 +138,97 @@ describe("guided project creation parent control", () => {
     )
 
     expect(await control.run()).toEqual({ kind: "open-workspace", path: authority.targetPath })
-    expect(calls).toEqual(["details", "capture", "review", "progress", "execute:approved", "verify", "result"])
+    expect(calls).toEqual([
+      "details",
+      "capture",
+      "review",
+      "progress:open",
+      "execute:approved",
+      "progress:effect_observed",
+      "progress:verifying",
+      "verify",
+      "progress:close",
+      "result",
+    ])
+  })
+
+  test("keeps dispatch and verification authority in the CLI parent and sends only typed snapshots to the TUI", async () => {
+    const calls: Array<string> = []
+    const snapshots: Array<unknown> = []
+    const control = createGuidedProjectCreationControlInternal(
+      dependencies(calls, {
+        review: (proposal) => ({ kind: "approve", proposalDigest: proposal.proposalDigest }),
+        progress: (snapshot) => snapshots.push(snapshot),
+      }),
+    )
+
+    expect(await control.run()).toEqual({ kind: "launchpad" })
+    expect(calls.indexOf("execute:approved")).toBeGreaterThan(calls.indexOf("progress:open"))
+    expect(calls.indexOf("verify")).toBeGreaterThan(calls.indexOf("progress:verifying"))
+    expect(snapshots.map((snapshot) => (snapshot as { state: string }).state)).toEqual([
+      "dispatching",
+      "effect_observed",
+      "verifying",
+    ])
+    expect(snapshots.some(containsFunction)).toBe(false)
+  })
+
+  test("preserves deterministic expected IDs when dispatch response is missing", async () => {
+    const calls: Array<string> = []
+    let dispatched: DurableProjectScaffoldInput | null = null
+    let presented: unknown = null
+    const control = createGuidedProjectCreationControlInternal(
+      dependencies(calls, {
+        review: (proposal) => ({ kind: "approve", proposalDigest: proposal.proposalDigest }),
+        executeFailure: new Error("dispatch response missing"),
+        input: (value) => { dispatched = value },
+        presented: (value) => { presented = value },
+      }),
+    )
+
+    expect(await control.run()).toEqual({ kind: "launchpad" })
+    if (!dispatched) throw new Error("Expected the parent to dispatch")
+    const facts = makeProjectScaffoldOperationFacts(dispatched)
+    expect(presented).toMatchObject({
+      status: "reconciliation_required",
+      operationID: facts.operationID,
+      expectedReceiptID: facts.receiptID,
+      observedReceiptID: null,
+      evidenceID: null,
+    })
+    expect(calls).toEqual([
+      "details",
+      "capture",
+      "review",
+      "progress:open",
+      "execute:approved",
+      "progress:close",
+      "result",
+    ])
+  })
+
+  test("distinguishes an observed receipt from missing verification evidence", async () => {
+    const calls: Array<string> = []
+    let presented: unknown = null
+    const control = createGuidedProjectCreationControlInternal(
+      dependencies(calls, {
+        review: (proposal) => ({ kind: "approve", proposalDigest: proposal.proposalDigest }),
+        verifyFailure: new Error("verification interrupted"),
+        presented: (value) => { presented = value },
+      }),
+    )
+
+    expect(await control.run()).toEqual({ kind: "launchpad" })
+    expect(presented).toMatchObject({
+      status: "reconciliation_required",
+      evidenceID: null,
+    })
+    expect((presented as { operationID: unknown }).operationID).toBeString()
+    expect((presented as { expectedReceiptID: unknown }).expectedReceiptID).toBeString()
+    expect((presented as { observedReceiptID: unknown }).observedReceiptID).toBeString()
+    expect((presented as { expectedReceiptID: string }).expectedReceiptID).toBe(
+      (presented as { observedReceiptID: string }).observedReceiptID,
+    )
   })
 
   test("does not accept Open when execution is only observed", async () => {
@@ -176,6 +266,11 @@ function dependencies(
     review?: (proposal: ReturnType<typeof projectProjectCreationProposal>) => unknown
     result?: (result: Readonly<{ targetPath: string }>) => unknown
     verifyStatus?: "verified" | "effect_observed"
+    executeFailure?: Error
+    verifyFailure?: Error
+    progress?: (snapshot: unknown) => void
+    input?: (input: DurableProjectScaffoldInput) => void
+    presented?: (result: unknown) => void
   }> = {},
 ) {
   const times = [
@@ -198,12 +293,24 @@ function dependencies(
       calls.push("review")
       return options.review?.(proposal) ?? { kind: "cancel" }
     },
-    withProgress: async <Value>(_proposal: unknown, operation: () => Promise<Value>) => {
-      calls.push("progress")
-      return operation()
+    openProgress: async (progress: unknown) => {
+      calls.push("progress:open")
+      options.progress?.(progress)
+      return {
+        update(next: unknown) {
+          calls.push(`progress:${(next as { state: string }).state}`)
+          options.progress?.(next)
+          return true
+        },
+        close() {
+          calls.push("progress:close")
+        },
+      }
     },
     execute: async (input: DurableProjectScaffoldInput) => {
       calls.push(`execute:${input.decision.decision}`)
+      options.input?.(input)
+      if (options.executeFailure) throw options.executeFailure
       const facts = makeProjectScaffoldOperationFacts(input)
       return input.decision.decision === "rejected"
         ? {
@@ -227,6 +334,7 @@ function dependencies(
     },
     verify: async (input: DurableProjectScaffoldInput) => {
       calls.push("verify")
+      if (options.verifyFailure) throw options.verifyFailure
       const facts = makeProjectScaffoldOperationFacts(input)
       return options.verifyStatus === "effect_observed"
         ? {
@@ -250,11 +358,18 @@ function dependencies(
     },
     showResult: async (result: Readonly<{ targetPath: string }>) => {
       calls.push("result")
+      options.presented?.(result)
       return options.result?.(result) ?? { kind: "launchpad" }
     },
     now: () => times[time++]!,
     nonce: () => "0123456789abcdef0123456789abcdef",
   }
+}
+
+function containsFunction(input: unknown): boolean {
+  if (typeof input === "function") return true
+  if (typeof input !== "object" || input === null) return false
+  return Reflect.ownKeys(input).some((key) => containsFunction(Reflect.get(input, key)))
 }
 
 function makeAuthority(): ProjectParentAuthority {

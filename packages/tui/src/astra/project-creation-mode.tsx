@@ -5,10 +5,12 @@ import { For, Show, createMemo, createSignal, type JSX } from "solid-js"
 import {
   astraProjectCreationStack,
   parseAstraProjectCreationDetailsDecision,
+  parseAstraProjectCreationProgress,
   parseAstraProjectCreationProposal,
   parseAstraProjectCreationResult,
   parseAstraProjectCreationResultDecision,
   type AstraProjectCreationDetailsDecision,
+  type AstraProjectCreationProgress,
   type AstraProjectCreationProposal,
   type AstraProjectCreationResult,
   type AstraProjectCreationResultDecision,
@@ -50,20 +52,35 @@ export async function runAstraProjectCreationReviewMode(
   )
 }
 
-/** Keeps the host boundary and operation phase visible while the parent waits. */
-export async function withAstraProjectCreationProgress<Value>(
-  proposalInput: unknown,
-  operation: () => Promise<Value>,
-): Promise<Value> {
-  const proposal = parseAstraProjectCreationProposal(proposalInput)
-  if (!proposal.ok) throw new TypeError("Project creation proposal unavailable")
+export type AstraProjectCreationProgressSurface = Readonly<{
+  update: (progress: unknown) => boolean
+  close: () => void
+}>
+
+/** Opens a presentation-only surface that accepts strict progress snapshots from the CLI parent. */
+export async function openAstraProjectCreationProgressMode(
+  progressInput: unknown,
+): Promise<AstraProjectCreationProgressSurface | null> {
+  const initial = parseAstraProjectCreationProgress(progressInput)
+  if (!initial.ok) return null
   const renderer = await createProjectCreationRenderer()
-  try {
-    await render(() => <AstraProjectCreationOperationMode proposal={proposal.value} />, renderer)
-    return await operation()
-  } finally {
-    if (!renderer.isDestroyed) renderer.destroy()
-  }
+  const [progress, setProgress] = createSignal<AstraProjectCreationProgress>(initial.value)
+  await render(() => <AstraProjectCreationOperationMode progress={progress()} />, renderer)
+  let closed = false
+  return Object.freeze({
+    update(progressInput: unknown) {
+      if (closed) return false
+      const next = parseAstraProjectCreationProgress(progressInput)
+      if (!next.ok) return false
+      setProgress(next.value)
+      return true
+    },
+    close() {
+      if (closed) return
+      closed = true
+      if (!renderer.isDestroyed) renderer.destroy()
+    },
+  })
 }
 
 /** Shows accurate evidence and exposes Open only after exact verification. */
@@ -191,33 +208,38 @@ export function AstraProjectCreationReviewMode(props: {
         <box flexDirection="column">
           <For each={proposal.files}>
             {(file) => (
-              <>
-                <text fg={palette.text}>
-                  {file.path} · {file.bytes} bytes · {file.contentDigest}
-                </text>
-              </>
+              <text fg={palette.text}>
+                {file.path} · {file.bytes} bytes{compact() ? "" : ` · ${shortDigest(file.contentDigest)}`}
+              </text>
             )}
           </For>
         </box>
         <text fg={palette.warning}>No install · No network · Git: separate step</text>
-        <text fg={palette.text}>[A] Approve exact scaffold · [R] Reject · [Q] Cancel</text>
+        <text fg={palette.text}>
+          {compact() ? "[A] Approve · [R] Reject · [Q] Cancel" : "[A] Approve exact scaffold · [R] Reject · [Q] Cancel"}
+        </text>
       </ProjectCreationFrame>
   )
 }
 
-export function AstraProjectCreationOperationMode(props: { proposal: unknown }) {
-  const parsed = parseAstraProjectCreationProposal(props.proposal)
+export function AstraProjectCreationOperationMode(props: { progress: unknown }) {
+  const parsed = parseAstraProjectCreationProgress(props.progress)
   if (!parsed.ok) return <ProjectCreationUnavailable />
-  const proposal = parsed.value
+  const progress = parsed.value
   const dimensions = useTerminalDimensions()
   const compact = createMemo(() => dimensions().width < 62 || dimensions().height < 18)
   return (
     <ProjectCreationFrame compact={compact()} phase="OPERATION">
         <text fg={palette.muted}>{phases}</text>
-        <text fg={palette.primary} attributes={TextAttributes.BOLD}>RUNNING</text>
-        <text fg={palette.warning}>{proposal.boundary}</text>
-        <text fg={palette.text}>{proposal.targetPath}</text>
-        <text fg={palette.muted}>Durable authority · atomic create-only scaffold · independent verification follows</text>
+        <text fg={palette.primary} attributes={TextAttributes.BOLD}>{progressLabel(progress.state)}</text>
+        <text fg={palette.warning}>{progress.boundary}</text>
+        <text fg={palette.text}>{progress.targetPath}</text>
+        <IdentifierRows label="Operation" value={progress.operationID} compact={compact()} />
+        <IdentifierRows label="Expected receipt" value={progress.expectedReceiptID} compact={compact()} />
+        <IdentifierRows label="Observed receipt" value={progress.observedReceiptID} compact={compact()} />
+        <Show when={!compact()}>
+          <text fg={palette.muted}>Atomic create-only scaffold · independent verification follows</text>
+        </Show>
       </ProjectCreationFrame>
   )
 }
@@ -251,13 +273,12 @@ export function AstraProjectCreationResultMode(props: {
           {resultLabel(result.status)}
         </text>
         <text fg={palette.text}>{result.targetPath}</text>
-        <text fg={palette.muted}>{result.detail}</text>
-        <Show when={!compact() && result.operationID}>
-          <text fg={palette.muted}>Operation {result.operationID}</text>
+        <Show when={!compact()}>
+          <text fg={palette.muted}>{result.detail}</text>
         </Show>
-        <Show when={!compact() && result.receiptID}>
-          <text fg={palette.muted}>Receipt {result.receiptID}</text>
-        </Show>
+        <IdentifierRows label="Operation" value={result.operationID} compact={compact()} />
+        <IdentifierRows label="Expected receipt" value={result.expectedReceiptID} compact={compact()} />
+        <IdentifierRows label="Observed receipt" value={result.observedReceiptID} compact={compact()} />
         <text fg={palette.text}>
           {result.status === "verified" ? "[O] Open project · " : ""}[L] Launchpad · [Q] Exit
         </text>
@@ -276,7 +297,7 @@ function ProjectCreationFrame(props: { compact: boolean; phase: string; children
           <text fg={palette.accent}>{props.phase}</text>
         </box>
         <box border borderStyle="rounded" borderColor={palette.border} backgroundColor={palette.panel} paddingLeft={props.compact ? 1 : 2} paddingRight={props.compact ? 1 : 2} flexDirection={props.compact ? "column" : "row"} gap={props.compact ? 0 : 3}>
-          <Show when={!props.compact}>
+          <Show when={!props.compact && dimensions().width >= 86}>
             <box flexDirection="column" flexShrink={0}>
               <For each={visual().lines}>{(line) => <text fg={palette.accent}>{line}</text>}</For>
               <text fg={palette.accent}>{visual().label}</text>
@@ -336,6 +357,27 @@ function cursorPlaceholder(step: 0 | 1 | 2) {
   if (step === 0) return "project-name"
   if (step === 1) return "/absolute/parent"
   return "What should this project achieve?"
+}
+
+function shortDigest(value: string) {
+  return `${value.slice(0, 19)}…`
+}
+
+function IdentifierRows(props: { label: string; value: string | null; compact: boolean }) {
+  if (!props.value) return <text fg={palette.muted}>{props.label} · none</text>
+  if (!props.compact) return <text fg={palette.muted}>{props.label} · {props.value}</text>
+  return (
+    <box flexDirection="column">
+      <text fg={palette.muted}>{props.label} · {props.value.slice(0, 18)}</text>
+      <text fg={palette.muted}>{props.value.slice(18)}</text>
+    </box>
+  )
+}
+
+function progressLabel(state: AstraProjectCreationProgress["state"]) {
+  if (state === "effect_observed") return "OBSERVED — NOT VERIFIED"
+  if (state === "verifying") return "VERIFYING"
+  return "RUNNING"
 }
 
 function resultLabel(status: AstraProjectCreationResult["status"]) {
