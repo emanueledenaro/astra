@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const sourceURL = "https://models.dev/api.json"
@@ -10,6 +11,10 @@ const maximumSourceBytes = 16 * 1024 * 1024
 const maximumModels = 256
 const retrievalTimeoutMilliseconds = 30_000
 const outputPath = fileURLToPath(new URL("../src/provider-catalog-embedded.ts", import.meta.url))
+const pinnedOfflineSourcePath = fileURLToPath(
+  new URL("../../opencode/test/tool/fixtures/models-api.json", import.meta.url),
+)
+const pinnedOfflineSourceRepositoryPath = "packages/opencode/test/tool/fixtures/models-api.json"
 const modalities = ["text", "audio", "image", "video", "pdf"] as const
 
 type Modality = (typeof modalities)[number]
@@ -17,7 +22,7 @@ type Modality = (typeof modalities)[number]
 const options = parseOptions(process.argv.slice(2))
 
 const source = options.offlineSource
-  ? await readPinnedOfflineSource(options.offlineSource)
+  ? await readPinnedOfflineSource(options.offlineSource, options.check)
   : await fetchOfficialSource()
 const snapshot = projectSource(source.text)
 const generated = render(snapshot, source)
@@ -48,12 +53,17 @@ type Options = Readonly<{ check: boolean; offlineSource: string | null }>
 function parseOptions(arguments_: ReadonlyArray<string>): Options {
   if (arguments_.length === 0) return { check: false, offlineSource: null }
   if (arguments_.length === 1 && arguments_[0] === "--check") return { check: true, offlineSource: null }
+  if (arguments_.length === 2 && arguments_[0] === "--offline-source" && arguments_[1]) {
+    return { check: false, offlineSource: arguments_[1] }
+  }
   if (arguments_.length === 3 && arguments_[0] === "--check" && arguments_[1] === "--offline-source") {
     const offlineSource = arguments_[2]
     if (!offlineSource) throw new Error("Offline source path is missing.")
     return { check: true, offlineSource }
   }
-  throw new Error("Usage: bun run ./script/generate-provider-catalog.ts [--check [--offline-source <pinned-api.json>]]")
+  throw new Error(
+    "Usage: bun run ./script/generate-provider-catalog.ts [--offline-source <api.json> | --check [--offline-source <pinned-api.json>]]",
+  )
 }
 
 async function fetchOfficialSource(): Promise<Source> {
@@ -77,12 +87,14 @@ async function fetchOfficialSource(): Promise<Source> {
   }
 }
 
-async function readPinnedOfflineSource(path: string): Promise<Source> {
+async function readPinnedOfflineSource(path: string, requirePinnedDigest: boolean): Promise<Source> {
+  if (resolve(path) !== pinnedOfflineSourcePath)
+    throw new Error("Offline source path is not the canonical OpenCode fixture.")
   const file = Bun.file(path)
   if (!(await file.exists())) throw new Error("Pinned offline source does not exist.")
   if (file.size > maximumSourceBytes) throw new Error("Models.dev source exceeds the fixed byte limit.")
   const text = await file.text()
-  if (digest(text) !== (await readPinnedSourceDigest())) {
+  if (requirePinnedDigest && digest(text) !== (await readPinnedSourceDigest())) {
     throw new Error("Offline source does not match the committed official source digest.")
   }
   return { text, mediaType: "application/json" }
@@ -214,6 +226,7 @@ export const OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA = {
   retrieval: {
     method: "GET",
     offlineReplay: "--check --offline-source <pinned-api.json>",
+    offlineSource: ${JSON.stringify(pinnedOfflineSourceRepositoryPath)},
     mediaType: ${JSON.stringify(source.mediaType)},
   },
 } as const

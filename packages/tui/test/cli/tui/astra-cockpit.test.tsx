@@ -30,7 +30,11 @@ import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 
 test("renders the parent-owned wide cockpit at 140x34", async () => {
-  const app = await renderCockpit({ width: 140, height: 34, projection: workingProjection() })
+  const app = await renderCockpit({
+    width: 140,
+    height: 34,
+    projection: workingProjection(),
+  })
   try {
     const frame = await app.render.waitForFrame((value) => value.includes("WORK TREE"))
     const context = lineWith(frame, "ASTRA")
@@ -55,7 +59,11 @@ test("renders the parent-owned wide cockpit at 140x34", async () => {
 })
 
 test("keeps a 34-column rail beside chat at 100x26", async () => {
-  const app = await renderCockpit({ width: 100, height: 26, projection: decisionProjection() })
+  const app = await renderCockpit({
+    width: 100,
+    height: 26,
+    projection: decisionProjection(),
+  })
   try {
     const frame = await app.render.waitForFrame((value) => value.includes("DECISION"))
     expect(lineWith(frame, "CONVERSATION")).toContain("CONTROL")
@@ -74,7 +82,11 @@ test("keeps a 34-column rail beside chat at 100x26", async () => {
 })
 
 test("uses chat-only and a full-screen control alternate at 80x24", async () => {
-  const app = await renderCockpit({ width: 80, height: 24, projection: decisionProjection() })
+  const app = await renderCockpit({
+    width: 80,
+    height: 24,
+    projection: decisionProjection(),
+  })
   try {
     const chat = await app.render.waitForFrame((value) => value.includes("CONVERSATION"))
     expect(chat).not.toContain("DECISION")
@@ -92,7 +104,11 @@ test("uses chat-only and a full-screen control alternate at 80x24", async () => 
 })
 
 test("uses the same alternate-view contract when 120x18 is too short", async () => {
-  const app = await renderCockpit({ width: 120, height: 18, projection: workingProjection() })
+  const app = await renderCockpit({
+    width: 120,
+    height: 18,
+    projection: workingProjection(),
+  })
   try {
     const frame = await app.render.waitForFrame((value) => value.includes("CONVERSATION"))
     expect(frame).not.toContain("WORK TREE")
@@ -123,7 +139,11 @@ test("replaces stale control state with STATE UNAVAILABLE after stream loss", as
 })
 
 test("shows reconciliation and exact failed/lost worker state without a success claim", async () => {
-  const app = await renderCockpit({ width: 140, height: 34, projection: reconciliationProjection() })
+  const app = await renderCockpit({
+    width: 140,
+    height: 34,
+    projection: reconciliationProjection(),
+  })
   try {
     const frame = await app.render.waitForFrame((value) => value.includes("RECONCILIATION REQUIRED"))
     expect(frame).toContain("FAILED")
@@ -180,13 +200,19 @@ test("refuses old or ambiguous parent candidate evidence", () => {
   } as const satisfies AstraCandidatePatchDetails
   const oldEvidence = {
     ...projection,
-    evidence: projection.evidence.map((evidence) => ({ ...evidence, label: "candidate-patch:candidate-old" })),
+    evidence: projection.evidence.map((evidence) => ({
+      ...evidence,
+      label: "candidate-patch:candidate-old",
+    })),
   }
   const ambiguousEvidence = {
     ...projection,
     evidence: [
       ...projection.evidence,
-      { ...projection.evidence.at(-1)!, evidenceID: "candidate-evidence-duplicate" },
+      {
+        ...projection.evidence.at(-1)!,
+        evidenceID: "candidate-evidence-duplicate",
+      },
     ],
   }
 
@@ -205,7 +231,12 @@ test("opens only validated parent candidate metadata, keeps chat mounted, and Es
     summary: "Candidate patch",
     files: [{ path: "src/index.ts", change: "modify" }],
   } as const satisfies AstraCandidatePatchDetails
-  const app = await renderCockpit({ width: 140, height: 34, projection, candidatePatchDetails: details })
+  const app = await renderCockpit({
+    width: 140,
+    height: 34,
+    projection,
+    candidatePatchDetails: details,
+  })
   try {
     const chat = await app.render.waitForFrame((value) => value.includes("REVIEW READY"))
     expect(chat).toContain("CONVERSATION")
@@ -259,7 +290,12 @@ test("a dialog blocks Review Mode so an in-progress draft is not displaced", asy
 })
 
 test("reduced motion keeps the working Lynx pose stable", async () => {
-  const app = await renderCockpit({ width: 140, height: 34, projection: workingProjection(), animations: false })
+  const app = await renderCockpit({
+    width: 140,
+    height: 34,
+    projection: workingProjection(),
+    animations: false,
+  })
   try {
     const first = await app.render.waitForFrame((value) => value.includes("Blocked"))
     await Bun.sleep(260)
@@ -284,7 +320,10 @@ async function renderCockpit(options: RenderOptions) {
   const directory = await tmpdir()
   const stateDirectory = path.join(directory.path, "state")
   await mkdir(stateDirectory, { recursive: true })
-  await Bun.write(path.join(stateDirectory, "kv.json"), JSON.stringify({ animations_enabled: options.animations ?? true }))
+  await Bun.write(
+    path.join(stateDirectory, "kv.json"),
+    JSON.stringify({ animations_enabled: options.animations ?? true }),
+  )
   const decisions: Array<Readonly<{ decisionID: string; outcome: "approved" | "rejected" }>> = []
   let dispatch = (_command: string) => undefined
   let catalogCalls = 0
@@ -314,7 +353,14 @@ async function renderCockpit(options: RenderOptions) {
     dispatch = (command) => void keymap.dispatchCommand(command)
     return (
       <TestTuiContexts directory={authority.workspace.root} paths={{ state: stateDirectory }}>
-        <TuiConfigProvider config={createTuiResolvedConfig({ keybinds: { astra_control_toggle: "none", astra_review_toggle: "none" } })}>
+        <TuiConfigProvider
+          config={createTuiResolvedConfig({
+            keybinds: {
+              astra_control_toggle: "none",
+              astra_review_toggle: "none",
+            },
+          })}
+        >
           <KVProvider>
             <ThemeProvider mode="dark">
               <OpencodeKeymapProvider keymap={keymap}>
@@ -336,12 +382,20 @@ async function renderCockpit(options: RenderOptions) {
     )
   }
 
-  const render = await testRender(() => <Harness />, { width: options.width, height: options.height })
+  const render = await testRender(() => <Harness />, {
+    width: options.width,
+    height: options.height,
+  })
   await render.renderOnce()
   await Bun.sleep(25)
   await render.renderOnce()
   if (render.captureCharFrame().includes("TEST ERROR")) throw new Error(render.captureCharFrame())
-  return { render, dispatch: (command: string) => dispatch(command), decisions, catalogCalls: () => catalogCalls }
+  return {
+    render,
+    dispatch: (command: string) => dispatch(command),
+    decisions,
+    catalogCalls: () => catalogCalls,
+  }
 }
 
 function createWorkSessionClient(
@@ -349,12 +403,20 @@ function createWorkSessionClient(
   streamView: AstraWorkSessionView | undefined,
   decisions: Array<Readonly<{ decisionID: string; outcome: "approved" | "rejected" }>>,
 ): AstraWorkSessionClient {
-  const available = { status: "available", projection, cursor: cursorForAstraWorkSessionProjection(projection) } as const
+  const available = {
+    status: "available",
+    projection,
+    cursor: cursorForAstraWorkSessionProjection(projection),
+  } as const
   return {
     snapshot: () => Promise.resolve(available),
     subscribe: async (consumer, options) => {
       await consumer(streamView ?? available)
-      await new Promise<void>((resolve) => options?.signal?.addEventListener("abort", () => resolve(), { once: true }))
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), {
+          once: true,
+        }),
+      )
     },
     decide: async (decisionID, outcome) => {
       decisions.push({ decisionID, outcome })
@@ -380,22 +442,31 @@ function workingProjection() {
     advance(
       advance(
         advance(
-          advance(initialProjection(), { type: "phase.changed", payload: { phase: "analyzing" } }),
+          advance(initialProjection(), {
+            type: "phase.changed",
+            payload: { phase: "analyzing" },
+          }),
           { type: "phase.changed", payload: { phase: "working" } },
         ),
         {
           type: "agent.added",
-          payload: { agent: agent("parent", null, "Lynx coordinator", "working", "Coordinating the task") },
+          payload: {
+            agent: agent("parent", null, "Lynx coordinator", "working", "Coordinating the task"),
+          },
         },
       ),
       {
         type: "agent.added",
-        payload: { agent: agent("tui", "parent", "TUI worker", "failed", "Renderer test failed") },
+        payload: {
+          agent: agent("tui", "parent", "TUI worker", "failed", "Renderer test failed"),
+        },
       },
     ),
     {
       type: "agent.added",
-      payload: { agent: agent("git", "parent", "Git observer", "lost", "Connection lost") },
+      payload: {
+        agent: agent("git", "parent", "Git observer", "lost", "Connection lost"),
+      },
     },
     {
       type: "evidence.recorded",
@@ -473,7 +544,10 @@ function initialProjection() {
     workspaceRoot: authority.workspace.root,
     workspaceIdentity: authority.workspace.identity,
     objective: "Implement the governed change",
-    intent: { summary: "Implement the governed change", next: "Review the parent-owned state" },
+    intent: {
+      summary: "Implement the governed change",
+      next: "Review the parent-owned state",
+    },
     observedAt: "2026-07-20T10:00:00.000Z",
     actor,
   })
@@ -504,7 +578,15 @@ function agent(
   state: "working" | "failed" | "lost",
   activity: string,
 ) {
-  return { agentID, parentAgentID, label, task: label, activity, state, effectAuthority: "none" as const }
+  return {
+    agentID,
+    parentAgentID,
+    label,
+    task: label,
+    activity,
+    state,
+    effectAuthority: "none" as const,
+  }
 }
 
 function lineWith(frame: string, value: string) {
@@ -512,7 +594,12 @@ function lineWith(frame: string, value: string) {
 }
 
 function lastContentLine(frame: string) {
-  return frame.split("\n").filter((line) => line.trim()).at(-1) ?? ""
+  return (
+    frame
+      .split("\n")
+      .filter((line) => line.trim())
+      .at(-1) ?? ""
+  )
 }
 
 const actor = { kind: "system", actorID: "astra-parent" } as const
@@ -531,7 +618,11 @@ const authority = {
     securityDigest: digest,
   },
   repositoryBaseline: {
-    head: { kind: "symbolic", symbolicRef: "refs/heads/astra-cockpit", oid: "a".repeat(40) },
+    head: {
+      kind: "symbolic",
+      symbolicRef: "refs/heads/astra-cockpit",
+      oid: "a".repeat(40),
+    },
     snapshotDigest: baselineDigest,
   },
 } as unknown as AstraSessionAuthority
@@ -541,8 +632,27 @@ const catalogResult = {
   requestId: "10000000-0000-4000-8000-000000000001",
   status: "available",
   catalog: {
-    providerID: "anthropic",
-    providerName: "Anthropic",
-    models: [{ id: "claude-sonnet", name: "Claude Sonnet", limits: { context: 200_000, output: 8_192 } }],
+    providers: [
+      {
+        providerID: "anthropic",
+        providerName: "Anthropic",
+        assurance: "CERTIFIED",
+        dispatchable: true,
+        credentialProfiles: ["anthropic-api-key"],
+        models: [
+          {
+            id: "claude-sonnet",
+            name: "Claude Sonnet",
+            limits: { context: 200_000, output: 8_192 },
+          },
+        ],
+      },
+    ],
+  },
+  transcript: {
+    turns: [],
+    historyDigest: `sha256:${"0".repeat(64)}`,
+    totalBytes: 0,
+    retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
   },
 } as const

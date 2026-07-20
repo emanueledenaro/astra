@@ -8,13 +8,14 @@ import {
   providerSkillInstructionAssuranceLabel,
   providerSkillInstructionTrustLabel,
   type ProviderControlCatalog,
+  type ProviderConversationTranscript,
   type ProviderTurnSkillContext,
   type ProviderTurnDecisionResult,
   type ProviderTurnPrepareResult,
   type ProviderTurnPreview,
   type ProviderTurnProgress,
 } from "@astra/domain/provider-control"
-import type { AstraProviderConversationTurn } from "@astra/domain/work-session"
+import type { AstraProviderConversation, AstraProviderConversationTurn } from "@astra/domain/work-session"
 import {
   anthropicOneTurnMaximumConversationBytes,
   anthropicOneTurnMaximumConversationTurns,
@@ -25,8 +26,12 @@ import {
   type AnthropicCatalogAuthority,
   type AnthropicConversationTurn,
   type AnthropicOneTurnRequest,
-  type ValidatedAnthropicModelCatalog,
 } from "@astra/runtime/anthropic-one-turn"
+import {
+  buildOpenAIResponsesOneTurnRequest,
+  parseOpenAIResponsesOneTurnResponse,
+  type OpenAIResponsesOneTurnRequest,
+} from "@astra/runtime/openai-responses-one-turn"
 import {
   providerTurnPublicDnsPolicyDigest,
   providerTurnResolverImplementationDigest,
@@ -34,7 +39,10 @@ import {
 } from "@astra/runtime/provider-turn-network-policy"
 import type { DurableProviderTurnResult, ExecuteProviderTurnInput } from "@astra/runtime/provider-turn-coordinator"
 import { makeProviderTurnOperationFacts } from "@astra/runtime/provider-turn-operation-facts"
-import { resolveCertifiedProviderAdapter } from "@astra/runtime/provider-adapter-registry"
+import {
+  resolveCertifiedProviderAdapter,
+  type CertifiedProviderAdapter,
+} from "@astra/runtime/provider-adapter-registry"
 import {
   executeProviderTurnWithTrustedObservedTransport,
   type TrustedObservedProviderCompletion,
@@ -55,7 +63,6 @@ const maximumPreparedOperations = 16
 const requestTimeoutMilliseconds = 30_000
 const maximumResponseBytes = 1_048_576
 const maxTokens = 1_024
-const anthropicProviderAdapter = requireAnthropicProviderAdapter()
 
 type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }>
 type StripEnvelope<Input> = Input extends unknown ? Omit<Input, "schemaVersion" | "requestId"> : never
@@ -67,7 +74,9 @@ type PendingTurn = Readonly<{
   proposalID: string
   operationID: string
   facts: ExecuteProviderTurnInput
-  request: AnthropicOneTurnRequest
+  request: ProviderWireRequest
+  adapter: CertifiedProviderAdapter
+  parseResponse: (response: TrustedObservedProviderRawResponse) => TrustedObservedProviderCompletion
   grant: ProviderCredentialGrant
   preview: ProviderTurnPreview
   skillBundle: TrustedPromptSkillBundle | null
@@ -75,14 +84,24 @@ type PendingTurn = Readonly<{
   priorHistoryDigest: `sha256:${string}`
 }>
 
+type ProviderWireRequest = AnthropicOneTurnRequest | OpenAIResponsesOneTurnRequest
+
 export type AstraProviderControl = Readonly<{
-  catalog: () =>
-    | Readonly<{ status: "available"; catalog: ProviderControlCatalog }>
+  catalog: () => Promise<
+    | Readonly<{
+        status: "available"
+        catalog: ProviderControlCatalog
+        transcript: ProviderConversationTranscript
+      }>
     | Readonly<{
         status: "unavailable"
         reason: "catalog_unavailable"
       }>
-  prepare: (modelID: string, userText: string) => Promise<PublicPrepareResult>
+  >
+  prepare: {
+    (modelID: string, userText: string): Promise<PublicPrepareResult>
+    (providerID: string, credentialProfile: string, modelID: string, userText: string): Promise<PublicPrepareResult>
+  }
   decide: (
     proposalID: string,
     decision: "approve" | "reject",
@@ -101,7 +120,7 @@ export type AstraProviderControlDependencies = Readonly<{
   randomUUID?: () => string
 }>
 
-/** Parent-only owner for one consent-bound Anthropic proposal backed by durable history. */
+/** Parent-only owner for one consent-bound certified provider proposal backed by durable history. */
 export function createAstraProviderControl(
   session: OpenedWorkspace,
   sessionID: string,
@@ -118,19 +137,57 @@ export function createAstraProviderControl(
   let prepared = 0
   let deciding = false
 
-  const catalog = () => {
+  const catalog = async () => {
     const result = dependencies.readCatalog()
-    if (!result.ok) return { status: "unavailable" as const, reason: "catalog_unavailable" as const }
-    return { status: "available" as const, catalog: publicCatalog(result.catalog) }
+    if (!result.ok)
+      return {
+        status: "unavailable" as const,
+        reason: "catalog_unavailable" as const,
+      }
+    const conversation = await dependencies.conversationHistory.load().catch(() => null)
+    if (!conversation)
+      return {
+        status: "unavailable" as const,
+        reason: "catalog_unavailable" as const,
+      }
+    return {
+      status: "available" as const,
+      catalog: publicCatalog(result.catalog),
+      transcript: publicTranscript(conversation),
+    }
   }
 
-  const prepare = async (modelID: string, userText: string): Promise<PublicPrepareResult> => {
+  async function prepare(modelID: string, userText: string): Promise<PublicPrepareResult>
+  async function prepare(
+    providerID: string,
+    credentialProfile: string,
+    modelID: string,
+    userText: string,
+  ): Promise<PublicPrepareResult>
+  async function prepare(
+    providerIDOrModelID: string,
+    credentialProfileOrUserText: string,
+    selectedModelID?: string,
+    selectedUserText?: string,
+  ): Promise<PublicPrepareResult> {
+    const legacyAnthropic = selectedModelID === undefined && selectedUserText === undefined
+    const providerID = legacyAnthropic ? "anthropic" : providerIDOrModelID
+    const credentialProfile = legacyAnthropic ? "anthropic-api-key" : credentialProfileOrUserText
+    const modelID = legacyAnthropic ? providerIDOrModelID : selectedModelID!
+    const userText = legacyAnthropic ? credentialProfileOrUserText : selectedUserText!
     if (session.mode !== "activate-once") return blockedPrepare("read_only")
     if (deciding || pending) return blockedPrepare("control_busy")
     if (prepared >= maximumPreparedOperations) return blockedPrepare("control_limit_reached")
     const result = dependencies.readCatalog()
     if (!result.ok) return blockedPrepare("catalog_unavailable")
-    if (!result.catalog.models.some((model) => model.id === modelID)) return blockedPrepare("model_rejected")
+    const provider = result.catalog.providers.find((candidate) => candidate.providerID === providerID)
+    if (!provider?.dispatchable || provider.assurance !== "CERTIFIED") return blockedPrepare("provider_rejected")
+    if (!provider.credentialProfiles.some((profile) => profile === credentialProfile)) {
+      return blockedPrepare("credential_profile_rejected")
+    }
+    if (!provider.models.some((model) => model.id === modelID)) return blockedPrepare("model_rejected")
+    const adapter = resolveCertifiedProviderAdapter(providerID, credentialProfile)
+    if (!adapter) return blockedPrepare("provider_rejected")
     const durableConversation = await dependencies.conversationHistory.load().catch(() => null)
     if (!durableConversation) return blockedPrepare("control_unavailable")
     const conversation: ReadonlyArray<AnthropicConversationTurn> = durableConversation.turns.map((turn) => ({
@@ -145,7 +202,6 @@ export function createAstraProviderControl(
       return blockedPrepare("conversation_limit_reached")
     }
 
-    const validatedCatalog = validatedModelCatalog(catalogAuthority, result)
     const skill = await takeAvailableSkill(dependencies.skillBundleSource, availableSkill)
     if (skill.status === "blocked") return blockedPrepare("skill_context_unavailable")
     if (skill.status === "taken") availableSkill = skill.bundle
@@ -154,10 +210,18 @@ export function createAstraProviderControl(
       availableSkill = undefined
       return blockedPrepare("skill_context_unavailable")
     }
-    const request = buildRequest(catalogAuthority, validatedCatalog, modelID, userText, skillBundle, [...conversation])
-    if (!request) return blockedPrepare("input_rejected")
-    const credential = await dependencies.credentialBroker.issueForSession(sessionID)
+    if (skillBundle && providerID !== "anthropic") return blockedPrepare("skill_context_unavailable")
+    const preparedRequest = buildRequest(adapter, catalogAuthority, result, modelID, userText, skillBundle, [
+      ...conversation,
+    ])
+    if (!preparedRequest) return blockedPrepare("input_rejected")
+    const credential = await dependencies.credentialBroker.issueForSession(sessionID, { providerID, credentialProfile })
     if (!credential.ok) return blockedPrepare("credential_unavailable")
+    if (!grantMatchesAdapter(credential.grant, adapter)) {
+      revokeCredential(dependencies.credentialBroker, credential.grant)
+      return blockedPrepare("credential_unavailable")
+    }
+    const request = preparedRequest.request
 
     try {
       const proposalID = uuid()
@@ -171,12 +235,13 @@ export function createAstraProviderControl(
         operationID,
         uuid(),
         modelID,
+        adapter,
         durableConversation.historyDigest,
         createdAt,
       )
       const skillContext = skillBundle ? publicSkillContext(skillBundle) : null
       const contextBindingDigest = skillContext ? computeProviderSkillContextBindingDigest(skillContext) : null
-      if (request.evidence.skillContextBindingDigest !== contextBindingDigest) {
+      if (preparedRequest.contextBindingDigest !== contextBindingDigest) {
         revokeCredential(dependencies.credentialBroker, credential.grant)
         return blockedPrepare("input_rejected")
       }
@@ -184,8 +249,13 @@ export function createAstraProviderControl(
       const preview: ProviderTurnPreview = Object.freeze({
         proposalID,
         operationID,
-        providerID: "anthropic",
+        providerID: adapter.providerID,
         modelID,
+        adapter: {
+          adapterID: adapter.adapterID,
+          adapterDigest: adapter.adapterDigest,
+          assurance: "CERTIFIED" as const,
+        },
         destination: request.destination,
         logicalPayload: {
           digest: request.evidence.requestDigest,
@@ -202,8 +272,9 @@ export function createAstraProviderControl(
         skillContext,
         headerNames: [...facts.plan.wireRequest.headerNames],
         credential: {
+          profile: adapter.credentialProfile,
           accountFingerprint: credential.grant.accountFingerprint,
-          headerName: "x-api-key" as const,
+          headerName: adapter.credential.headerName,
         },
         expiresAt: new Date(credential.grant.expiresAt).toISOString(),
         hostBoundaryLabel: providerHostExecutionBoundaryLabel,
@@ -215,6 +286,8 @@ export function createAstraProviderControl(
         operationID,
         facts,
         request,
+        adapter,
+        parseResponse: preparedRequest.parseResponse,
         grant: credential.grant,
         preview,
         skillBundle,
@@ -263,9 +336,14 @@ export function createAstraProviderControl(
             sessionID: proposal.grant.sessionID,
           })
           if (!credential.ok) throw new Error("Parent provider credential is unavailable")
+          if (!transportCredentialMatchesAdapter(credential.credential, proposal.grant, proposal.adapter)) {
+            throw new Error("Parent provider credential binding changed")
+          }
           return {
             body: proposal.request.privateWireBody,
-            headers: proposal.request.headers,
+            headers: [...proposal.request.headers, ...(credential.credential.additionalHeaders ?? [])].toSorted(
+              ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
+            ),
             credential: {
               handle: proposal.grant.credentialHandle,
               accountFingerprint: credential.credential.accountFingerprint,
@@ -274,7 +352,7 @@ export function createAstraProviderControl(
           } satisfies TrustedProviderWireValues
         },
         (response) => {
-          const parsed = parseTrustedResponse(response)
+          const parsed = proposal.parseResponse(response)
           responseObserved = true
           progress("response_observed_not_verified")
           return parsed
@@ -301,11 +379,11 @@ export function createAstraProviderControl(
           receiptID: result.receiptID,
           providerID: proposal.facts.plan.providerID,
           modelID: proposal.facts.plan.modelID,
-          adapterDigest: providerHistoryDigest(anthropicProviderAdapter.adapterDigest),
-          credentialProfile: "anthropic-api-key",
+          adapterDigest: providerHistoryDigest(proposal.adapter.adapterDigest),
+          credentialProfile: proposal.adapter.credentialProfile,
           accountFingerprint: providerHistoryDigest(proposal.grant.accountFingerprint),
           destination: proposal.request.destination,
-          contextDigest: proposal.request.evidence.skillContextBindingDigest ?? fixedProviderContextDigest,
+          contextDigest: preparedContextDigest(proposal.request) ?? fixedProviderContextDigest,
           requestBodyDigest: proposal.request.evidence.requestDigest,
           requestBytes: proposal.request.evidence.requestBytes,
           workspaceBaselineDigest: providerHistoryDigest(operation.baselineTrustDigest),
@@ -368,52 +446,120 @@ function isProviderHistoryDigest(input: string): input is `sha256:${string}` {
 }
 
 function revokeCredential(broker: ParentProviderCredentialBroker, grant: ProviderCredentialGrant) {
-  broker.revoke({ credentialHandle: grant.credentialHandle, sessionID: grant.sessionID })
+  broker.revoke({
+    credentialHandle: grant.credentialHandle,
+    sessionID: grant.sessionID,
+  })
+}
+
+function grantMatchesAdapter(grant: ProviderCredentialGrant, adapter: CertifiedProviderAdapter) {
+  const profile =
+    grant.credentialProfile ??
+    (grant.providerID === "anthropic" && grant.headerName === "x-api-key" ? "anthropic-api-key" : null)
+  if (
+    grant.providerID !== adapter.providerID ||
+    profile !== adapter.credentialProfile ||
+    grant.headerName !== adapter.credential.headerName
+  ) {
+    return false
+  }
+  if (adapter.providerID === "anthropic") return (grant.additionalHeaderNames ?? []).length === 0
+  if (!grant.additionalHeaderNames) return false
+  const allowed = adapter.credential.accountHeaderName ? [adapter.credential.accountHeaderName] : []
+  return (
+    grant.additionalHeaderNames.every((name) => (allowed as ReadonlyArray<string>).includes(name)) &&
+    new Set(grant.additionalHeaderNames).size === grant.additionalHeaderNames.length
+  )
+}
+
+function transportCredentialMatchesAdapter(
+  credential: Extract<ReturnType<ParentProviderCredentialBroker["takeForParentTransport"]>, { ok: true }>["credential"],
+  grant: ProviderCredentialGrant,
+  adapter: CertifiedProviderAdapter,
+) {
+  const profile =
+    credential.credentialProfile ??
+    (credential.providerID === "anthropic" && credential.headerName === "x-api-key" ? "anthropic-api-key" : null)
+  const names = (credential.additionalHeaders ?? []).map(([name]) => name)
+  return (
+    credential.providerID === adapter.providerID &&
+    profile === adapter.credentialProfile &&
+    credential.headerName === adapter.credential.headerName &&
+    credential.accountFingerprint === grant.accountFingerprint &&
+    names.length === (grant.additionalHeaderNames ?? []).length &&
+    names.every((name, index) => name === grant.additionalHeaderNames?.[index])
+  )
+}
+
+function preparedContextDigest(request: ProviderWireRequest) {
+  return "skillContextBindingDigest" in request.evidence ? request.evidence.skillContextBindingDigest : null
 }
 
 function validatedModelCatalog(
   authority: AnthropicCatalogAuthority,
   result: Extract<ProviderCatalogResult, { ok: true }>,
 ) {
-  const catalog = publicCatalog(result.catalog)
+  const catalog = result.catalog.providers.find((provider) => provider.providerID === "anthropic")
+  if (!catalog) throw new Error("The certified Anthropic catalog is unavailable")
   return sealValidatedAnthropicModelCatalog(authority, {
     modelIDs: catalog.models.map((model) => model.id),
-    validationSourceDigest: result.catalog.provenance.providerContentDigest,
+    validationSourceDigest: catalog.provenance.providerContentDigest,
   })
 }
 
 function buildRequest(
+  adapter: CertifiedProviderAdapter,
   authority: AnthropicCatalogAuthority,
-  catalog: ValidatedAnthropicModelCatalog,
+  catalogResult: Extract<ProviderCatalogResult, { ok: true }>,
   modelID: string,
   userText: string,
   skillBundle: TrustedPromptSkillBundle | null,
   conversationTurns: ReadonlyArray<AnthropicConversationTurn>,
 ) {
   try {
-    return buildAnthropicOneTurnRequest({
-      catalogAuthority: authority,
-      catalog,
+    if (adapter.providerID === "anthropic") {
+      const catalog = validatedModelCatalog(authority, catalogResult)
+      const request = buildAnthropicOneTurnRequest({
+        catalogAuthority: authority,
+        catalog,
+        modelID,
+        userText,
+        maxTokens,
+        conversationTurns,
+        ...(skillBundle
+          ? {
+              skillContext: {
+                activationOperationID: skillBundle.operationID,
+                activationCapabilityDigest: skillBundle.capabilityDigest,
+                name: skillBundle.skill.name,
+                provenance: skillBundle.source.provenance,
+                instructions: skillBundle.skill.instructions,
+                instructionsDigest: skillBundle.source.instructionsDigest,
+                trust: skillBundle.skill.trust,
+                resourceDiscovery: skillBundle.skill.resourceDiscovery,
+                assurance: skillBundle.assurance,
+              },
+            }
+          : {}),
+      })
+      return {
+        request,
+        contextBindingDigest: request.evidence.skillContextBindingDigest,
+        parseResponse: parseAnthropicOneTurnResponse,
+      }
+    }
+    const request = buildOpenAIResponsesOneTurnRequest({
+      adapter,
       modelID,
       userText,
-      maxTokens,
+      maxOutputTokens: maxTokens,
       conversationTurns,
-      ...(skillBundle
-        ? {
-            skillContext: {
-              activationOperationID: skillBundle.operationID,
-              activationCapabilityDigest: skillBundle.capabilityDigest,
-              name: skillBundle.skill.name,
-              provenance: skillBundle.source.provenance,
-              instructions: skillBundle.skill.instructions,
-              instructionsDigest: skillBundle.source.instructionsDigest,
-              trust: skillBundle.skill.trust,
-              resourceDiscovery: skillBundle.skill.resourceDiscovery,
-              assurance: skillBundle.assurance,
-            },
-          }
-        : {}),
     })
+    return {
+      request,
+      contextBindingDigest: null,
+      parseResponse: parseOpenAIResponsesOneTurnResponse,
+    }
   } catch {
     return undefined
   }
@@ -422,11 +568,12 @@ function buildRequest(
 function operationFacts(
   session: OpenedWorkspace,
   state: Readonly<{ ledgerFilename: string; spoolFilename: string }>,
-  request: AnthropicOneTurnRequest,
+  request: ProviderWireRequest,
   grant: ProviderCredentialGrant,
   operationID: string,
   messageID: string,
   modelID: string,
+  adapter: CertifiedProviderAdapter,
   historyDigest: `sha256:${string}`,
   createdAt: string,
 ): ExecuteProviderTurnInput {
@@ -438,25 +585,25 @@ function operationFacts(
       workspaceRoot: session.report.root,
       sessionID: grant.sessionID,
       messageID,
-      providerID: "anthropic",
+      providerID: adapter.providerID,
       modelID,
       variant: null,
       adapter: {
-        adapterID: anthropicProviderAdapter.adapterID,
-        adapterDigest: anthropicProviderAdapter.adapterDigest,
+        adapterID: adapter.adapterID,
+        adapterDigest: adapter.adapterDigest,
       },
       origin: request.destination.origin,
       transportPolicy: "https_only",
       networkPolicy: {
         mode: "https_public_pinned",
-        hostname: "api.anthropic.com",
-        port: 443,
+        hostname: new URL(request.destination.origin).hostname,
+        port: Number(new URL(request.destination.origin).port || 443),
         dnsPolicyDigest: providerTurnPublicDnsPolicyDigest,
         resolverImplementationDigest: providerTurnResolverImplementationDigest,
         transportImplementationDigest: providerTurnTransportImplementationDigest,
       },
       credential: {
-        profile: anthropicProviderAdapter.credentialProfile,
+        profile: adapter.credentialProfile,
         handle: grant.credentialHandle,
         accountFingerprint: grant.accountFingerprint,
         headerName: grant.headerName,
@@ -464,14 +611,18 @@ function operationFacts(
       wireRequest: {
         method: "POST",
         path: request.destination.path,
-        headerNames: ["anthropic-version", "content-type", "x-api-key"],
+        headerNames: [
+          ...request.headers.map(([name]) => name),
+          ...(grant.additionalHeaderNames ?? []),
+          grant.headerName,
+        ].toSorted(),
         timeoutMilliseconds: requestTimeoutMilliseconds,
         maximumResponseBytes,
       },
       logicalPayload: {
         digest: request.evidence.requestDigest,
         bytes: request.evidence.requestBytes,
-        contextBindingDigest: request.evidence.skillContextBindingDigest,
+        contextBindingDigest: preparedContextDigest(request),
         historyDigest,
       },
       executionBoundary: "network_egress_host_no_sandbox",
@@ -482,16 +633,6 @@ function operationFacts(
     policyAskedAt: createdAt,
     recordingStartedAt: createdAt,
   }
-}
-
-function requireAnthropicProviderAdapter() {
-  const adapter = resolveCertifiedProviderAdapter("anthropic", "anthropic-api-key")
-  if (!adapter) throw new Error("The certified Anthropic adapter is unavailable")
-  return adapter
-}
-
-function parseTrustedResponse(response: TrustedObservedProviderRawResponse): TrustedObservedProviderCompletion {
-  return parseAnthropicOneTurnResponse(response)
 }
 
 function mapDecisionResult(proposal: PendingTurn, result: DurableProviderTurnResult): PublicDecisionResult {
@@ -537,16 +678,20 @@ function previewMatches(
   return (
     runtime.workspace.canonicalPath === proposal.facts.report.root &&
     runtime.session.sessionID === proposal.grant.sessionID &&
-    runtime.provider.providerID === "anthropic" &&
+    runtime.provider.providerID === proposal.adapter.providerID &&
     runtime.provider.modelID === proposal.preview.modelID &&
+    runtime.provider.adapterID === proposal.preview.adapter.adapterID &&
+    runtime.provider.adapterDigest === proposal.preview.adapter.adapterDigest &&
     runtime.provider.origin === proposal.preview.destination.origin &&
     runtime.wireRequest.path === proposal.preview.destination.path &&
     runtime.logicalPayload.digest === proposal.preview.logicalPayload.digest &&
     runtime.logicalPayload.bytes === proposal.preview.logicalPayload.bytes &&
     runtime.logicalPayload.contextBindingDigest === proposal.preview.logicalPayload.contextBindingDigest &&
+    runtime.logicalPayload.historyDigest === proposal.preview.conversation.historyDigest &&
     proposal.preview.logicalPayload.contextBindingDigest === expectedContextBinding &&
-    proposal.request.evidence.skillContextBindingDigest === expectedContextBinding &&
+    preparedContextDigest(proposal.request) === expectedContextBinding &&
     facts.capabilityDigest === proposal.preview.providerCapabilityDigest &&
+    runtime.credential.profile === proposal.preview.credential.profile &&
     runtime.credential.accountFingerprint === proposal.preview.credential.accountFingerprint
   )
 }
@@ -588,14 +733,39 @@ function publicSkillContext(bundle: TrustedPromptSkillBundle): ProviderTurnSkill
 
 function publicCatalog(input: Extract<ProviderCatalogResult, { ok: true }>["catalog"]): ProviderControlCatalog {
   return {
-    providerID: "anthropic",
-    providerName: input.providerName,
-    models: input.models.map((model) => ({
-      id: model.id,
-      name: model.name,
-      limits: { ...model.limits },
+    providers: input.providers.map((provider) => ({
+      providerID: provider.providerID,
+      providerName: provider.providerName,
+      assurance: provider.assurance,
+      dispatchable: provider.dispatchable,
+      credentialProfiles: [...provider.credentialProfiles],
+      models: provider.models.map((model) => ({
+        id: model.id,
+        name: model.name,
+        limits: { ...model.limits },
+      })),
     })),
   }
+}
+
+function publicTranscript(input: AstraProviderConversation): ProviderConversationTranscript {
+  return Object.freeze({
+    turns: Object.freeze(
+      input.turns.map((turn) =>
+        Object.freeze({
+          providerID: turn.providerID,
+          modelID: turn.modelID,
+          userText: turn.userText,
+          assistantText: turn.assistantText,
+          finishReason: turn.finishReason,
+          assurance: "observed_not_verified" as const,
+        }),
+      ),
+    ),
+    historyDigest: input.historyDigest,
+    totalBytes: input.totalBytes,
+    retention: providerConversationRetentionLabel,
+  })
 }
 
 function blockedPrepare(reason: Extract<PublicPrepareResult, { status: "blocked" }>["reason"]): PublicPrepareResult {

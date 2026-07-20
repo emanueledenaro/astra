@@ -16,23 +16,30 @@ describe("Astra provider catalog", () => {
     const snapshot = makeSnapshot({ "claude-text": textModel })
     const result = await readBuiltCatalog(JSON.stringify(snapshot), JSON.stringify(metadataFor(snapshot)))
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       ok: true,
       catalog: {
-        providerID: "anthropic",
-        providerName: "Anthropic",
-        models: [
-          {
-            id: "claude-text",
-            name: "Claude Text",
-            limits: { context: 200_000, input: 190_000, output: 10_000 },
-          },
-        ],
-        provenance: {
-          sourceURL: "https://models.dev/api.json",
-          sourceContentDigest: `sha256:${"1".repeat(64)}`,
-          providerContentDigest: digest(JSON.stringify(snapshot.anthropic)),
+        providers: [{ providerID: "anthropic" }, { providerID: "openai" }],
+      },
+    })
+    if (!result.ok) return
+    expect(anthropicProvider(result)).toEqual({
+      providerID: "anthropic",
+      providerName: "Anthropic",
+      assurance: "CERTIFIED",
+      dispatchable: true,
+      credentialProfiles: ["anthropic-api-key"],
+      models: [
+        {
+          id: "claude-text",
+          name: "Claude Text",
+          limits: { context: 200_000, input: 190_000, output: 10_000 },
         },
+      ],
+      provenance: {
+        sourceURL: "https://models.dev/api.json",
+        sourceContentDigest: `sha256:${"1".repeat(64)}`,
+        providerContentDigest: digest(JSON.stringify(snapshot.anthropic)),
       },
     })
   })
@@ -42,21 +49,18 @@ describe("Astra provider catalog", () => {
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.catalog.providerID).toBe("anthropic")
-    expect(result.catalog.providerName).toBe("Anthropic")
-    expect(result.catalog.models.length).toBeGreaterThan(0)
-    expect(result.catalog.models.every((model) => model.id.startsWith("claude-"))).toBe(true)
-    expect(new Set(result.catalog.models.map((model) => model.id)).size).toBe(result.catalog.models.length)
-    expect(result.catalog.models.map((model) => model.id)).toEqual(
-      result.catalog.models.map((model) => model.id).sort(compareCodeUnits),
+    const provider = anthropicProvider(result)
+    expect(provider.providerID).toBe("anthropic")
+    expect(provider.providerName).toBe("Anthropic")
+    expect(provider.models.length).toBeGreaterThan(0)
+    expect(provider.models.every((model) => model.id.startsWith("claude-"))).toBe(true)
+    expect(new Set(provider.models.map((model) => model.id)).size).toBe(provider.models.length)
+    expect(provider.models.map((model) => model.id)).toEqual(
+      provider.models.map((model) => model.id).sort(compareCodeUnits),
     )
-    expect(result.catalog.provenance.sourceURL).toBe("https://models.dev/api.json")
-    expect(result.catalog.provenance.sourceContentDigest).toBe(
-      OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA.sourceContentDigest,
-    )
-    expect(result.catalog.provenance.providerContentDigest).toBe(
-      OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA.providerContentDigest,
-    )
+    expect(provider.provenance.sourceURL).toBe("https://models.dev/api.json")
+    expect(provider.provenance.sourceContentDigest).toBe(OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA.sourceContentDigest)
+    expect(provider.provenance.providerContentDigest).toBe(OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA.providerContentDigest)
   })
 
   test("fails closed when a build has no embedded snapshot or metadata", async () => {
@@ -69,7 +73,10 @@ describe("Astra provider catalog", () => {
   test("rejects snapshot tampering when the provider digest is stale", async () => {
     const original = makeSnapshot({ "claude-text": textModel })
     const tampered = makeSnapshot({
-      "claude-text": { ...textModel, limit: { ...textModel.limit, output: 99_999 } },
+      "claude-text": {
+        ...textModel,
+        limit: { ...textModel.limit, output: 99_999 },
+      },
     })
     const result = await readBuiltCatalog(JSON.stringify(tampered), JSON.stringify(metadataFor(original)))
 
@@ -78,8 +85,12 @@ describe("Astra provider catalog", () => {
 
   test("rejects non-canonical API fields, adapters, models, and ordering", async () => {
     const snapshot = makeSnapshot({ "claude-text": textModel })
-    const api = { anthropic: { ...snapshot.anthropic, api: "https://proxy.invalid" } }
-    const npm = { anthropic: { ...snapshot.anthropic, npm: "@hostile/adapter" } }
+    const api = {
+      anthropic: { ...snapshot.anthropic, api: "https://proxy.invalid" },
+    }
+    const npm = {
+      anthropic: { ...snapshot.anthropic, npm: "@hostile/adapter" },
+    }
     const audio = makeSnapshot({
       "claude-audio": {
         id: "claude-audio",
@@ -136,11 +147,13 @@ describe("Astra provider catalog", () => {
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
+    const provider = anthropicProvider(result)
     expect(Object.isFrozen(result.catalog)).toBe(true)
-    expect(Object.isFrozen(result.catalog.models)).toBe(true)
-    expect(Object.isFrozen(result.catalog.models[0])).toBe(true)
-    expect(Object.isFrozen(result.catalog.models[0]?.limits)).toBe(true)
-    expect(Object.isFrozen(result.catalog.provenance)).toBe(true)
+    expect(Object.isFrozen(result.catalog.providers)).toBe(true)
+    expect(Object.isFrozen(provider.models)).toBe(true)
+    expect(Object.isFrozen(provider.models[0])).toBe(true)
+    expect(Object.isFrozen(provider.models[0]?.limits)).toBe(true)
+    expect(Object.isFrozen(provider.provenance)).toBe(true)
   })
 })
 
@@ -164,6 +177,7 @@ function metadataFor(snapshot: Readonly<{ anthropic: unknown }>) {
     retrieval: {
       method: "GET",
       offlineReplay: "--check --offline-source <pinned-api.json>",
+      offlineSource: "packages/opencode/test/tool/fixtures/models-api.json",
       mediaType: "application/json",
     },
   } as const
@@ -199,15 +213,21 @@ async function readBuiltCatalog(snapshotExpression: string, metadataExpression: 
   }
 }
 
-function isProviderCatalogModule(
-  input: unknown,
-): input is Readonly<{ readAstraProviderCatalog: () => ProviderCatalogResult }> {
+function isProviderCatalogModule(input: unknown): input is Readonly<{
+  readAstraProviderCatalog: () => ProviderCatalogResult
+}> {
   return (
     typeof input === "object" &&
     input !== null &&
     "readAstraProviderCatalog" in input &&
     typeof input.readAstraProviderCatalog === "function"
   )
+}
+
+function anthropicProvider(result: Extract<ProviderCatalogResult, { ok: true }>) {
+  const provider = result.catalog.providers.find((candidate) => candidate.providerID === "anthropic")
+  if (!provider) throw new Error("Anthropic test provider is missing")
+  return provider
 }
 
 function compareCodeUnits(left: string, right: string) {

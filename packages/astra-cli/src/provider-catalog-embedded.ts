@@ -5,11 +5,12 @@
 export const OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA = {
   schemaVersion: 1,
   sourceURL: "https://models.dev/api.json",
-  sourceContentDigest: "sha256:e38484e40478b751cf89099c336ef05fcab66d4313cf47865d639855c6f277ec",
+  sourceContentDigest: "sha256:876afae217cdff37c7267ba757d4d375a64eb52cdb2caa24c7f027b5142e3265",
   providerContentDigest: "sha256:32d00a9c66d3c5928053ad6208cd0e94a86e899600549d91dd3ae60dbf3925d0",
   retrieval: {
     method: "GET",
     offlineReplay: "--check --offline-source <pinned-api.json>",
+    offlineSource: "packages/opencode/test/tool/fixtures/models-api.json",
     mediaType: "application/json",
   },
 } as const

@@ -6,18 +6,24 @@ import { Auth } from "@/auth"
 const runtime = ManagedRuntime.make(AppNodeBuilder.build(Auth.node), { memoMap })
 
 /**
- * Reads only the existing OpenCode Anthropic Auth record. The caller receives
+ * Reads only an existing certified OpenCode provider Auth record. The caller receives
  * the decoded record inside the parent process; this module never initializes
  * providers, plugins, sessions, skills, MCP, or workspace configuration.
  */
-export function createAstraAnthropicAuthReader() {
+export function createAstraProviderAuthReader() {
   return Object.freeze({
-    get(providerID: "anthropic", signal: AbortSignal) {
-      if (providerID !== "anthropic") return Promise.resolve(undefined)
-      return runtime.runPromise(Auth.Service.use((auth) => auth.get(providerID)), { signal })
+    get(providerID: "anthropic" | "openai", signal: AbortSignal) {
+      if (providerID !== "anthropic" && providerID !== "openai") return Promise.resolve(undefined)
+      return runtime.runPromise(
+        Auth.Service.use((auth) => auth.get(providerID)),
+        { signal },
+      )
     },
     close() {
       return runtime.dispose()
     },
   })
 }
+
+/** Compatibility alias for the first Anthropic-only parent integration. */
+export const createAstraAnthropicAuthReader = createAstraProviderAuthReader

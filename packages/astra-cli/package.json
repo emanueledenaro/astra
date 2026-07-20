@@ -14,9 +14,10 @@
     "./terminal": "./src/terminal.ts"
   },
   "scripts": {
-    "check:provider-catalog": "bun run ./script/generate-provider-catalog.ts --check",
+    "check:provider-catalog": "bun run ./script/generate-provider-catalog.ts --check --offline-source ../opencode/test/tool/fixtures/models-api.json",
     "demo": "bun run ./src/index.ts open",
     "generate:provider-catalog": "bun run ./script/generate-provider-catalog.ts",
+    "refresh:provider-catalog:offline": "bun run ./script/generate-provider-catalog.ts --offline-source ../opencode/test/tool/fixtures/models-api.json",
     "start": "bun run ./src/index.ts",
     "test": "bun test",
     "typecheck": "tsgo --noEmit",

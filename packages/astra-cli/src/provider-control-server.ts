@@ -14,7 +14,6 @@ import type { AstraProviderControl } from "./provider-control"
 const maximumRequestsPerSession = 64
 const requestTimeoutMilliseconds = 35_000
 const socketFilename = "provider.sock"
-const tokenPattern = /^[A-Za-z0-9_-]{43}$/u
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
 export type AstraProviderControlServer = Readonly<{
@@ -61,7 +60,16 @@ export async function startAstraProviderControlServer(
           return
         }
         socket.setTimeout(0)
-        if (!(await write(socket, encode({ schemaVersion: 1, type: "accepted", requestId: request.requestId })))) {
+        if (
+          !(await write(
+            socket,
+            encode({
+              schemaVersion: 1,
+              type: "accepted",
+              requestId: request.requestId,
+            }),
+          ))
+        ) {
           socket.destroy()
           return
         }
@@ -125,19 +133,35 @@ async function handleRequest(
   prepared: Map<string, string>,
 ) {
   if (request.method === "provider.catalog") {
-    const result = control.catalog()
+    const result = await control.catalog()
     socket.end(
       encode(
         result.status === "available"
-          ? { schemaVersion: 1, requestId: request.requestId, status: "available", catalog: result.catalog }
-          : { schemaVersion: 1, requestId: request.requestId, status: "unavailable", reason: result.reason },
+          ? {
+              schemaVersion: 1,
+              requestId: request.requestId,
+              status: "available",
+              catalog: result.catalog,
+              transcript: result.transcript,
+            }
+          : {
+              schemaVersion: 1,
+              requestId: request.requestId,
+              status: "unavailable",
+              reason: result.reason,
+            },
       ),
     )
     return
   }
   if (request.method === "provider.turn.prepare") {
-    const outcome = await bounded(() => control.prepare(request.modelID, request.userText))
-    const result = outcome ?? { status: "blocked" as const, reason: "control_unavailable" as const }
+    const outcome = await bounded(() =>
+      control.prepare(request.providerID, request.credentialProfile, request.modelID, request.userText),
+    )
+    const result = outcome ?? {
+      status: "blocked" as const,
+      reason: "control_unavailable" as const,
+    }
     if (result.status === "prepared") prepared.set(result.preview.proposalID, result.preview.operationID)
     socket.end(encode({ schemaVersion: 1, requestId: request.requestId, ...result }))
     return
@@ -158,7 +182,14 @@ async function handleRequest(
   }
   prepared.delete(request.proposalID)
   const task = control.decide(request.proposalID, request.decision, (progress) => {
-    void write(socket, encode({ schemaVersion: 1, requestId: request.requestId, ...progress } satisfies ProviderTurnProgress))
+    void write(
+      socket,
+      encode({
+        schemaVersion: 1,
+        requestId: request.requestId,
+        ...progress,
+      } satisfies ProviderTurnProgress),
+    )
   })
   const result = await bounded(() => task)
   if (result) {
@@ -226,7 +257,12 @@ function receiveRequest(socket: Socket) {
 
 function blocked(request: ProviderControlRequest, reason: string) {
   if (request.method === "provider.catalog") {
-    return encode({ schemaVersion: 1, requestId: request.requestId, status: "unavailable", reason: "control_unavailable" })
+    return encode({
+      schemaVersion: 1,
+      requestId: request.requestId,
+      status: "unavailable",
+      reason: "control_unavailable",
+    })
   }
   if (request.method === "provider.turn.prepare") {
     return encode({

@@ -12,14 +12,21 @@ const dependencies: AstraSystemControlDependencies = {
   readCatalog: () => ({
     ok: true,
     catalog: {
-      providerID: "anthropic",
-      providerName: "Anthropic",
-      models: [],
-      provenance: {
-        sourceURL: "https://models.dev/api.json",
-        sourceContentDigest: `sha256:${"1".repeat(64)}`,
-        providerContentDigest: `sha256:${"2".repeat(64)}`,
-      },
+      providers: [
+        {
+          providerID: "anthropic",
+          providerName: "Anthropic",
+          assurance: "CERTIFIED",
+          dispatchable: true,
+          credentialProfiles: ["anthropic-api-key"],
+          models: [],
+          provenance: {
+            sourceURL: "https://models.dev/api.json",
+            sourceContentDigest: `sha256:${"1".repeat(64)}`,
+            providerContentDigest: `sha256:${"2".repeat(64)}`,
+          },
+        },
+      ],
     },
   }),
   readCredential: async () => ({ type: "api", key: "sk-ant-parent-only" }),
@@ -91,7 +98,9 @@ describe("Astra global System Control parent", () => {
       expect(snapshot.extensions).toEqual([])
       expect(snapshot.recentReceipts).toEqual([])
       expect(JSON.stringify(snapshot)).not.toContain("canary-plugin")
-      expect(source).not.toMatch(/operationLedgerPath|plugin\/meta|PluginMeta|listOperationViews|ASTRA_DATA_DIR|OPENCODE_PLUGIN_META_FILE/)
+      expect(source).not.toMatch(
+        /operationLedgerPath|plugin\/meta|PluginMeta|listOperationViews|ASTRA_DATA_DIR|OPENCODE_PLUGIN_META_FILE/,
+      )
     } finally {
       if (previousDataDirectory === undefined) delete process.env.ASTRA_DATA_DIR
       else process.env.ASTRA_DATA_DIR = previousDataDirectory
@@ -112,15 +121,21 @@ describe("Astra global System Control parent", () => {
       calls.push("anthropic")
     }
 
-    expect(await routeAstraSystemDecision(missing, { kind: "set-review-mode", mode: "auto-session" }, connector)).toEqual({
+    expect(
+      await routeAstraSystemDecision(missing, { kind: "set-review-mode", mode: "auto-session" }, connector),
+    ).toEqual({
       kind: "continue",
       reviewMode: "auto-session",
     })
-    expect(await routeAstraSystemDecision(missing, { kind: "connect-provider", providerID: "anthropic" }, connector)).toEqual({
+    expect(
+      await routeAstraSystemDecision(missing, { kind: "connect-provider", providerID: "anthropic" }, connector),
+    ).toEqual({
       kind: "continue",
       reviewMode: "manual",
     })
-    expect(await routeAstraSystemDecision(present, { kind: "connect-provider", providerID: "anthropic" }, connector)).toEqual({
+    expect(
+      await routeAstraSystemDecision(present, { kind: "connect-provider", providerID: "anthropic" }, connector),
+    ).toEqual({
       kind: "blocked",
       reviewMode: "manual",
     })

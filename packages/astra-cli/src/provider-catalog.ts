@@ -4,9 +4,35 @@ import { OPEN_CODE_MODELS_DEV_SNAPSHOT, OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA }
 const PROVIDER_ID = "anthropic" as const
 const PROVIDER_NAME = "Anthropic" as const
 const PROVIDER_NPM = "@ai-sdk/anthropic" as const
+const OPENAI_PROVIDER_ID = "openai" as const
+const OPENAI_PROVIDER_NAME = "OpenAI" as const
+const OPENAI_PROVIDER_NPM = "@ai-sdk/openai" as const
 const SOURCE_URL = "https://models.dev/api.json" as const
+const OFFLINE_SOURCE = "packages/opencode/test/tool/fixtures/models-api.json" as const
 const MAX_MODELS = 256
 const MODALITIES = ["text", "audio", "image", "video", "pdf"] as const
+const OPENAI_PROVIDER_CONTENT_DIGEST =
+  "sha256:e44b0888b4cc4ec47f6f521623d68b1ee290a90000f4d94bff1197d1e80ea933" as const
+const OPENAI_CERTIFIED_MODELS = {
+  "gpt-5": {
+    id: "gpt-5",
+    name: "GPT-5",
+    modalities: { input: ["text", "image"], output: ["text"] },
+    limit: { context: 400_000, input: 272_000, output: 128_000 },
+  },
+  "gpt-5.1-codex": {
+    id: "gpt-5.1-codex",
+    name: "GPT-5.1 Codex",
+    modalities: { input: ["text", "image"], output: ["text"] },
+    limit: { context: 400_000, input: 272_000, output: 128_000 },
+  },
+  "gpt-5.2-codex": {
+    id: "gpt-5.2-codex",
+    name: "GPT-5.2 Codex",
+    modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    limit: { context: 400_000, input: 272_000, output: 128_000 },
+  },
+} as const
 
 type Digest = `sha256:${string}`
 type Modality = (typeof MODALITIES)[number]
@@ -21,15 +47,22 @@ export type AstraProviderModel = Readonly<{
   }>
 }>
 
-export type AstraProviderCatalog = Readonly<{
-  providerID: typeof PROVIDER_ID
-  providerName: typeof PROVIDER_NAME
+export type AstraProviderCatalogEntry = Readonly<{
+  providerID: typeof PROVIDER_ID | typeof OPENAI_PROVIDER_ID
+  providerName: typeof PROVIDER_NAME | typeof OPENAI_PROVIDER_NAME
+  assurance: "CERTIFIED"
+  dispatchable: true
+  credentialProfiles: ReadonlyArray<"anthropic-api-key" | "openai-api-key" | "openai-codex-oauth">
   models: readonly AstraProviderModel[]
   provenance: Readonly<{
     sourceURL: typeof SOURCE_URL
     sourceContentDigest: Digest
     providerContentDigest: Digest
   }>
+}>
+
+export type AstraProviderCatalog = Readonly<{
+  providers: ReadonlyArray<AstraProviderCatalogEntry>
 }>
 
 export type ProviderCatalogError = Readonly<{
@@ -85,19 +118,54 @@ function projectSnapshot(snapshot: unknown, metadataInput: unknown): ProviderCat
     models: Object.fromEntries(validated.map((model) => [model.snapshot.id, model.snapshot])),
   }
   if (digest(JSON.stringify(canonicalProvider)) !== metadata.providerContentDigest) return unavailable()
+  const openAIProvider = {
+    id: OPENAI_PROVIDER_ID,
+    name: OPENAI_PROVIDER_NAME,
+    npm: OPENAI_PROVIDER_NPM,
+    models: OPENAI_CERTIFIED_MODELS,
+  }
+  if (digest(JSON.stringify(openAIProvider)) !== OPENAI_PROVIDER_CONTENT_DIGEST) return unavailable()
 
   return Object.freeze({
     ok: true,
     catalog: Object.freeze({
-      providerID: PROVIDER_ID,
-      providerName: PROVIDER_NAME,
-      models: Object.freeze(validated.map((model) => model.publicModel)),
-      provenance: Object.freeze(metadata),
+      providers: Object.freeze([
+        Object.freeze({
+          providerID: PROVIDER_ID,
+          providerName: PROVIDER_NAME,
+          assurance: "CERTIFIED" as const,
+          dispatchable: true as const,
+          credentialProfiles: Object.freeze(["anthropic-api-key" as const]),
+          models: Object.freeze(validated.map((model) => model.publicModel)),
+          provenance: Object.freeze(metadata),
+        }),
+        Object.freeze({
+          providerID: OPENAI_PROVIDER_ID,
+          providerName: OPENAI_PROVIDER_NAME,
+          assurance: "CERTIFIED" as const,
+          dispatchable: true as const,
+          credentialProfiles: Object.freeze(["openai-api-key" as const, "openai-codex-oauth" as const]),
+          models: Object.freeze(
+            Object.values(OPENAI_CERTIFIED_MODELS).map((model) =>
+              Object.freeze({
+                id: model.id,
+                name: model.name,
+                limits: Object.freeze({ ...model.limit }),
+              }),
+            ),
+          ),
+          provenance: Object.freeze({
+            sourceURL: SOURCE_URL,
+            sourceContentDigest: metadata.sourceContentDigest,
+            providerContentDigest: OPENAI_PROVIDER_CONTENT_DIGEST,
+          }),
+        }),
+      ]),
     }),
   })
 }
 
-function projectMetadata(input: unknown): AstraProviderCatalog["provenance"] | null {
+function projectMetadata(input: unknown): AstraProviderCatalogEntry["provenance"] | null {
   if (
     !isRecord(input) ||
     !hasOnlyKeys(input, ["schemaVersion", "sourceURL", "sourceContentDigest", "providerContentDigest", "retrieval"])
@@ -111,9 +179,10 @@ function projectMetadata(input: unknown): AstraProviderCatalog["provenance"] | n
     !isDigest(input.sourceContentDigest) ||
     !isDigest(input.providerContentDigest) ||
     !isRecord(retrieval) ||
-    !hasOnlyKeys(retrieval, ["method", "offlineReplay", "mediaType"]) ||
+    !hasOnlyKeys(retrieval, ["method", "offlineReplay", "offlineSource", "mediaType"]) ||
     retrieval.method !== "GET" ||
     retrieval.offlineReplay !== "--check --offline-source <pinned-api.json>" ||
+    retrieval.offlineSource !== OFFLINE_SOURCE ||
     retrieval.mediaType !== "application/json"
   ) {
     return null

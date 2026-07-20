@@ -10,12 +10,16 @@ import { connectParentAnthropicCredential } from "./provider-connect"
 
 const astraSystemVersion = "1.18.3"
 
-type GlobalExtension = Readonly<{ kind: "skill" | "plugin" | "mcp"; id: string; state: string }>
+type GlobalExtension = Readonly<{
+  kind: "skill" | "plugin" | "mcp"
+  id: string
+  state: string
+}>
 type RecentReceipt = AstraSystemSnapshot["recentReceipts"][number]
 
 export type AstraSystemControlDependencies = Readonly<{
   readCatalog: () => ProviderCatalogResult
-  readCredential: () => Promise<unknown | undefined>
+  readCredential: () => Promise<unknown>
   listGlobalExtensions: () => Promise<ReadonlyArray<GlobalExtension>>
   listRecentReceipts: () => Promise<ReadonlyArray<RecentReceipt>>
 }>
@@ -39,14 +43,13 @@ export async function buildAstraSystemSnapshot(
     readExtensions(dependencies.listGlobalExtensions),
     readReceipts(dependencies.listRecentReceipts),
   ])
+  const anthropicCredential = await credentialPresence(dependencies.readCredential)
   const providers = catalog.ok
-    ? [
-        {
-          id: catalog.catalog.providerID,
-          name: catalog.catalog.providerName,
-          credential: await credentialPresence(dependencies.readCredential),
-        },
-      ]
+    ? catalog.catalog.providers.map((provider) => ({
+        id: provider.providerID,
+        name: provider.providerName,
+        credential: provider.providerID === "anthropic" ? anthropicCredential : ("missing" as const),
+      }))
     : []
   const parsed = parseAstraSystemSnapshot({
     version: astraSystemVersion,
@@ -83,9 +86,7 @@ export async function routeAstraSystemDecision(
   if (intent.kind === "set-review-mode") return { kind: "continue", reviewMode: intent.mode }
   if (
     intent.providerID !== "anthropic" ||
-    !snapshot.value.providers.some(
-      (provider) => provider.id === intent.providerID && provider.credential === "missing",
-    )
+    !snapshot.value.providers.some((provider) => provider.id === intent.providerID && provider.credential === "missing")
   ) {
     return { kind: "blocked", reviewMode: snapshot.value.reviewMode }
   }
@@ -103,7 +104,11 @@ export async function runAstraSystemControl(): Promise<number> {
   while (true) {
     const snapshot = await buildAstraSystemSnapshot(reviewMode)
     const tui = await loadSystemModeModule()
-    const result = await routeAstraSystemDecision(snapshot, await tui.runAstraSystemMode(snapshot), connectParentAnthropicCredential)
+    const result = await routeAstraSystemDecision(
+      snapshot,
+      await tui.runAstraSystemMode(snapshot),
+      connectParentAnthropicCredential,
+    )
     if (result.kind === "exit") return 0
     if (result.kind === "blocked") return 1
     reviewMode = result.reviewMode
@@ -121,11 +126,19 @@ function readCatalog(read: () => ProviderCatalogResult) {
   try {
     return read()
   } catch {
-    return { ok: false as const, error: { code: "catalog_unavailable" as const, message: "Embedded OpenCode model catalog is unavailable." as const } }
+    return {
+      ok: false as const,
+      error: {
+        code: "catalog_unavailable" as const,
+        message: "Embedded OpenCode model catalog is unavailable." as const,
+      },
+    }
   }
 }
 
-async function credentialPresence(read: () => Promise<unknown | undefined>): Promise<"present" | "missing" | "unknown"> {
+async function credentialPresence(
+  read: () => Promise<unknown>,
+): Promise<"present" | "missing" | "unknown"> {
   try {
     const credential = await read()
     if (credential === undefined) return "missing"
@@ -173,9 +186,11 @@ async function emptyReceipts(): Promise<ReadonlyArray<RecentReceipt>> {
   return []
 }
 
-async function loadSystemModeModule(): Promise<Readonly<{
-  runAstraSystemMode: (snapshot: unknown) => Promise<AstraSystemDecision>
-}>> {
+async function loadSystemModeModule(): Promise<
+  Readonly<{
+    runAstraSystemMode: (snapshot: unknown) => Promise<AstraSystemDecision>
+  }>
+> {
   const moduleName = ["@opencode-ai/tui", "astra/system-mode"].join("/")
   const loaded: unknown = await import(moduleName)
   if (!isSystemModeModule(loaded)) throw new Error("The Astra System Control Center interface is unavailable")

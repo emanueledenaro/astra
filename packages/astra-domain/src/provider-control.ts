@@ -15,10 +15,45 @@ export type ProviderControlModel = Readonly<{
   limits: Readonly<{ context: number; input?: number; output: number }>
 }>
 
-export type ProviderControlCatalog = Readonly<{
-  providerID: "anthropic"
+export type ProviderControlProvider = Readonly<{
+  providerID: string
   providerName: string
+  assurance: "CERTIFIED" | "COMPATIBLE — NOT VERIFIED"
+  dispatchable: boolean
+  credentialProfiles: ReadonlyArray<string>
   models: ReadonlyArray<ProviderControlModel>
+}>
+
+export type ProviderControlCatalog = Readonly<{
+  providers: ReadonlyArray<ProviderControlProvider>
+}>
+
+export type ProviderTurnSelection =
+  | Readonly<{
+      providerID: "anthropic"
+      credentialProfile: "anthropic-api-key"
+      modelID: string
+    }>
+  | Readonly<{
+      providerID: "openai"
+      credentialProfile: "openai-api-key" | "openai-codex-oauth"
+      modelID: string
+    }>
+
+export type ProviderConversationTranscriptTurn = Readonly<{
+  providerID: string
+  modelID: string
+  userText: string
+  assistantText: string
+  finishReason: "stop" | "length" | "content_filter"
+  assurance: "observed_not_verified"
+}>
+
+export type ProviderConversationTranscript = Readonly<{
+  turns: ReadonlyArray<ProviderConversationTranscriptTurn>
+  historyDigest: `sha256:${string}`
+  totalBytes: number
+  retention: typeof providerConversationRetentionLabel
 }>
 
 type ProviderControlRequestBase = Readonly<{
@@ -33,6 +68,8 @@ export type ProviderCatalogRequest = ProviderControlRequestBase & Readonly<{ met
 export type ProviderTurnPrepareRequest = ProviderControlRequestBase &
   Readonly<{
     method: "provider.turn.prepare"
+    providerID: "anthropic" | "openai"
+    credentialProfile: "anthropic-api-key" | "openai-api-key" | "openai-codex-oauth"
     modelID: string
     userText: string
   }>
@@ -52,6 +89,7 @@ export type ProviderCatalogResult =
       requestId: string
       status: "available"
       catalog: ProviderControlCatalog
+      transcript: ProviderConversationTranscript
     }>
   | Readonly<{
       schemaVersion: 1
@@ -63,10 +101,19 @@ export type ProviderCatalogResult =
 export type ProviderTurnPreview = Readonly<{
   proposalID: string
   operationID: string
-  providerID: "anthropic"
+  providerID: "anthropic" | "openai"
   modelID: string
-  destination: Readonly<{ method: "POST"; origin: "https://api.anthropic.com"; path: "/v1/messages" }>
-  logicalPayload: Readonly<{ digest: string; bytes: number; contextBindingDigest: string | null }>
+  adapter: Readonly<{
+    adapterID: string
+    adapterDigest: string
+    assurance: "CERTIFIED"
+  }>
+  destination: Readonly<{ method: "POST"; origin: string; path: string }>
+  logicalPayload: Readonly<{
+    digest: string
+    bytes: number
+    contextBindingDigest: string | null
+  }>
   conversation: Readonly<{
     priorTurns: number
     historyBytes: number
@@ -76,7 +123,11 @@ export type ProviderTurnPreview = Readonly<{
   providerCapabilityDigest: string
   skillContext: ProviderTurnSkillContext | null
   headerNames: ReadonlyArray<string>
-  credential: Readonly<{ accountFingerprint: string; headerName: "x-api-key" }>
+  credential: Readonly<{
+    profile: "anthropic-api-key" | "openai-api-key" | "openai-codex-oauth"
+    accountFingerprint: string
+    headerName: "x-api-key" | "authorization"
+  }>
   expiresAt: string
   hostBoundaryLabel: typeof providerHostExecutionBoundaryLabel
   networkBoundaryLabel: typeof providerNetworkExecutionBoundaryLabel
@@ -130,6 +181,8 @@ export type ProviderTurnPrepareResult =
       reason:
         | "read_only"
         | "catalog_unavailable"
+        | "provider_rejected"
+        | "credential_profile_rejected"
         | "credential_unavailable"
         | "model_rejected"
         | "input_rejected"
@@ -206,6 +259,21 @@ const tokenPattern = /^[A-Za-z0-9_-]{43}$/u
 const digestPattern = /^sha256:[0-9a-f]{64}$/u
 const modelPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u
 
+function certifiedProviderProfiles(providerID: string): ReadonlyArray<string> | null {
+  if (providerID === "anthropic") return ["anthropic-api-key"]
+  if (providerID === "openai") return ["openai-api-key", "openai-codex-oauth"]
+  return null
+}
+
+function certifiedSelection(providerID: unknown, credentialProfile: unknown): boolean {
+  if (typeof providerID !== "string" || typeof credentialProfile !== "string") return false
+  return certifiedProviderProfiles(providerID)?.includes(credentialProfile) === true
+}
+
+function exactStringArray(input: ReadonlyArray<unknown>, expected: ReadonlyArray<string>) {
+  return input.length === expected.length && input.every((value, index) => value === expected[index])
+}
+
 export function parseProviderControlRequest(input: unknown): ProviderControlRequest | null {
   const base = plainRecord(input)
   if (!base || base.schemaVersion !== 1 || !uuid(base.requestId) || !uuid(base.sessionID) || !token(base.token)) {
@@ -217,7 +285,18 @@ export function parseProviderControlRequest(input: unknown): ProviderControlRequ
   }
   if (base.method === "provider.turn.prepare") {
     if (
-      !exactKeys(base, ["schemaVersion", "method", "requestId", "sessionID", "token", "modelID", "userText"]) ||
+      !exactKeys(base, [
+        "schemaVersion",
+        "method",
+        "requestId",
+        "sessionID",
+        "token",
+        "providerID",
+        "credentialProfile",
+        "modelID",
+        "userText",
+      ]) ||
+      !certifiedSelection(base.providerID, base.credentialProfile) ||
       typeof base.modelID !== "string" ||
       !modelPattern.test(base.modelID) ||
       typeof base.userText !== "string" ||
@@ -247,11 +326,15 @@ export function parseProviderCatalogResult(input: unknown): ProviderCatalogResul
     if (record.reason !== "catalog_unavailable" && record.reason !== "control_unavailable") return null
     return record as ProviderCatalogResult
   }
-  if (record.status !== "available" || !exactKeys(record, ["schemaVersion", "requestId", "status", "catalog"])) {
+  if (
+    record.status !== "available" ||
+    !exactKeys(record, ["schemaVersion", "requestId", "status", "catalog", "transcript"])
+  ) {
     return null
   }
   const catalog = parseCatalog(record.catalog)
-  return catalog ? ({ ...record, catalog } as ProviderCatalogResult) : null
+  const transcript = parseTranscript(record.transcript)
+  return catalog && transcript ? ({ ...record, catalog, transcript } as ProviderCatalogResult) : null
 }
 
 export function parseProviderTurnPrepareResult(input: unknown): ProviderTurnPrepareResult | null {
@@ -341,12 +424,102 @@ function parseCatalog(input: unknown): ProviderControlCatalog | null {
   const record = plainRecord(input)
   if (
     !record ||
-    !exactKeys(record, ["providerID", "providerName", "models"]) ||
-    record.providerID !== "anthropic" ||
+    !exactKeys(record, ["providers"]) ||
+    !Array.isArray(record.providers) ||
+    record.providers.length < 1 ||
+    record.providers.length > 64
+  ) {
+    return null
+  }
+  const providers = record.providers.map(parseProvider)
+  if (providers.some((provider) => provider === null)) return null
+  const typed = providers as ProviderControlProvider[]
+  if (new Set(typed.map((provider) => provider.providerID)).size !== typed.length) return null
+  return { providers: typed }
+}
+
+function parseTranscript(input: unknown): ProviderConversationTranscript | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, ["turns", "historyDigest", "totalBytes", "retention"]) ||
+    !Array.isArray(record.turns) ||
+    record.turns.length > 64 ||
+    !digest(record.historyDigest) ||
+    !nonNegative(record.totalBytes) ||
+    record.totalBytes > 65_536 ||
+    record.retention !== providerConversationRetentionLabel
+  ) {
+    return null
+  }
+  const turns = record.turns.map(parseTranscriptTurn)
+  if (turns.some((turn) => turn === null)) return null
+  const typed = turns as ProviderConversationTranscriptTurn[]
+  const totalBytes = typed.reduce(
+    (total, turn) => total + Buffer.byteLength(turn.userText, "utf8") + Buffer.byteLength(turn.assistantText, "utf8"),
+    0,
+  )
+  if (totalBytes !== record.totalBytes || (typed.length === 0) !== (totalBytes === 0)) {
+    return null
+  }
+  return {
+    turns: typed,
+    historyDigest: record.historyDigest,
+    totalBytes,
+    retention: providerConversationRetentionLabel,
+  }
+}
+
+function parseTranscriptTurn(input: unknown): ProviderConversationTranscriptTurn | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, ["providerID", "modelID", "userText", "assistantText", "finishReason", "assurance"]) ||
+    typeof record.providerID !== "string" ||
+    !modelPattern.test(record.providerID) ||
+    typeof record.modelID !== "string" ||
+    !modelPattern.test(record.modelID) ||
+    typeof record.userText !== "string" ||
+    Buffer.byteLength(record.userText, "utf8") < 1 ||
+    typeof record.assistantText !== "string" ||
+    Buffer.byteLength(record.assistantText, "utf8") < 1 ||
+    (record.finishReason !== "stop" && record.finishReason !== "length" && record.finishReason !== "content_filter") ||
+    record.assurance !== "observed_not_verified"
+  ) {
+    return null
+  }
+  return record as ProviderConversationTranscriptTurn
+}
+
+function parseProvider(input: unknown): ProviderControlProvider | null {
+  const record = plainRecord(input)
+  if (
+    !record ||
+    !exactKeys(record, ["providerID", "providerName", "assurance", "dispatchable", "credentialProfiles", "models"]) ||
+    typeof record.providerID !== "string" ||
+    !modelPattern.test(record.providerID) ||
     !display(record.providerName) ||
+    !Array.isArray(record.credentialProfiles) ||
     !Array.isArray(record.models) ||
     record.models.length < 1 ||
     record.models.length > 256
+  ) {
+    return null
+  }
+  const certifiedProfiles = certifiedProviderProfiles(record.providerID)
+  if (record.assurance === "CERTIFIED") {
+    if (
+      record.dispatchable !== true ||
+      !certifiedProfiles ||
+      !exactStringArray(record.credentialProfiles, certifiedProfiles)
+    ) {
+      return null
+    }
+  } else if (
+    record.assurance !== "COMPATIBLE — NOT VERIFIED" ||
+    record.dispatchable !== false ||
+    record.credentialProfiles.length !== 0 ||
+    certifiedProfiles !== null
   ) {
     return null
   }
@@ -354,7 +527,14 @@ function parseCatalog(input: unknown): ProviderControlCatalog | null {
   if (models.some((model) => model === null)) return null
   const typed = models as ProviderControlModel[]
   if (typed.some((model, index) => index > 0 && model.id <= typed[index - 1]!.id)) return null
-  return { providerID: "anthropic", providerName: record.providerName, models: typed }
+  return {
+    providerID: record.providerID,
+    providerName: record.providerName,
+    assurance: record.assurance,
+    dispatchable: record.dispatchable,
+    credentialProfiles: [...record.credentialProfiles],
+    models: typed,
+  }
 }
 
 function parseModel(input: unknown): ProviderControlModel | null {
@@ -394,6 +574,7 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
       "operationID",
       "providerID",
       "modelID",
+      "adapter",
       "destination",
       "logicalPayload",
       "conversation",
@@ -408,7 +589,7 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
     ]) ||
     !uuid(record.proposalID) ||
     !uuid(record.operationID) ||
-    record.providerID !== "anthropic" ||
+    (record.providerID !== "anthropic" && record.providerID !== "openai") ||
     typeof record.modelID !== "string" ||
     !modelPattern.test(record.modelID) ||
     record.hostBoundaryLabel !== providerHostExecutionBoundaryLabel ||
@@ -419,16 +600,26 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
     return null
   }
   const destination = plainRecord(record.destination)
+  const adapter = plainRecord(record.adapter)
   const payload = plainRecord(record.logicalPayload)
   const conversation = plainRecord(record.conversation)
   const credential = plainRecord(record.credential)
+  const headerNames = Array.isArray(record.headerNames) ? record.headerNames : null
   const skillContext = record.skillContext === null ? null : parseSkillContext(record.skillContext)
+  const profile = credential?.profile
+  const binding = providerPreviewBinding(record.providerID, profile)
   if (
+    !binding ||
+    !adapter ||
+    !exactKeys(adapter, ["adapterID", "adapterDigest", "assurance"]) ||
+    adapter.adapterID !== binding.adapterID ||
+    !digest(adapter.adapterDigest) ||
+    adapter.assurance !== "CERTIFIED" ||
     !destination ||
     !exactKeys(destination, ["method", "origin", "path"]) ||
     destination.method !== "POST" ||
-    destination.origin !== "https://api.anthropic.com" ||
-    destination.path !== "/v1/messages" ||
+    destination.origin !== binding.origin ||
+    destination.path !== binding.path ||
     !payload ||
     !exactKeys(payload, ["digest", "bytes", "contextBindingDigest"]) ||
     !digest(payload.digest) ||
@@ -446,19 +637,53 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
     (skillContext === null && payload.contextBindingDigest !== null) ||
     (skillContext !== null &&
       payload.contextBindingDigest !== computeProviderSkillContextBindingDigest(skillContext)) ||
-    !Array.isArray(record.headerNames) ||
-    record.headerNames.length !== 3 ||
-    record.headerNames.some((name) => typeof name !== "string") ||
-    record.headerNames.join("\0") !== "anthropic-version\0content-type\0x-api-key" ||
+    !headerNames ||
+    headerNames.some((name) => typeof name !== "string") ||
+    !binding.headerNames.some((expected) => exactStringArray(headerNames, expected)) ||
     !credential ||
-    !exactKeys(credential, ["accountFingerprint", "headerName"]) ||
+    !exactKeys(credential, ["profile", "accountFingerprint", "headerName"]) ||
     typeof credential.accountFingerprint !== "string" ||
     !digestPattern.test(credential.accountFingerprint) ||
-    credential.headerName !== "x-api-key"
+    credential.headerName !== binding.headerName ||
+    (record.providerID === "openai" && skillContext !== null)
   ) {
     return null
   }
   return record as ProviderTurnPreview
+}
+
+function providerPreviewBinding(providerID: unknown, profile: unknown) {
+  if (providerID === "anthropic" && profile === "anthropic-api-key") {
+    return {
+      adapterID: "anthropic.messages.api-key.v1",
+      origin: "https://api.anthropic.com",
+      path: "/v1/messages",
+      headerName: "x-api-key",
+      headerNames: [["anthropic-version", "content-type", "x-api-key"]],
+    } as const
+  }
+  if (providerID === "openai" && profile === "openai-api-key") {
+    return {
+      adapterID: "openai.responses.api-key.v1",
+      origin: "https://api.openai.com",
+      path: "/v1/responses",
+      headerName: "authorization",
+      headerNames: [["accept", "authorization", "content-type"]],
+    } as const
+  }
+  if (providerID === "openai" && profile === "openai-codex-oauth") {
+    return {
+      adapterID: "openai.responses.codex-oauth.v1",
+      origin: "https://chatgpt.com",
+      path: "/backend-api/codex/responses",
+      headerName: "authorization",
+      headerNames: [
+        ["accept", "authorization", "content-type"],
+        ["accept", "authorization", "chatgpt-account-id", "content-type"],
+      ],
+    } as const
+  }
+  return null
 }
 
 function parseSkillContext(input: unknown): ProviderTurnSkillContext | null {
@@ -515,6 +740,8 @@ function parseResponse(input: unknown) {
 const prepareBlockReasons = new Set([
   "read_only",
   "catalog_unavailable",
+  "provider_rejected",
+  "credential_profile_rejected",
   "credential_unavailable",
   "model_rejected",
   "input_rejected",
@@ -564,7 +791,7 @@ function token(input: unknown): input is string {
   return typeof input === "string" && tokenPattern.test(input)
 }
 
-function digest(input: unknown): input is string {
+function digest(input: unknown): input is `sha256:${string}` {
   return typeof input === "string" && digestPattern.test(input)
 }
 

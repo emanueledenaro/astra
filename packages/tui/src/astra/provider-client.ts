@@ -12,6 +12,7 @@ import {
   type ProviderTurnDecisionResult,
   type ProviderTurnPrepareResult,
   type ProviderTurnProgress,
+  type ProviderTurnSelection,
 } from "@astra/domain/provider-control"
 import { AstraControlClientError } from "./control-client"
 
@@ -27,7 +28,11 @@ type RequestOptions = Readonly<{
 
 export type AstraProviderClient = Readonly<{
   catalog: (options?: RequestOptions) => Promise<ProviderCatalogResult>
-  prepare: (modelID: string, userText: string, options?: RequestOptions) => Promise<ProviderTurnPrepareResult>
+  prepare: (
+    selection: ProviderTurnSelection,
+    userText: string,
+    options?: RequestOptions,
+  ) => Promise<ProviderTurnPrepareResult>
   decide: (
     proposalID: string,
     decision: "approve" | "reject",
@@ -58,7 +63,13 @@ export function createAstraProviderClient(
     body: Readonly<Record<string, unknown>>,
     parse: (input: unknown) => Result | null,
     options: RequestOptions,
-    progress: Readonly<{ proposalID: string; operationID: string; decision: "approve" | "reject" }> | undefined,
+    progress:
+      | Readonly<{
+          proposalID: string
+          operationID: string
+          decision: "approve" | "reject"
+        }>
+      | undefined,
   ) {
     if (!available || !socketPath || !token) return Promise.reject(new AstraControlClientError("unavailable"))
     if (active) return Promise.reject(new AstraControlClientError("busy"))
@@ -76,7 +87,14 @@ export function createAstraProviderClient(
       let bytes = 0
       let buffered = ""
       let progressIndex = 0
-      const finish = (result: Readonly<{ ok: true; value: Result }> | Readonly<{ ok: false; code: ConstructorParameters<typeof AstraControlClientError>[0] }>) => {
+      const finish = (
+        result:
+          | Readonly<{ ok: true; value: Result }>
+          | Readonly<{
+              ok: false
+              code: ConstructorParameters<typeof AstraControlClientError>[0]
+            }>,
+      ) => {
         if (settled) return
         settled = true
         if (timer) clearTimeout(timer)
@@ -98,9 +116,7 @@ export function createAstraProviderClient(
         return
       }
       socket.setEncoding("utf8")
-      socket.once("connect", () =>
-        socket?.write(encodedRequest),
-      )
+      socket.once("connect", () => socket?.write(encodedRequest))
       socket.on("data", (chunk: string) => {
         bytes += Buffer.byteLength(chunk)
         if (bytes > providerControlResponseWireLimitBytes) return finish({ ok: false, code: "protocol_invalid" })
@@ -122,7 +138,11 @@ export function createAstraProviderClient(
           if (!accepted) return finish({ ok: false, code: "protocol_invalid" })
           const parsedProgress = parseProviderTurnProgress(message)
           if (parsedProgress) {
-            if (!progress || parsedProgress.proposalID !== progress.proposalID || parsedProgress.operationID !== progress.operationID) {
+            if (
+              !progress ||
+              parsedProgress.proposalID !== progress.proposalID ||
+              parsedProgress.operationID !== progress.operationID
+            ) {
               return finish({ ok: false, code: "protocol_invalid" })
             }
             const expected = progressOrder[progressIndex]
@@ -151,14 +171,24 @@ export function createAstraProviderClient(
     catalog(options = {}) {
       return request({ method: "provider.catalog" }, parseProviderCatalogResult, options, undefined)
     },
-    prepare(modelID, userText, options = {}) {
+    prepare(selection, userText, options = {}) {
+      if (!validSelection(selection)) return Promise.reject(new AstraControlClientError("protocol_invalid"))
       return request(
-        { method: "provider.turn.prepare", modelID, userText },
+        { method: "provider.turn.prepare", ...selection, userText },
         parseProviderTurnPrepareResult,
         options,
         undefined,
       ).then((result) => {
-        if (result.status === "prepared") proposals.set(result.preview.proposalID, result.preview.operationID)
+        if (result.status === "prepared") {
+          if (
+            result.preview.providerID !== selection.providerID ||
+            result.preview.credential.profile !== selection.credentialProfile ||
+            result.preview.modelID !== selection.modelID
+          ) {
+            throw new AstraControlClientError("protocol_invalid")
+          }
+          proposals.set(result.preview.proposalID, result.preview.operationID)
+        }
         return result
       })
     },
@@ -180,6 +210,12 @@ export function createAstraProviderClient(
   }
 }
 
+function validSelection(input: ProviderTurnSelection) {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.modelID)) return false
+  if (input.providerID === "anthropic") return input.credentialProfile === "anthropic-api-key"
+  return input.credentialProfile === "openai-api-key" || input.credentialProfile === "openai-codex-oauth"
+}
+
 const progressOrder = [
   "recording_authority",
   "authority_claimed",
@@ -199,7 +235,12 @@ function validCompletionDigest(input: unknown) {
   if (typeof input !== "object" || input === null || !("status" in input)) return false
   if (input.status !== "response_observed_not_verified" || !("response" in input)) return true
   const response = input.response
-  if (typeof response !== "object" || response === null || !("assistantText" in response) || !("assistantTextDigest" in response)) {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    !("assistantText" in response) ||
+    !("assistantTextDigest" in response)
+  ) {
     return false
   }
   if (typeof response.assistantText !== "string" || typeof response.assistantTextDigest !== "string") return false

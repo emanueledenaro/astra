@@ -4,11 +4,152 @@ import { createParentProviderCredentialBroker } from "../src/provider-credential
 const API_KEY = "sk-ant-private-test-key"
 
 describe("parent provider credential broker", () => {
+  test("issues exact OpenAI API-key and valid Codex OAuth profiles without refresh or writes", async () => {
+    const records = new Map<string, unknown>([
+      ["api", { type: "api", key: "sk-openai-private-key" }],
+      [
+        "oauth",
+        {
+          type: "oauth",
+          access: "private-codex-access",
+          refresh: "private-codex-refresh",
+          expires: 120_000,
+          accountId: "acct-work",
+        },
+      ],
+    ])
+    let selected = "api"
+    const forbidden = { writes: 0, refreshes: 0 }
+    const auth = {
+      get: async (providerID: "anthropic" | "openai") => {
+        expect(providerID).toBe("openai")
+        return records.get(selected)
+      },
+      set: async () => {
+        forbidden.writes += 1
+      },
+      refresh: async () => {
+        forbidden.refreshes += 1
+      },
+    }
+    const broker = createParentProviderCredentialBroker({
+      auth,
+      now: () => 1_000,
+      monotonicNow: () => 1_000,
+    })
+
+    const api = await broker.issueForSession("session-api", {
+      providerID: "openai",
+      credentialProfile: "openai-api-key",
+    })
+    expect(api.ok).toBe(true)
+    if (!api.ok) return
+    expect(api.grant).toMatchObject({
+      providerID: "openai",
+      credentialProfile: "openai-api-key",
+      headerName: "authorization",
+    })
+    expect(broker.takeForParentTransport(api.grant)).toMatchObject({
+      ok: true,
+      credential: {
+        providerID: "openai",
+        credentialProfile: "openai-api-key",
+        headerName: "authorization",
+        headerValue: "Bearer sk-openai-private-key",
+        additionalHeaders: [],
+      },
+    })
+
+    selected = "oauth"
+    const oauth = await broker.issueForSession("session-oauth", {
+      providerID: "openai",
+      credentialProfile: "openai-codex-oauth",
+    })
+    expect(oauth.ok).toBe(true)
+    if (!oauth.ok) return
+    expect(oauth.grant).toMatchObject({
+      providerID: "openai",
+      credentialProfile: "openai-codex-oauth",
+      headerName: "authorization",
+    })
+    expect(JSON.stringify(oauth.grant)).not.toContain("acct-work")
+    expect(broker.takeForParentTransport(oauth.grant)).toMatchObject({
+      ok: true,
+      credential: {
+        providerID: "openai",
+        credentialProfile: "openai-codex-oauth",
+        headerName: "authorization",
+        headerValue: "Bearer private-codex-access",
+        additionalHeaders: [["chatgpt-account-id", "acct-work"]],
+      },
+    })
+    expect(forbidden).toEqual({ writes: 0, refreshes: 0 })
+  })
+
+  test("fails closed for expired Codex OAuth and an exact profile mismatch without refreshing", async () => {
+    let reads = 0
+    const broker = createParentProviderCredentialBroker({
+      auth: {
+        get: async () => {
+          reads += 1
+          return {
+            type: reads === 1 ? "oauth" : "api",
+            access: "expired-access",
+            refresh: "must-not-be-used",
+            expires: 1_000,
+            key: "wrong-profile-key",
+          }
+        },
+      },
+      now: () => 1_000,
+      monotonicNow: () => 1_000,
+    })
+
+    expect(
+      await broker.issueForSession("session-oauth", {
+        providerID: "openai",
+        credentialProfile: "openai-codex-oauth",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "credential_unavailable" } })
+    expect(
+      await broker.issueForSession("session-api", {
+        providerID: "openai",
+        credentialProfile: "openai-codex-oauth",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "credential_unavailable" } })
+  })
+
+  test("rejects unsupported provider and credential profile pairs before reading Auth", async () => {
+    let reads = 0
+    const broker = createParentProviderCredentialBroker({
+      auth: {
+        get: async () => {
+          reads += 1
+          return { type: "api", key: API_KEY }
+        },
+      },
+    })
+
+    expect(
+      await broker.issueForSession("session-1", {
+        providerID: "openrouter",
+        credentialProfile: "openai-api-key",
+      }),
+    ).toMatchObject({ ok: false })
+    expect(
+      await broker.issueForSession("session-1", {
+        providerID: "openai",
+        credentialProfile: "anthropic-api-key",
+      }),
+    ).toMatchObject({ ok: false })
+    expect(reads).toBe(0)
+  })
+
   test("reads only Anthropic API auth and returns a secret-free public grant", async () => {
     const calls: string[] = []
     const forbidden = { enumeration: 0, writes: 0, network: 0 }
     const auth = {
-      get: async (providerID: "anthropic") => {
+      get: async (providerID: "anthropic" | "openai") => {
         calls.push(providerID)
         return { type: "api", key: API_KEY, metadata: { account: "private" } }
       },
@@ -59,7 +200,10 @@ describe("parent provider credential broker", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: { code: "credential_unavailable", message: "Anthropic API credential is unavailable." },
+      error: {
+        code: "credential_unavailable",
+        message: "Anthropic API credential is unavailable.",
+      },
     })
     expect(JSON.stringify(result)).not.toContain(API_KEY)
     expect(JSON.stringify(result)).not.toContain("private-refresh-token")
@@ -100,14 +244,22 @@ describe("parent provider credential broker", () => {
 
   test("rejects an API key that could inject a transport header", async () => {
     const broker = createParentProviderCredentialBroker({
-      auth: { get: async () => ({ type: "api", key: `${API_KEY}\r\nx-unsafe: value` }) },
+      auth: {
+        get: async () => ({
+          type: "api",
+          key: `${API_KEY}\r\nx-unsafe: value`,
+        }),
+      },
     })
 
     const result = await broker.issueForSession("session-1")
 
     expect(result).toEqual({
       ok: false,
-      error: { code: "credential_unavailable", message: "Anthropic API credential is unavailable." },
+      error: {
+        code: "credential_unavailable",
+        message: "Anthropic API credential is unavailable.",
+      },
     })
     expect(JSON.stringify(result)).not.toContain(API_KEY)
   })
@@ -126,7 +278,10 @@ describe("parent provider credential broker", () => {
     })
     expect(wrongSession).toEqual({
       ok: false,
-      error: { code: "credential_invalid", message: "Credential handle is invalid or expired." },
+      error: {
+        code: "credential_invalid",
+        message: "Credential handle is invalid or expired.",
+      },
     })
     expect(
       broker.takeForParentTransport({
@@ -135,7 +290,10 @@ describe("parent provider credential broker", () => {
       }),
     ).toEqual({
       ok: false,
-      error: { code: "credential_invalid", message: "Credential handle is invalid or expired." },
+      error: {
+        code: "credential_invalid",
+        message: "Credential handle is invalid or expired.",
+      },
     })
   })
 
@@ -155,8 +313,10 @@ describe("parent provider credential broker", () => {
       ok: true,
       credential: {
         providerID: "anthropic",
+        credentialProfile: "anthropic-api-key",
         headerName: "x-api-key",
         headerValue: API_KEY,
+        additionalHeaders: [],
         accountFingerprint: issued.grant.accountFingerprint,
       },
     })
@@ -167,7 +327,10 @@ describe("parent provider credential broker", () => {
       }),
     ).toEqual({
       ok: false,
-      error: { code: "credential_invalid", message: "Credential handle is invalid or expired." },
+      error: {
+        code: "credential_invalid",
+        message: "Credential handle is invalid or expired.",
+      },
     })
   })
 
@@ -180,9 +343,24 @@ describe("parent provider credential broker", () => {
     const first = issued[0]
     if (!first?.ok) throw new Error("Expected an issued credential")
 
-    expect(broker.revoke({ credentialHandle: first.grant.credentialHandle, sessionID: "session-2" })).toBe(false)
-    expect(broker.revoke({ credentialHandle: first.grant.credentialHandle, sessionID: "session-1" })).toBe(true)
-    expect(broker.revoke({ credentialHandle: first.grant.credentialHandle, sessionID: "session-1" })).toBe(false)
+    expect(
+      broker.revoke({
+        credentialHandle: first.grant.credentialHandle,
+        sessionID: "session-2",
+      }),
+    ).toBe(false)
+    expect(
+      broker.revoke({
+        credentialHandle: first.grant.credentialHandle,
+        sessionID: "session-1",
+      }),
+    ).toBe(true)
+    expect(
+      broker.revoke({
+        credentialHandle: first.grant.credentialHandle,
+        sessionID: "session-1",
+      }),
+    ).toBe(false)
     expect(
       broker.takeForParentTransport({
         credentialHandle: first.grant.credentialHandle,
@@ -233,7 +411,10 @@ describe("parent provider credential broker", () => {
     expect(grants.every((result) => result.ok)).toBe(true)
     expect(await broker.issueForSession("session-1")).toEqual({
       ok: false,
-      error: { code: "credential_unavailable", message: "Anthropic API credential is unavailable." },
+      error: {
+        code: "credential_unavailable",
+        message: "Anthropic API credential is unavailable.",
+      },
     })
 
     expiryCallbacks[0]?.()
@@ -260,7 +441,10 @@ describe("parent provider credential broker", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: { code: "credential_invalid", message: "Credential handle is invalid or expired." },
+      error: {
+        code: "credential_invalid",
+        message: "Credential handle is invalid or expired.",
+      },
     })
     expect(JSON.stringify(result)).not.toContain(API_KEY)
   })
@@ -284,7 +468,10 @@ describe("parent provider credential broker", () => {
       }),
     ).toEqual({
       ok: false,
-      error: { code: "credential_invalid", message: "Credential handle is invalid or expired." },
+      error: {
+        code: "credential_invalid",
+        message: "Credential handle is invalid or expired.",
+      },
     })
   })
 
@@ -295,7 +482,9 @@ describe("parent provider credential broker", () => {
         get: async (_providerID, signal) => {
           if (!blocked) return { type: "api", key: API_KEY }
           return await new Promise((resolve) =>
-            signal.addEventListener("abort", () => resolve(undefined), { once: true }),
+            signal.addEventListener("abort", () => resolve(undefined), {
+              once: true,
+            }),
           )
         },
       },

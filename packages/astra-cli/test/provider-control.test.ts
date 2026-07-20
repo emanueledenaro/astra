@@ -37,7 +37,10 @@ describe("parent provider control", () => {
       },
     })
 
-    expect(await control.prepare(modelID, "private prompt")).toEqual({ status: "blocked", reason: "read_only" })
+    expect(await control.prepare(modelID, "private prompt")).toEqual({
+      status: "blocked",
+      reason: "read_only",
+    })
     expect(issues).toBe(0)
     expect(executions).toBe(0)
   })
@@ -96,7 +99,10 @@ describe("parent provider control", () => {
     expect(prepared.preview).toMatchObject({
       providerID: "anthropic",
       modelID,
-      destination: { origin: "https://api.anthropic.com", path: "/v1/messages" },
+      destination: {
+        origin: "https://api.anthropic.com",
+        path: "/v1/messages",
+      },
       credential: { headerName: "x-api-key" },
       hostBoundaryLabel: "HOST EXECUTION — NO SANDBOX",
       networkBoundaryLabel: "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX",
@@ -118,6 +124,53 @@ describe("parent provider control", () => {
       "response_observed_not_verified",
       "receipt_acknowledged",
     ])
+  })
+
+  test("dispatches the exact certified Codex OAuth adapter without weakening preview authority", async () => {
+    const fixture = await makeFixture("activate-once")
+    const privatePrompt = "Use the certified Codex OAuth route"
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker: openAIBroker(),
+      conversationHistory: historyPort().port,
+      randomUUID: uuidSequence(),
+      execute: async (input, resolveWire, parse, dependencies) => {
+        const runtimePreview = makeProviderTurnOperationFacts(input).preview
+        expect(runtimePreview.provider).toMatchObject({
+          providerID: "openai",
+          modelID: "gpt-5.2-codex",
+          adapterID: "openai.responses.codex-oauth.v1",
+          origin: "https://chatgpt.com",
+        })
+        expect(await dependencies.requestApproval(runtimePreview)).toBe("approve")
+        const wire = await resolveWire()
+        expect(new TextDecoder().decode(wire.body)).toContain(privatePrompt)
+        expect(wire.headers).toContainEqual(["chatgpt-account-id", "account-parent-only"])
+        expect(wire.credential.value).toBe("Bearer oauth-parent-only")
+        dependencies.onNetworkDispatch?.()
+        const completion = parse({
+          statusCode: 200,
+          headers: [["content-type", "text/event-stream"]],
+          body: validOpenAISse("Codex route observed"),
+        })
+        return completed(input.plan.operationID, completion)
+      },
+    })
+
+    const prepared = await control.prepare("openai", "openai-codex-oauth", "gpt-5.2-codex", privatePrompt)
+    if (prepared.status !== "prepared") throw new Error(prepared.reason)
+    expect(prepared.preview).toMatchObject({
+      providerID: "openai",
+      modelID: "gpt-5.2-codex",
+      adapter: { adapterID: "openai.responses.codex-oauth.v1", assurance: "CERTIFIED" },
+      destination: { origin: "https://chatgpt.com", path: "/backend-api/codex/responses" },
+      credential: { profile: "openai-codex-oauth", headerName: "authorization" },
+    })
+    expect(JSON.stringify(prepared)).not.toContain(privatePrompt)
+    expect(await control.decide(prepared.preview.proposalID, "approve", () => {})).toMatchObject({
+      status: "response_observed_not_verified",
+      response: { assistantText: "Codex route observed" },
+    })
   })
 
   test("records rejection through the coordinator seam without taking credentials or dispatching", async () => {
@@ -148,7 +201,10 @@ describe("parent provider control", () => {
     if (prepared.status !== "prepared") throw new Error("Expected prepared provider turn")
     const result = await control.decide(prepared.preview.proposalID, "reject", () => {})
 
-    expect(result).toMatchObject({ status: "denied_without_effect", receiptID: null })
+    expect(result).toMatchObject({
+      status: "denied_without_effect",
+      receiptID: null,
+    })
     expect(takes).toBe(0)
     expect(dispatches).toBe(0)
   })
@@ -157,7 +213,9 @@ describe("parent provider control", () => {
     const fixture = await makeFixture("activate-once")
     const issued: Array<Readonly<{ credentialHandle: string; sessionID: string }>> = []
     const parentBroker = createParentProviderCredentialBroker({
-      auth: { get: async () => ({ type: "api", key: "sk-ant-rejected-and-revoked" }) },
+      auth: {
+        get: async () => ({ type: "api", key: "sk-ant-rejected-and-revoked" }),
+      },
     })
     const credentialBroker: ParentProviderCredentialBroker = {
       async issueForSession(sessionID) {
@@ -189,7 +247,9 @@ describe("parent provider control", () => {
       const grant = issued.at(-1)
       expect(grant).toBeDefined()
       if (!grant) throw new Error("Expected an issued credential grant")
-      expect(parentBroker.takeForParentTransport(grant)).toMatchObject({ ok: false })
+      expect(parentBroker.takeForParentTransport(grant)).toMatchObject({
+        ok: false,
+      })
     }
   })
 
@@ -389,7 +449,10 @@ describe("parent provider control", () => {
         const preview = makeProviderTurnOperationFacts(input).preview
         await dependencies.requestApproval({
           ...preview,
-          logicalPayload: { ...preview.logicalPayload, contextBindingDigest: contentDigest("drift") },
+          logicalPayload: {
+            ...preview.logicalPayload,
+            contextBindingDigest: contentDigest("drift"),
+          },
         })
         await resolveWire()
         wireResolutions += 1
@@ -459,7 +522,9 @@ describe("consented multi-turn conversation", () => {
 
   test("requires reconciliation without retry when durable append fails after egress", async () => {
     const fixture = await makeFixture("activate-once")
-    const history = historyPort({ appendFailure: new Error("state unavailable") })
+    const history = historyPort({
+      appendFailure: new Error("state unavailable"),
+    })
     let executions = 0
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
@@ -498,7 +563,10 @@ describe("consented multi-turn conversation", () => {
     const bodies: Array<string> = []
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
-      credentialBroker: broker({ onIssue: () => issues++, onTake: () => takes++ }),
+      credentialBroker: broker({
+        onIssue: () => issues++,
+        onTake: () => takes++,
+      }),
       conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, resolveWire, parse, dependencies) => {
@@ -546,9 +614,15 @@ describe("consented multi-turn conversation", () => {
     expect(takes).toBe(2)
     const secondBody = JSON.parse(bodies[1]!)
     expect(secondBody.messages).toEqual([
-      { role: "user", content: [{ type: "text", text: "First user question" }] },
+      {
+        role: "user",
+        content: [{ type: "text", text: "First user question" }],
+      },
       { role: "assistant", content: [{ type: "text", text: "Answer 1" }] },
-      { role: "user", content: [{ type: "text", text: "Second user question" }] },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Second user question" }],
+      },
     ])
     expect(second.preview.logicalPayload.bytes).toBe(Buffer.byteLength(bodies[1]!))
   })
@@ -607,7 +681,10 @@ describe("consented multi-turn conversation", () => {
     expect(thirdBody.messages).toEqual([
       { role: "user", content: [{ type: "text", text: "Kept question" }] },
       { role: "assistant", content: [{ type: "text", text: "Kept answer" }] },
-      { role: "user", content: [{ type: "text", text: "Third question after denial" }] },
+      {
+        role: "user",
+        content: [{ type: "text", text: "Third question after denial" }],
+      },
     ])
     expect(decisions).toEqual(["approve", "reject", "approve"])
   })
@@ -647,7 +724,10 @@ describe("consented multi-turn conversation", () => {
 
     const small = await control.prepare(modelID, "small follow-up")
     if (small.status !== "prepared") throw new Error(small.reason)
-    expect(small.preview.conversation).toMatchObject({ priorTurns: 1, historyBytes: 60_000 })
+    expect(small.preview.conversation).toMatchObject({
+      priorTurns: 1,
+      historyBytes: 60_000,
+    })
     expect(issues).toBe(2)
   })
 
@@ -655,7 +735,9 @@ describe("consented multi-turn conversation", () => {
     const fixture = await makeFixture("activate-once")
     const issued: Array<Readonly<{ credentialHandle: string; sessionID: string }>> = []
     const parentBroker = createParentProviderCredentialBroker({
-      auth: { get: async () => ({ type: "api", key: "sk-ant-one-shot-per-turn" }) },
+      auth: {
+        get: async () => ({ type: "api", key: "sk-ant-one-shot-per-turn" }),
+      },
     })
     const credentialBroker: ParentProviderCredentialBroker = {
       async issueForSession(sessionID) {
@@ -694,7 +776,9 @@ describe("consented multi-turn conversation", () => {
       })
       const grant = issued.at(-1)
       if (!grant) throw new Error("Expected an issued credential grant")
-      expect(parentBroker.takeForParentTransport(grant)).toMatchObject({ ok: false })
+      expect(parentBroker.takeForParentTransport(grant)).toMatchObject({
+        ok: false,
+      })
     }
     expect(new Set(issued.map((grant) => grant.credentialHandle)).size).toBe(3)
   })
@@ -720,20 +804,97 @@ function catalog() {
   return {
     ok: true as const,
     catalog: {
-      providerID: "anthropic" as const,
-      providerName: "Anthropic" as const,
-      models: [{ id: modelID, name: "Claude Sonnet", limits: { context: 200_000, output: 8_192 } }],
-      provenance: {
-        sourceURL: "https://models.dev/api.json" as const,
-        sourceContentDigest: digest("source"),
-        providerContentDigest: digest("provider"),
-      },
+      providers: [
+        {
+          providerID: "anthropic" as const,
+          providerName: "Anthropic" as const,
+          assurance: "CERTIFIED" as const,
+          dispatchable: true as const,
+          credentialProfiles: ["anthropic-api-key" as const],
+          models: [
+            {
+              id: modelID,
+              name: "Claude Sonnet",
+              limits: { context: 200_000, output: 8_192 },
+            },
+          ],
+          provenance: {
+            sourceURL: "https://models.dev/api.json" as const,
+            sourceContentDigest: digest("source"),
+            providerContentDigest: digest("provider"),
+          },
+        },
+        {
+          providerID: "openai" as const,
+          providerName: "OpenAI" as const,
+          assurance: "CERTIFIED" as const,
+          dispatchable: true as const,
+          credentialProfiles: ["openai-api-key" as const, "openai-codex-oauth" as const],
+          models: [
+            {
+              id: "gpt-5.2-codex",
+              name: "GPT-5.2 Codex",
+              limits: { context: 400_000, input: 272_000, output: 128_000 },
+            },
+          ],
+          provenance: {
+            sourceURL: "https://models.dev/api.json" as const,
+            sourceContentDigest: digest("source"),
+            providerContentDigest: digest("openai-provider"),
+          },
+        },
+      ],
+    },
+  }
+}
+
+function openAIBroker(): ParentProviderCredentialBroker {
+  const grant = {
+    providerID: "openai" as const,
+    credentialProfile: "openai-codex-oauth" as const,
+    credentialHandle: `cred_${"3".repeat(64)}`,
+    accountFingerprint: `sha256:${"4".repeat(64)}`,
+    headerName: "authorization" as const,
+    additionalHeaderNames: ["chatgpt-account-id"],
+    expiresAt: Date.now() + 60_000,
+    sessionID: "10000000-0000-4000-8000-000000000001",
+  }
+  return {
+    async issueForSession(_sessionID, selection) {
+      if (selection?.providerID !== "openai" || selection.credentialProfile !== "openai-codex-oauth") {
+        return {
+          ok: false,
+          error: { code: "credential_unavailable", message: "OpenAI credential is unavailable." },
+        }
+      }
+      return { ok: true, grant }
+    },
+    revoke() {
+      return true
+    },
+    takeForParentTransport() {
+      return {
+        ok: true,
+        credential: {
+          providerID: "openai",
+          credentialProfile: "openai-codex-oauth",
+          headerName: "authorization",
+          headerValue: "Bearer oauth-parent-only",
+          additionalHeaders: [["chatgpt-account-id", "account-parent-only"]] as const,
+          accountFingerprint: grant.accountFingerprint,
+        },
+      }
     },
   }
 }
 
 function broker(
-  input: Readonly<{ secret?: string; expiresAt?: number; onIssue?: () => void; onTake?: () => void }> = {},
+  input: Readonly<{
+    secret?: string
+    expiresAt?: number
+    onIssue?: () => void
+    onTake?: () => void
+  }> = {},
 ) {
   const grant = {
     providerID: "anthropic" as const,
@@ -771,7 +932,10 @@ function unavailableBroker(): ParentProviderCredentialBroker {
     async issueForSession() {
       return {
         ok: false,
-        error: { code: "credential_unavailable", message: "Anthropic API credential is unavailable." },
+        error: {
+          code: "credential_unavailable",
+          message: "Anthropic API credential is unavailable.",
+        },
       }
     },
     revoke() {
@@ -780,7 +944,10 @@ function unavailableBroker(): ParentProviderCredentialBroker {
     takeForParentTransport() {
       return {
         ok: false,
-        error: { code: "credential_invalid", message: "Credential handle is invalid or expired." },
+        error: {
+          code: "credential_invalid",
+          message: "Credential handle is invalid or expired.",
+        },
       }
     },
   }
@@ -844,14 +1011,34 @@ function promptSkillBundle(sessionID: string, workspaceRoot: string): TrustedPro
 function validSse(text: string) {
   const events = [
     { type: "message_start", message: { usage: {} } },
-    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text },
+    },
     { type: "content_block_stop", index: 0 },
     { type: "message_delta", delta: { stop_reason: "end_turn" } },
     { type: "message_stop" },
   ]
   return new TextEncoder().encode(
     events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+  )
+}
+
+function validOpenAISse(text: string) {
+  const events = [
+    { type: "response.created", response: { id: "resp_1", status: "in_progress" } },
+    { type: "response.output_text.delta", item_id: "msg_1", delta: text },
+    { type: "response.output_text.done", item_id: "msg_1", text },
+    { type: "response.completed", response: { id: "resp_1", status: "completed" } },
+  ]
+  return new TextEncoder().encode(
+    `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
   )
 }
 
@@ -880,7 +1067,11 @@ function conversationTurn(turnID: string, userText: string, assistantText: strin
     adapterDigest: digest("adapter"),
     credentialProfile: "anthropic-api-key",
     accountFingerprint: digest("account"),
-    destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
+    destination: {
+      method: "POST",
+      origin: "https://api.anthropic.com",
+      path: "/v1/messages",
+    },
     contextDigest: digest("context"),
     requestBodyDigest: digest("body"),
     requestBytes: Buffer.byteLength(userText),
@@ -896,7 +1087,10 @@ function conversationTurn(turnID: string, userText: string, assistantText: strin
 }
 
 function historyPort(
-  input: Readonly<{ turns?: ReadonlyArray<AstraProviderConversationTurn>; appendFailure?: Error }> = {},
+  input: Readonly<{
+    turns?: ReadonlyArray<AstraProviderConversationTurn>
+    appendFailure?: Error
+  }> = {},
 ) {
   const turns = [...(input.turns ?? [])]
   const initialHistoryDigest = turns.reduce(

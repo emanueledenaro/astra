@@ -1,5 +1,14 @@
-const PROVIDER_ID = "anthropic" as const
-const HEADER_NAME = "x-api-key" as const
+import {
+  resolveCertifiedProviderAdapter,
+  type CertifiedProviderAdapter,
+  type CertifiedProviderCredentialProfile,
+  type CertifiedProviderID,
+} from "@astra/runtime/provider-adapter-registry"
+
+const DEFAULT_SELECTION = Object.freeze({
+  providerID: "anthropic" as const,
+  credentialProfile: "anthropic-api-key" as const,
+})
 const DEFAULT_TTL_MS = 60_000
 const MAX_TTL_MS = 300_000
 const RANDOM_BYTES = 32
@@ -9,13 +18,27 @@ const MAX_SESSION_GRANTS = 4
 const DEFAULT_AUTH_TIMEOUT_MS = 1_000
 const MAX_AUTH_TIMEOUT_MS = 5_000
 
-type AnthropicApiAuth = Readonly<{
-  type: "api"
-  key: string
+export type ProviderCredentialSelection = Readonly<{
+  providerID: string
+  credentialProfile: string
+}>
+
+type ResolvedCredential = Readonly<{
+  providerID: CertifiedProviderID
+  credentialProfile: CertifiedProviderCredentialProfile
+  headerName: "x-api-key" | "authorization"
+  headerValue: string
+  additionalHeaders: ReadonlyArray<readonly [name: string, value: string]>
+  expiresAt: number | null
+  fingerprintMaterial: string
 }>
 
 type CredentialRecord = Readonly<{
-  apiKey: string
+  providerID: CertifiedProviderID
+  credentialProfile: CertifiedProviderCredentialProfile
+  headerName: "x-api-key" | "authorization"
+  headerValue: string
+  additionalHeaders: ReadonlyArray<readonly [name: string, value: string]>
   accountFingerprint: string
   sessionID: string
   issuedAtMonotonic: number
@@ -26,21 +49,27 @@ type CredentialRecord = Readonly<{
 type ActiveIssue = Readonly<{ token: symbol }>
 
 export type ParentAnthropicAuthReader = Readonly<{
-  get: (providerID: typeof PROVIDER_ID, signal: AbortSignal) => Promise<unknown | undefined>
+  get: (providerID: CertifiedProviderID, signal: AbortSignal) => Promise<unknown>
 }>
 
 export type ProviderCredentialGrant = Readonly<{
-  providerID: typeof PROVIDER_ID
+  providerID: CertifiedProviderID
+  credentialProfile?: CertifiedProviderCredentialProfile
   credentialHandle: string
   accountFingerprint: string
-  headerName: typeof HEADER_NAME
+  headerName: "x-api-key" | "authorization"
+  additionalHeaderNames?: ReadonlyArray<string>
   expiresAt: number
   sessionID: string
 }>
 
 export type ProviderCredentialError = Readonly<{
   code: "credential_unavailable" | "credential_invalid"
-  message: "Anthropic API credential is unavailable." | "Credential handle is invalid or expired."
+  message:
+    | "Anthropic API credential is unavailable."
+    | "OpenAI credential is unavailable."
+    | "Provider credential is unavailable."
+    | "Credential handle is invalid or expired."
 }>
 
 export type ProviderCredentialGrantResult =
@@ -51,16 +80,21 @@ export type ParentTransportCredentialResult =
   | Readonly<{
       ok: true
       credential: Readonly<{
-        providerID: typeof PROVIDER_ID
-        headerName: typeof HEADER_NAME
+        providerID: CertifiedProviderID
+        credentialProfile?: CertifiedProviderCredentialProfile
+        headerName: "x-api-key" | "authorization"
         headerValue: string
+        additionalHeaders?: ReadonlyArray<readonly [name: string, value: string]>
         accountFingerprint: string
       }>
     }>
   | Readonly<{ ok: false; error: ProviderCredentialError }>
 
 export type ParentProviderCredentialBroker = Readonly<{
-  issueForSession: (sessionID: string) => Promise<ProviderCredentialGrantResult>
+  issueForSession: (
+    sessionID: string,
+    selection?: ProviderCredentialSelection,
+  ) => Promise<ProviderCredentialGrantResult>
   revoke: (input: Readonly<{ credentialHandle: string; sessionID: string }>) => boolean
   takeForParentTransport: (
     input: Readonly<{ credentialHandle: string; sessionID: string }>,
@@ -96,36 +130,50 @@ export function createParentProviderCredentialBroker(
   const expiryCancellations = new Map<string, () => void>()
   const activeIssues = new Map<string, Set<ActiveIssue>>()
 
-  const issueForSession = async (sessionID: string): Promise<ProviderCredentialGrantResult> => {
-    if (!isSessionID(sessionID)) return unavailableCredential()
+  const issueForSession = async (
+    sessionID: string,
+    selection: ProviderCredentialSelection = DEFAULT_SELECTION,
+  ): Promise<ProviderCredentialGrantResult> => {
+    const adapter = resolveCertifiedProviderAdapter(selection.providerID, selection.credentialProfile)
+    if (!adapter || !isSessionID(sessionID)) return unavailableCredential(selection.providerID)
     const requestedAt = readMonotonicTime(monotonicNow)
-    if (requestedAt === undefined) return unavailableCredential()
+    if (requestedAt === undefined) return unavailableCredential(adapter.providerID)
     purgeExpired(records, expiryCancellations, requestedAt)
-    if (!hasIssueCapacity(records, activeIssues, sessionID)) return unavailableCredential()
+    if (!hasIssueCapacity(records, activeIssues, sessionID)) return unavailableCredential(adapter.providerID)
 
     const activeIssue = addActiveIssue(activeIssues, sessionID)
     try {
-      const auth = await readAnthropicApiAuth(options.auth, authTimeoutMs)
-      if (!auth || !fingerprintSalt) return unavailableCredential()
-      const accountFingerprint = await fingerprint(auth.key, fingerprintSalt)
-      if (!accountFingerprint) return unavailableCredential()
+      const authReadAt = readWallTime(now)
+      if (authReadAt === undefined) return unavailableCredential(adapter.providerID)
+      const credential = await readProviderCredential(options.auth, adapter, authTimeoutMs, authReadAt)
+      if (!credential || !fingerprintSalt) return unavailableCredential(adapter.providerID)
+      const accountFingerprint = await fingerprint(credential.fingerprintMaterial, fingerprintSalt)
+      if (!accountFingerprint) return unavailableCredential(adapter.providerID)
 
       const issuedAt = readWallTime(now)
       const issuedAtMonotonic = readMonotonicTime(monotonicNow)
-      if (issuedAt === undefined || issuedAtMonotonic === undefined) return unavailableCredential()
-      const expiresAt = issuedAt + ttlMs
-      const expiresAtMonotonic = issuedAtMonotonic + ttlMs
-      if (!Number.isSafeInteger(expiresAt) || !Number.isFinite(expiresAtMonotonic)) return unavailableCredential()
+      if (issuedAt === undefined || issuedAtMonotonic === undefined) return unavailableCredential(adapter.providerID)
+      const expiresAt = Math.min(issuedAt + ttlMs, credential.expiresAt ?? Number.MAX_SAFE_INTEGER)
+      const liveForMilliseconds = expiresAt - issuedAt
+      const expiresAtMonotonic = issuedAtMonotonic + liveForMilliseconds
+      if (!Number.isSafeInteger(expiresAt) || liveForMilliseconds <= 0 || !Number.isFinite(expiresAtMonotonic)) {
+        return unavailableCredential(adapter.providerID)
+      }
 
       purgeExpired(records, expiryCancellations, issuedAtMonotonic)
-      if (!hasGrantCapacity(records, sessionID)) return unavailableCredential()
+      if (!hasGrantCapacity(records, sessionID)) return unavailableCredential(adapter.providerID)
       const credentialHandle = allocateHandle(records, randomBytes)
-      if (!credentialHandle) return unavailableCredential()
+      if (!credentialHandle) return unavailableCredential(adapter.providerID)
 
       records.set(
         credentialHandle,
         Object.freeze({
-          apiKey: auth.key,
+          providerID: credential.providerID,
+          credentialProfile: credential.credentialProfile,
+          headerName: credential.headerName,
+          additionalHeaderNames: credential.additionalHeaders.map(([name]) => name),
+          headerValue: credential.headerValue,
+          additionalHeaders: credential.additionalHeaders,
           sessionID,
           issuedAtMonotonic,
           expiresAtMonotonic,
@@ -139,22 +187,23 @@ export function createParentProviderCredentialBroker(
           records.delete(credentialHandle)
           expiryCancellations.delete(credentialHandle)
         },
-        ttlMs,
+        liveForMilliseconds,
       )
       if (!cancelExpiry || !records.has(credentialHandle)) {
         records.delete(credentialHandle)
         safelyCancelExpiry(cancelExpiry)
-        return unavailableCredential()
+        return unavailableCredential(adapter.providerID)
       }
       expiryCancellations.set(credentialHandle, cancelExpiry)
 
       return Object.freeze({
         ok: true,
         grant: Object.freeze({
-          providerID: PROVIDER_ID,
+          providerID: credential.providerID,
+          credentialProfile: credential.credentialProfile,
           credentialHandle,
           accountFingerprint,
-          headerName: HEADER_NAME,
+          headerName: credential.headerName,
           expiresAt,
           sessionID,
         }),
@@ -181,9 +230,11 @@ export function createParentProviderCredentialBroker(
     return Object.freeze({
       ok: true as const,
       credential: Object.freeze({
-        providerID: PROVIDER_ID,
-        headerName: HEADER_NAME,
-        headerValue: record.apiKey,
+        providerID: record.providerID,
+        credentialProfile: record.credentialProfile,
+        headerName: record.headerName,
+        headerValue: record.headerValue,
+        additionalHeaders: record.additionalHeaders,
         accountFingerprint: record.accountFingerprint,
       }),
     })
@@ -200,25 +251,64 @@ export function createParentProviderCredentialBroker(
   return Object.freeze({ issueForSession, revoke, takeForParentTransport })
 }
 
-async function readAnthropicApiAuth(
+async function readProviderCredential(
   auth: ParentAnthropicAuthReader,
+  adapter: CertifiedProviderAdapter,
   timeoutMs: number,
-): Promise<AnthropicApiAuth | undefined> {
+  currentTime: number,
+): Promise<ResolvedCredential | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   timer.unref()
   try {
     const input = await Promise.race([
-      Promise.resolve().then(() => auth.get(PROVIDER_ID, controller.signal)),
+      Promise.resolve().then(() => auth.get(adapter.providerID, controller.signal)),
       new Promise<undefined>((resolve) =>
-        controller.signal.addEventListener("abort", () => resolve(undefined), { once: true }),
+        controller.signal.addEventListener("abort", () => resolve(undefined), {
+          once: true,
+        }),
       ),
     ])
     if (typeof input !== "object" || input === null || Array.isArray(input)) return undefined
     const type = "type" in input ? input.type : undefined
-    const key = "key" in input ? input.key : undefined
-    if (type !== "api" || !isHeaderValue(key)) return undefined
-    return Object.freeze({ type, key })
+    if (adapter.credentialProfile === "anthropic-api-key" || adapter.credentialProfile === "openai-api-key") {
+      const key = "key" in input ? input.key : undefined
+      if (type !== "api" || !isHeaderValue(key)) return undefined
+      return Object.freeze({
+        providerID: adapter.providerID,
+        credentialProfile: adapter.credentialProfile,
+        headerName: adapter.credential.headerName,
+        headerValue: adapter.credential.scheme === "bearer" ? `Bearer ${key}` : key,
+        additionalHeaders: Object.freeze([]),
+        expiresAt: null,
+        fingerprintMaterial: `${adapter.providerID}\0${adapter.credentialProfile}\0${key}`,
+      })
+    }
+    const access = "access" in input ? input.access : undefined
+    const expires = "expires" in input ? input.expires : undefined
+    const accountID = "accountId" in input ? input.accountId : undefined
+    if (
+      type !== "oauth" ||
+      !isHeaderValue(access) ||
+      typeof expires !== "number" ||
+      !Number.isSafeInteger(expires) ||
+      expires <= currentTime ||
+      (accountID !== undefined && !isHeaderValue(accountID))
+    ) {
+      return undefined
+    }
+    const additionalHeaders = accountID
+      ? Object.freeze([["chatgpt-account-id", accountID] as const])
+      : Object.freeze([])
+    return Object.freeze({
+      providerID: adapter.providerID,
+      credentialProfile: adapter.credentialProfile,
+      headerName: adapter.credential.headerName,
+      headerValue: `Bearer ${access}`,
+      additionalHeaders,
+      expiresAt: expires,
+      fingerprintMaterial: `${adapter.providerID}\0${adapter.credentialProfile}\0${access}\0${accountID ?? ""}`,
+    })
   } catch {
     return undefined
   } finally {
@@ -399,12 +489,18 @@ function requireAuthTimeout(input: number) {
   return input
 }
 
-function unavailableCredential(): ProviderCredentialGrantResult {
+function unavailableCredential(providerID?: string): ProviderCredentialGrantResult {
+  const message =
+    providerID === "anthropic"
+      ? "Anthropic API credential is unavailable."
+      : providerID === "openai"
+        ? "OpenAI credential is unavailable."
+        : "Provider credential is unavailable."
   return Object.freeze({
     ok: false,
     error: Object.freeze({
       code: "credential_unavailable",
-      message: "Anthropic API credential is unavailable.",
+      message,
     }),
   })
 }

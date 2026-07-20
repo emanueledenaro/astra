@@ -24,7 +24,12 @@ test("renders skill metadata only and rejects a prepared proposal before reset o
       return Promise.resolve(catalogResult)
     },
     prepare() {
-      return Promise.resolve({ schemaVersion: 1, requestId, status: "prepared", preview } as const)
+      return Promise.resolve({
+        schemaVersion: 1,
+        requestId,
+        status: "prepared",
+        preview,
+      } as const)
     },
     decide(_proposalID, decision) {
       return new Promise((resolve) => {
@@ -83,7 +88,12 @@ test("explains safe credential setup without rendering a secret", async () => {
   const client = {
     catalog: () => Promise.resolve(catalogResult),
     prepare: () =>
-      Promise.resolve({ schemaVersion: 1, requestId, status: "blocked", reason: "credential_unavailable" } as const),
+      Promise.resolve({
+        schemaVersion: 1,
+        requestId,
+        status: "blocked",
+        reason: "credential_unavailable",
+      } as const),
     decide: () => Promise.reject(new Error("No proposal must be decided")),
     dispose() {},
   } satisfies AstraProviderClient
@@ -93,7 +103,7 @@ test("explains safe credential setup without rendering a secret", async () => {
     await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
     await prepareThroughDialog(app)
     const blocked = await app.render.waitForFrame((frame) => frame.includes("credential unavailable"))
-    expect(blocked).toContain("Run /connect to add the Anthropic API key through Astra.")
+    expect(blocked).toContain("Run /connect to configure Anthropic through Astra.")
     expect(blocked).toContain("Astra reconnects this workspace automatically.")
     expect(blocked).toContain("Never exposed to chat, the AI, plugins, or MCP.")
     expect(blocked).not.toContain(secret)
@@ -106,7 +116,13 @@ test("keeps the consented conversation transcript across turns and across a cata
   let decisions = 0
   const client = {
     catalog: () => Promise.resolve(catalogResult),
-    prepare: () => Promise.resolve({ schemaVersion: 1, requestId, status: "prepared", preview } as const),
+    prepare: () =>
+      Promise.resolve({
+        schemaVersion: 1,
+        requestId,
+        status: "prepared",
+        preview,
+      } as const),
     decide: () => {
       decisions += 1
       const assistantText = decisions === 1 ? "First observed answer" : "Second observed answer"
@@ -138,7 +154,7 @@ test("keeps the consented conversation transcript across turns and across a cata
     await app.render.waitForFrame((frame) => frame.includes("First observed answer"))
 
     await prepareThroughDialog(app)
-    const secondPrepared = await app.render.waitForFrame(
+    await app.render.waitForFrame(
       (frame) => frame.includes("AWAITING EXPLICIT DECISION") && frame.includes("First observed answer"),
     )
     app.dispatch("astra.chat.approve")
@@ -151,6 +167,50 @@ test("keeps the consented conversation transcript across turns and across a cata
     const reloaded = await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
     expect(reloaded).toContain("First observed answer")
     expect(reloaded).toContain("Second observed answer")
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
+test("restores the durable transcript and keeps compatible unverified providers visible but disabled", async () => {
+  let prepareCalls = 0
+  const restoredText = "Restored after process restart"
+  const client = {
+    catalog: () =>
+      Promise.resolve({
+        ...catalogResult,
+        transcript: {
+          turns: [
+            {
+              providerID: "openai",
+              modelID: "gpt-5.2-codex",
+              userText: "What did we decide?",
+              assistantText: restoredText,
+              finishReason: "stop",
+              assurance: "observed_not_verified",
+            },
+          ],
+          historyDigest: digest,
+          totalBytes: Buffer.byteLength("What did we decide?") + Buffer.byteLength(restoredText),
+          retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
+        },
+      }),
+    prepare: () => {
+      prepareCalls += 1
+      return Promise.reject(new Error("No provider turn is expected"))
+    },
+    decide: () => Promise.reject(new Error("No proposal is expected")),
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderSurface(client)
+
+  try {
+    const frame = await app.render.waitForFrame(
+      (value) => value.includes(restoredText) && value.includes("Ollama · COMPATIBLE — NOT VERIFIED · DISABLED"),
+    )
+    expect(frame).toContain("What did we decide?")
+    expect(frame).toContain("PARENT-OWNED DURABLE HISTORY · VERIFIED ON LOAD")
+    expect(prepareCalls).toBe(0)
   } finally {
     app.render.renderer.destroy()
   }
@@ -170,7 +230,10 @@ async function renderSurface(client: AstraProviderClient) {
     string,
     NonNullable<Parameters<TuiPluginApi["keymap"]["registerLayer"]>[0]["commands"]>[number]
   >()
-  let current: TuiRouteCurrent = { name: "session", params: { sessionID: "session-1" } }
+  let current: TuiRouteCurrent = {
+    name: "session",
+    params: { sessionID: "session-1" },
+  }
   let route: TuiRouteDefinition | undefined
   let dispatch!: (command: string) => void
   function Harness() {
@@ -216,15 +279,24 @@ async function renderSurface(client: AstraProviderClient) {
       <TestTuiContexts directory={authority.workspace.root}>
         <OpencodeKeymapProvider keymap={keymap}>
           <TuiConfigProvider config={createTuiResolvedConfig()}>
-            {route?.render({ params: "params" in current ? current.params : undefined })}
+            {route?.render({
+              params: "params" in current ? current.params : undefined,
+            })}
             {dialog()}
           </TuiConfigProvider>
         </OpencodeKeymapProvider>
       </TestTuiContexts>
     )
   }
-  const render = await testRender(() => <Harness />, { width: 110, height: 28 })
-  return { render, dispatch: (command: string) => dispatch(command), current: () => current }
+  const render = await testRender(() => <Harness />, {
+    width: 110,
+    height: 28,
+  })
+  return {
+    render,
+    dispatch: (command: string) => dispatch(command),
+    current: () => current,
+  }
 }
 
 async function waitUntil(condition: () => boolean) {
@@ -249,9 +321,56 @@ const catalogResult = {
   requestId,
   status: "available",
   catalog: {
-    providerID: "anthropic",
-    providerName: "Anthropic",
-    models: [{ id: modelID, name: "Claude Sonnet", limits: { context: 200_000, output: 8_192 } }],
+    providers: [
+      {
+        providerID: "anthropic",
+        providerName: "Anthropic",
+        assurance: "CERTIFIED",
+        dispatchable: true,
+        credentialProfiles: ["anthropic-api-key"],
+        models: [
+          {
+            id: modelID,
+            name: "Claude Sonnet",
+            limits: { context: 200_000, output: 8_192 },
+          },
+        ],
+      },
+      {
+        providerID: "openai",
+        providerName: "OpenAI",
+        assurance: "CERTIFIED",
+        dispatchable: true,
+        credentialProfiles: ["openai-api-key", "openai-codex-oauth"],
+        models: [
+          {
+            id: "gpt-5.2-codex",
+            name: "GPT-5.2 Codex",
+            limits: { context: 400_000, output: 128_000 },
+          },
+        ],
+      },
+      {
+        providerID: "ollama",
+        providerName: "Ollama",
+        assurance: "COMPATIBLE — NOT VERIFIED",
+        dispatchable: false,
+        credentialProfiles: [],
+        models: [
+          {
+            id: "local-model",
+            name: "Local Model",
+            limits: { context: 32_000, output: 8_000 },
+          },
+        ],
+      },
+    ],
+  },
+  transcript: {
+    turns: [],
+    historyDigest: `sha256:${"0".repeat(64)}`,
+    totalBytes: 0,
+    retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
   },
 } as const
 const preview = {
@@ -259,7 +378,16 @@ const preview = {
   operationID,
   providerID: "anthropic",
   modelID,
-  destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
+  adapter: {
+    adapterID: "anthropic.messages.api-key.v1",
+    adapterDigest: digest,
+    assurance: "CERTIFIED",
+  },
+  destination: {
+    method: "POST",
+    origin: "https://api.anthropic.com",
+    path: "/v1/messages",
+  },
   logicalPayload: { digest, bytes: 256, contextBindingDigest: digest },
   conversation: {
     priorTurns: 0,
@@ -281,7 +409,11 @@ const preview = {
     disclosure: "included_in_provider_request",
   },
   headerNames: ["anthropic-version", "content-type", "x-api-key"],
-  credential: { accountFingerprint: digest, headerName: "x-api-key" },
+  credential: {
+    profile: "anthropic-api-key",
+    accountFingerprint: digest,
+    headerName: "x-api-key",
+  },
   expiresAt: "2026-07-18T20:00:00.000Z",
   hostBoundaryLabel: "HOST EXECUTION — NO SANDBOX",
   networkBoundaryLabel: "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX",

@@ -55,7 +55,10 @@ test("hands one activated skill into governed chat and reuses it only after prov
     skillActivationControl: skillControl,
   })
   const skillClient = createAstraSkillActivationClient(
-    { ASTRA_CONTROL_SOCKET: controlServer.socketPath, ASTRA_CONTROL_TOKEN: controlServer.token },
+    {
+      ASTRA_CONTROL_SOCKET: controlServer.socketPath,
+      ASTRA_CONTROL_TOKEN: controlServer.token,
+    },
     sessionID,
   )
   let dispatched = 0
@@ -94,7 +97,10 @@ test("hands one activated skill into governed chat and reuses it only after prov
     control: providerControl,
   })
   const providerClient = createAstraProviderClient(
-    { ASTRA_PROVIDER_SOCKET: providerServer.socketPath, ASTRA_PROVIDER_TOKEN: providerServer.token },
+    {
+      ASTRA_PROVIDER_SOCKET: providerServer.socketPath,
+      ASTRA_PROVIDER_TOKEN: providerServer.token,
+    },
     sessionID,
   )
 
@@ -107,16 +113,19 @@ test("hands one activated skill into governed chat and reuses it only after prov
       status: "completed_observed_not_verified",
     })
 
-    const first = await providerClient.prepare(modelID, "First proposal")
+    const first = await providerClient.prepare(anthropicSelection, "First proposal")
     if (first.status !== "prepared") throw new Error(first.reason)
-    expect(first.preview.skillContext).toMatchObject({ name: "safe-skill", trust: "UNTRUSTED INSTRUCTION DATA" })
+    expect(first.preview.skillContext).toMatchObject({
+      name: "safe-skill",
+      trust: "UNTRUSTED INSTRUCTION DATA",
+    })
     expect(JSON.stringify(first)).not.toContain(privateInstructions)
     expect(await providerClient.decide(first.preview.proposalID, "reject")).toMatchObject({
       status: "denied_without_effect",
     })
     expect(dispatched).toBe(0)
 
-    const second = await providerClient.prepare(modelID, "Second explicit proposal")
+    const second = await providerClient.prepare(anthropicSelection, "Second explicit proposal")
     if (second.status !== "prepared") throw new Error(second.reason)
     expect(second.preview.skillContext?.activationOperationID).toBe(first.preview.skillContext?.activationOperationID)
     expect(JSON.stringify(second)).not.toContain(privateInstructions)
@@ -141,19 +150,37 @@ test("hands one activated skill into governed chat and reuses it only after prov
 })
 
 const modelID = "claude-sonnet-4-5-20250929"
+const anthropicSelection = {
+  providerID: "anthropic",
+  credentialProfile: "anthropic-api-key",
+  modelID,
+} as const
 
 function catalog() {
   return {
     ok: true as const,
     catalog: {
-      providerID: "anthropic" as const,
-      providerName: "Anthropic" as const,
-      models: [{ id: modelID, name: "Claude Sonnet", limits: { context: 200_000, output: 8_192 } }],
-      provenance: {
-        sourceURL: "https://models.dev/api.json" as const,
-        sourceContentDigest: digest("source"),
-        providerContentDigest: digest("provider"),
-      },
+      providers: [
+        {
+          providerID: "anthropic" as const,
+          providerName: "Anthropic" as const,
+          assurance: "CERTIFIED" as const,
+          dispatchable: true as const,
+          credentialProfiles: ["anthropic-api-key" as const],
+          models: [
+            {
+              id: modelID,
+              name: "Claude Sonnet",
+              limits: { context: 200_000, output: 8_192 },
+            },
+          ],
+          provenance: {
+            sourceURL: "https://models.dev/api.json" as const,
+            sourceContentDigest: digest("source"),
+            providerContentDigest: digest("provider"),
+          },
+        },
+      ],
     },
   }
 }
@@ -224,8 +251,16 @@ function completed(operationID: string, completion: TrustedObservedProviderCompl
 function validSse(text: string) {
   const events = [
     { type: "message_start", message: { usage: {} } },
-    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text },
+    },
     { type: "content_block_stop", index: 0 },
     { type: "message_delta", delta: { stop_reason: "end_turn" } },
     { type: "message_stop" },

@@ -2,9 +2,11 @@
 
 import type {
   ProviderControlCatalog,
+  ProviderConversationTranscript,
   ProviderTurnDecisionResult,
   ProviderTurnPreview,
   ProviderTurnProgress,
+  ProviderTurnSelection,
 } from "@astra/domain/provider-control"
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import type { TuiPluginApi, TuiRouteCurrent } from "@opencode-ai/plugin/tui"
@@ -18,48 +20,50 @@ const routeName = "astra-chat"
 const maximumVisibleHistoryTurns = 8
 
 type ChatTurn = Readonly<{
+  providerID: string
   modelID: string
   userText: string
   assistantText: string
   finishReason: string
 }>
 
+type ChatContext = Readonly<{
+  catalog: ProviderControlCatalog
+  selection: ProviderTurnSelection
+}>
+
 type ChatState =
   | Readonly<{ status: "loading_catalog" }>
-  | Readonly<{ status: "ready"; catalog: ProviderControlCatalog; modelID: string }>
-  | Readonly<{ status: "preparing"; catalog: ProviderControlCatalog; modelID: string; userText: string }>
-  | Readonly<{
+  | (Readonly<{ status: "ready" }> & ChatContext)
+  | (Readonly<{ status: "preparing"; userText: string }> & ChatContext)
+  | (Readonly<{
       status: "prepared"
-      catalog: ProviderControlCatalog
-      modelID: string
       userText: string
       preview: ProviderTurnPreview
-    }>
-  | Readonly<{
+    }> &
+      ChatContext)
+  | (Readonly<{
       status: "deciding"
-      catalog: ProviderControlCatalog
-      modelID: string
       userText: string
       preview: ProviderTurnPreview
       decision: "approve" | "reject"
-    }>
-  | Readonly<{
+    }> &
+      ChatContext)
+  | (Readonly<{
       status: "progress"
-      catalog: ProviderControlCatalog
-      modelID: string
       userText: string
       preview: ProviderTurnPreview
       phase: ProviderTurnProgress["status"]
-    }>
-  | Readonly<{
+    }> &
+      ChatContext)
+  | (Readonly<{
       status: "completed"
-      catalog: ProviderControlCatalog
-      modelID: string
       userText: string
       result: Extract<ProviderTurnDecisionResult, { status: "response_observed_not_verified" }>
-    }>
-  | Readonly<{ status: "denied"; catalog: ProviderControlCatalog; modelID: string; userText: string }>
-  | Readonly<{ status: "blocked"; reason: string }>
+    }> &
+      ChatContext)
+  | (Readonly<{ status: "denied"; userText: string }> & ChatContext)
+  | Readonly<{ status: "blocked"; reason: string; context?: ChatContext }>
   | Readonly<{ status: "reconciliation"; operationID: string }>
 
 export type AstraChatActivity = Readonly<{
@@ -86,7 +90,9 @@ export function AstraChatView(props: {
 }) {
   const dimensions = useTerminalDimensions()
   const valueWidth = createMemo(() => Math.max(24, dimensions().width - 18))
-  const [state, setState] = createSignal<ChatState>({ status: "loading_catalog" })
+  const [state, setState] = createSignal<ChatState>({
+    status: "loading_catalog",
+  })
   const [history, setHistory] = createSignal<ReadonlyArray<ChatTurn>>([])
   let generation = 0
   let abort: AbortController | undefined
@@ -100,27 +106,49 @@ export function AstraChatView(props: {
       .catalog({ signal: abort.signal })
       .then((result) => {
         if (generation !== currentGeneration) return
-        if (result.status === "unavailable") return setState({ status: "blocked", reason: result.reason })
-        setState({ status: "ready", catalog: result.catalog, modelID: result.catalog.models[0]!.id })
+        if (result.status === "unavailable") {
+          setState({ status: "blocked", reason: result.reason })
+          return
+        }
+        const selection = initialSelection(result.catalog)
+        if (!selection) {
+          setState({ status: "blocked", reason: "provider_rejected" })
+          return
+        }
+        if (result.transcript.turns.length > 0 || history().length === 0) {
+          setHistory(transcriptTurns(result.transcript))
+        }
+        setState({ status: "ready", catalog: result.catalog, selection })
       })
       .catch(() => {
-        if (generation === currentGeneration) setState({ status: "blocked", reason: "provider_control_unavailable" })
+        if (generation === currentGeneration)
+          setState({
+            status: "blocked",
+            reason: "provider_control_unavailable",
+          })
       })
   }
 
   const selectModel = () => {
     const current = state()
     if (current.status !== "ready") return
+    const provider = current.catalog.providers.find(
+      (candidate) => candidate.providerID === current.selection.providerID,
+    )
+    if (!provider) return
     props.api.ui.dialog.replace(() => (
       <props.api.ui.DialogSelect
-        title="Select Anthropic model"
-        current={current.modelID}
-        options={current.catalog.models.map((model) => ({
+        title={`Select ${provider.providerName} model`}
+        current={current.selection.modelID}
+        options={provider.models.map((model) => ({
           title: model.name,
           description: model.id,
           value: model.id,
           onSelect: () => {
-            setState({ ...current, modelID: model.id })
+            setState({
+              ...current,
+              selection: { ...current.selection, modelID: model.id },
+            })
             props.api.ui.dialog.clear()
           },
         }))}
@@ -128,9 +156,42 @@ export function AstraChatView(props: {
     ))
   }
 
+  const selectProvider = () => {
+    const current = state()
+    if (current.status !== "ready") return
+    const providers = current.catalog.providers.filter(
+      (provider) => provider.assurance === "CERTIFIED" && provider.dispatchable,
+    )
+    props.api.ui.dialog.replace(() => (
+      <props.api.ui.DialogSelect
+        title="Select certified provider"
+        current={current.selection.providerID}
+        options={providers.flatMap((provider) => {
+          const selection = selectionForProvider(provider)
+          return selection
+            ? [
+                {
+                  title: provider.providerName,
+                  description: `${provider.assurance} · ${selection.credentialProfile}`,
+                  value: provider.providerID,
+                  onSelect: () => {
+                    setState({ ...current, selection })
+                    props.api.ui.dialog.clear()
+                  },
+                },
+              ]
+            : []
+        })}
+      />
+    ))
+  }
+
   const compose = () => {
     const current = state()
-    if (props.authority.mode !== "activate-once") return setState({ status: "blocked", reason: "read_only" })
+    if (props.authority.mode !== "activate-once") {
+      setState({ status: "blocked", reason: "read_only" })
+      return
+    }
     if (current.status !== "ready" && current.status !== "completed" && current.status !== "denied") return
     props.api.ui.dialog.replace(() => (
       <props.api.ui.DialogPrompt
@@ -146,22 +207,38 @@ export function AstraChatView(props: {
           }
           const currentGeneration = ++generation
           abort = new AbortController()
-          setState({ status: "preparing", catalog: current.catalog, modelID: current.modelID, userText })
+          setState({
+            status: "preparing",
+            catalog: current.catalog,
+            selection: current.selection,
+            userText,
+          })
           void props.client
-            .prepare(current.modelID, userText, { signal: abort.signal })
+            .prepare(current.selection, userText, { signal: abort.signal })
             .then((result) => {
               if (generation !== currentGeneration) return
-              if (result.status === "blocked") return setState({ status: "blocked", reason: result.reason })
+              if (result.status === "blocked") {
+                setState({
+                  status: "blocked",
+                  reason: result.reason,
+                  context: current,
+                })
+                return
+              }
               setState({
                 status: "prepared",
                 catalog: current.catalog,
-                modelID: current.modelID,
+                selection: current.selection,
                 userText,
                 preview: result.preview,
               })
             })
             .catch(() => {
-              if (generation === currentGeneration) setState({ status: "blocked", reason: "provider_control_failed" })
+              if (generation === currentGeneration)
+                setState({
+                  status: "blocked",
+                  reason: "provider_control_failed",
+                })
             })
         }}
       />
@@ -177,7 +254,12 @@ export function AstraChatView(props: {
     void props.client
       .decide(current.preview.proposalID, decision, {
         onProgress(progress) {
-          if (generation === currentGeneration) setState({ ...current, status: "progress", phase: progress.status })
+          if (generation === currentGeneration)
+            setState({
+              ...current,
+              status: "progress",
+              phase: progress.status,
+            })
         },
       })
       .then((result) => {
@@ -187,7 +269,8 @@ export function AstraChatView(props: {
             [
               ...turns,
               {
-                modelID: current.modelID,
+                providerID: current.selection.providerID,
+                modelID: current.selection.modelID,
                 userText: current.userText,
                 assistantText: result.response.assistantText,
                 finishReason: result.response.finishReason,
@@ -197,7 +280,7 @@ export function AstraChatView(props: {
           setState({
             status: "completed",
             catalog: current.catalog,
-            modelID: current.modelID,
+            selection: current.selection,
             userText: current.userText,
             result,
           })
@@ -208,20 +291,26 @@ export function AstraChatView(props: {
           setState({
             status: "denied",
             catalog: current.catalog,
-            modelID: current.modelID,
+            selection: current.selection,
             userText: current.userText,
           })
           return
         }
         if (result.status === "reconciliation_required") {
-          setState({ status: "reconciliation", operationID: current.preview.operationID })
+          setState({
+            status: "reconciliation",
+            operationID: current.preview.operationID,
+          })
           return
         }
         setState({ status: "blocked", reason: result.reason })
       })
       .catch(() => {
         if (generation === currentGeneration) {
-          setState({ status: "reconciliation", operationID: current.preview.operationID })
+          setState({
+            status: "reconciliation",
+            operationID: current.preview.operationID,
+          })
         }
       })
   }
@@ -259,14 +348,51 @@ export function AstraChatView(props: {
   useBindings(() => ({
     enabled: !props.api.ui.dialog.open && props.bindingsSuspended !== true,
     commands: [
-      { name: "astra.chat.model", title: "Select Chat Model", category: "Astra", run: selectModel },
-      { name: "astra.chat.compose", title: "Compose Chat Message", category: "Astra", run: compose },
-      { name: "astra.chat.approve", title: "Approve Provider Turn", category: "Astra", run: () => decide("approve") },
-      { name: "astra.chat.reject", title: "Reject Provider Turn", category: "Astra", run: () => decide("reject") },
-      { name: "astra.chat.reset", title: "Reload Chat Catalog", category: "Astra", run: reset },
-      { name: "astra.chat.close", title: "Close Chat", category: "Astra", run: close },
+      {
+        name: "astra.chat.provider",
+        title: "Select Chat Provider",
+        category: "Astra",
+        run: selectProvider,
+      },
+      {
+        name: "astra.chat.model",
+        title: "Select Chat Model",
+        category: "Astra",
+        run: selectModel,
+      },
+      {
+        name: "astra.chat.compose",
+        title: "Compose Chat Message",
+        category: "Astra",
+        run: compose,
+      },
+      {
+        name: "astra.chat.approve",
+        title: "Approve Provider Turn",
+        category: "Astra",
+        run: () => decide("approve"),
+      },
+      {
+        name: "astra.chat.reject",
+        title: "Reject Provider Turn",
+        category: "Astra",
+        run: () => decide("reject"),
+      },
+      {
+        name: "astra.chat.reset",
+        title: "Reload Chat Catalog",
+        category: "Astra",
+        run: reset,
+      },
+      {
+        name: "astra.chat.close",
+        title: "Close Chat",
+        category: "Astra",
+        run: close,
+      },
     ],
     bindings: [
+      { key: "v", cmd: "astra.chat.provider", desc: "Provider" },
       { key: "m", cmd: "astra.chat.model", desc: "Model" },
       { key: "p", cmd: "astra.chat.compose", desc: "Prompt" },
       { key: "a", cmd: "astra.chat.approve", desc: "Approve" },
@@ -286,13 +412,15 @@ export function AstraChatView(props: {
       flexDirection="column"
     >
       <box flexDirection="row" flexShrink={0}>
-        <text fg={props.api.theme.current.primary}>{props.embedded ? "CONVERSATION" : "Astra Chat · Anthropic"}</text>
+        <text fg={props.api.theme.current.primary}>
+          {props.embedded ? "CONVERSATION" : `Astra Chat · ${selectedProviderName(state())}`}
+        </text>
         <box flexGrow={1} />
         <Show when={!props.embedded || dimensions().width >= 104}>
           <text fg={props.api.theme.current.textMuted}>
             {props.embedded
-              ? "p message · m model · a/d decision"
-              : "m model p prompt a approve d reject r reload esc close"}
+              ? "p message · v provider · m model · a/d decision"
+              : "v provider m model p prompt a approve d reject r reload esc close"}
           </text>
         </Show>
       </box>
@@ -300,7 +428,7 @@ export function AstraChatView(props: {
         <text fg={props.api.theme.current.error}>HOST EXECUTION — NO SANDBOX</text>
         <text fg={props.api.theme.current.warning}>NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX</text>
         <text fg={props.api.theme.current.warning}>
-          CONSENTED MULTI-TURN · HISTORY IN PARENT MEMORY ONLY · NOT PERSISTED · NO TOOLS · NOT VERIFIED
+          PARENT-OWNED DURABLE HISTORY · VERIFIED ON LOAD · NO TOOLS · RESPONSES NOT VERIFIED
         </text>
       </Show>
       <box height={1} />
@@ -316,7 +444,19 @@ export function AstraChatView(props: {
           api={props.api}
         />
         <Row label="STATE" value={stateLabel(state())} api={props.api} />
+        <Show when={!previewOf(state()) && selectionOf(state())}>
+          {(selection) => (
+            <Row
+              label="PROVIDER"
+              value={`${selectedProviderName(state())} · ${selection().credentialProfile}`}
+              api={props.api}
+            />
+          )}
+        </Show>
         <Show when={modelOf(state())}>{(model) => <Row label="MODEL" value={model()} api={props.api} />}</Show>
+        <Show when={!previewOf(state()) && unverifiedProviderLabel(state())}>
+          {(label) => <Row label="COMPATIBLE" value={label()} api={props.api} />}
+        </Show>
       </Show>
       <Show when={!props.embedded && previewOf(state())}>
         {(preview) => (
@@ -407,7 +547,9 @@ export function AstraChatView(props: {
       <For each={history()}>
         {(turn) => (
           <box marginTop={1} flexDirection="column">
-            <text fg={props.api.theme.current.textMuted}>{`YOU · IN CONVERSATION · ${turn.modelID}`}</text>
+            <text
+              fg={props.api.theme.current.textMuted}
+            >{`YOU · IN CONVERSATION · ${turn.providerID}/${turn.modelID}`}</text>
             <text fg={props.api.theme.current.text}>{turn.userText}</text>
             <text
               fg={props.api.theme.current.textMuted}
@@ -443,7 +585,11 @@ export function AstraChatView(props: {
       </Show>
       <Show when={blockedOf(state()) === "credential_unavailable"}>
         <box marginTop={1} flexDirection="column">
-          <Row label="ACTION" value="Run /connect to add the Anthropic API key through Astra." api={props.api} />
+          <Row
+            label="ACTION"
+            value={`Run /connect to configure ${selectedProviderName(state())} through Astra.`}
+            api={props.api}
+          />
           <Row label="THEN" value="Astra reconnects this workspace automatically." api={props.api} />
           <Row label="SECRET" value="Never exposed to chat, the AI, plugins, or MCP." api={props.api} />
         </box>
@@ -521,7 +667,12 @@ function decisionInFlight(state: ChatState) {
 }
 
 function modelOf(state: ChatState) {
-  return "modelID" in state ? state.modelID : undefined
+  return selectionOf(state)?.modelID
+}
+
+function selectionOf(state: ChatState) {
+  if ("selection" in state) return state.selection
+  return state.status === "blocked" ? state.context?.selection : undefined
 }
 
 function previewOf(state: ChatState) {
@@ -562,23 +713,93 @@ function stateLabel(state: ChatState) {
 
 function chatActivity(state: ChatState): AstraChatActivity {
   const preview = previewOf(state)
-  const catalog = catalogOf(state)
+  const selection = selectionOf(state)
   const modelID = modelOf(state)
   return {
     status: state.status,
     label: stateLabel(state),
     summary: activitySummary(state),
-    ...(catalog ? { providerID: catalog.providerID, providerName: catalog.providerName } : {}),
+    ...(selection
+      ? {
+          providerID: selection.providerID,
+          providerName: selectedProviderName(state),
+        }
+      : {}),
     ...(modelID ? { modelID } : {}),
     ...(preview ? { operationID: preview.operationID } : {}),
-    ...(preview ? { destination: `${preview.destination.origin}${preview.destination.path}` } : {}),
+    ...(preview
+      ? {
+          destination: `${preview.destination.origin}${preview.destination.path}`,
+        }
+      : {}),
     ...(preview ? { payloadBytes: preview.logicalPayload.bytes } : {}),
     decisionRequired: state.status === "prepared",
   }
 }
 
 function catalogOf(state: ChatState) {
-  return "catalog" in state ? state.catalog : undefined
+  if ("catalog" in state) return state.catalog
+  return state.status === "blocked" ? state.context?.catalog : undefined
+}
+
+function selectedProviderName(state: ChatState) {
+  const selection = selectionOf(state)
+  return (
+    catalogOf(state)?.providers.find((provider) => provider.providerID === selection?.providerID)?.providerName ??
+    "No provider"
+  )
+}
+
+function unverifiedProviderLabel(state: ChatState) {
+  const providers = catalogOf(state)?.providers.filter((provider) => !provider.dispatchable) ?? []
+  return providers.length === 0
+    ? undefined
+    : providers.map((provider) => `${provider.providerName} · ${provider.assurance} · DISABLED`).join("; ")
+}
+
+function initialSelection(catalog: ProviderControlCatalog): ProviderTurnSelection | undefined {
+  for (const provider of catalog.providers) {
+    const selection = selectionForProvider(provider)
+    if (selection) return selection
+  }
+  return undefined
+}
+
+function selectionForProvider(
+  provider: ProviderControlCatalog["providers"][number],
+): ProviderTurnSelection | undefined {
+  if (provider.assurance !== "CERTIFIED" || !provider.dispatchable || !provider.models[0]) return undefined
+  if (provider.providerID === "anthropic" && provider.credentialProfiles.includes("anthropic-api-key")) {
+    return {
+      providerID: "anthropic",
+      credentialProfile: "anthropic-api-key",
+      modelID: provider.models[0].id,
+    }
+  }
+  if (provider.providerID === "openai") {
+    const profile = provider.credentialProfiles.includes("openai-codex-oauth")
+      ? "openai-codex-oauth"
+      : provider.credentialProfiles.includes("openai-api-key")
+        ? "openai-api-key"
+        : undefined
+    if (profile)
+      return {
+        providerID: "openai",
+        credentialProfile: profile,
+        modelID: provider.models[0].id,
+      }
+  }
+  return undefined
+}
+
+function transcriptTurns(transcript: ProviderConversationTranscript): ReadonlyArray<ChatTurn> {
+  return transcript.turns.slice(-maximumVisibleHistoryTurns).map((turn) => ({
+    providerID: turn.providerID,
+    modelID: turn.modelID,
+    userText: turn.userText,
+    assistantText: turn.assistantText,
+    finishReason: turn.finishReason,
+  }))
 }
 
 function activitySummary(state: ChatState) {
