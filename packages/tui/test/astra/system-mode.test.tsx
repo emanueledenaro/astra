@@ -71,6 +71,26 @@ test("keeps the Control Center compact without losing its safety boundary", asyn
   }
 })
 
+test("renders compact System Mode without a connectable provider", async () => {
+  const app = await testRender(
+    () => (
+      <AstraSystemMode
+        snapshot={{ ...snapshot, providers: [{ id: "openai", name: "OpenAI", credential: "present" }] }}
+        onDecision={() => {}}
+      />
+    ),
+    { width: 32, height: 14 },
+  )
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("OpenAI")
+    expect(frame).not.toContain("Connect")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("keeps the System Mode import graph inert", async () => {
   const source = await readFile(new URL("../../src/astra/system-mode.tsx", import.meta.url), "utf8")
   const imports = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map((match) => match[1])

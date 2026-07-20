@@ -37,6 +37,19 @@ test("renders the keyboard-first Launchpad with Create available and Continue tr
   }
 })
 
+test("renders an empty Launchpad snapshot from the smallest initial terminal boundary", async () => {
+  const app = await testRender(() => <AstraNoWorkspaceMode snapshot={{ recentSessions: [] }} onDecision={() => {}} />, {
+    width: 1,
+    height: 1,
+  })
+  try {
+    await app.renderOnce()
+    expect(app.captureCharFrame()).not.toContain("Orphan text error")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
 test("opens a path entry locally without scanning a workspace", async () => {
   const app = await testRender(() => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={() => {}} />, {
     width: 88,

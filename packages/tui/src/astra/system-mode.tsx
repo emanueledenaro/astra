@@ -165,7 +165,7 @@ function AstraSystemModeContent(props: {
           when={!compact()}
           fallback={
             <box flexDirection="row" gap={1}>
-              <Show when={connectable()}>
+              <Show when={connectable()} fallback={<box width={0} height={0} />}>
                 <text fg={palette.text}><span style={{ fg: palette.primary }}>[C]</span> Connect</text>
               </Show>
               <text fg={palette.text}><span style={{ fg: palette.primary }}>[M]</span> Review</text>
@@ -174,7 +174,7 @@ function AstraSystemModeContent(props: {
           }
         >
           <box flexDirection="row" gap={2}>
-            <Show when={connectable()}>
+            <Show when={connectable()} fallback={<box width={0} height={0} />}>
               <text fg={palette.text}>
                 <span style={{ fg: palette.primary }}>[C]</span> Connect provider
               </text>

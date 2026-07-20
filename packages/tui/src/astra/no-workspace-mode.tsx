@@ -128,7 +128,7 @@ function AstraNoWorkspaceModeContent(props: {
           flexDirection={compact() ? "column" : "row"}
           gap={compact() ? 0 : 3}
         >
-          <Show when={!compact()}>
+          <Show when={!compact()} fallback={<box height={0} />}>
             <box flexDirection="column" flexShrink={0}>
               <For each={visual().lines}>{(line) => <text fg={palette.accent}>{line}</text>}</For>
               <text fg={palette.accent}>{visual().label}</text>
@@ -140,7 +140,7 @@ function AstraNoWorkspaceModeContent(props: {
               when={opening()}
               fallback={
                 <>
-                  <Show when={!compact()}>
+                  <Show when={!compact()} fallback={<box height={0} />}>
                     <text fg={palette.text} attributes={TextAttributes.BOLD}>
                       Start from a safe local boundary
                     </text>
@@ -159,7 +159,10 @@ function AstraNoWorkspaceModeContent(props: {
                   <text fg={palette.text}>
                     <span style={{ fg: palette.primary }}>[S]</span> System
                   </text>
-                  <Show when={props.snapshot.recentSessions.length > 0 && !compact()}>
+                  <Show
+                    when={props.snapshot.recentSessions.length > 0 && !compact()}
+                    fallback={<box height={0} />}
+                  >
                     <box flexDirection="column">
                       <text fg={palette.muted}>Recent sessions</text>
                       <For each={props.snapshot.recentSessions}>
@@ -184,7 +187,7 @@ function AstraNoWorkspaceModeContent(props: {
           <text fg={palette.text}>
             <span style={{ fg: palette.primary }}>[Q]</span> Exit
           </text>
-          <Show when={!compact() && !opening()}>
+          <Show when={!compact() && !opening()} fallback={<box height={0} />}>
             <text fg={palette.muted}>Create is governed · Continue remains unavailable until session recovery exists.</text>
           </Show>
         </box>
