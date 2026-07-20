@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdirSync, renameSync, writeFileSync } from "node:fs"
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { constants, mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { basename, dirname, join } from "node:path"
+import { dlopen, ptr } from "bun:ffi"
 import {
   createWorkSessionStoreInternal,
   workSessionDatabasePathInternal,
@@ -541,6 +542,20 @@ describe("durable Astra work-session store", () => {
     await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "not_found" })
   })
 
+  test.each(["session-directory-fsync", "state-root-fsync"] as const)(
+    "never reports create success when the %s publication boundary fails",
+    async (nativeFailure) => {
+      const fixture = await makeFixture(`create-${nativeFailure}`)
+      const failing = createWorkSessionStoreInternal({ stateRoot: fixture.stateRoot, nativeFailure })
+
+      await expect(failing.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+      const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+      expect((await lstat(databasePath)).size).toBe(0)
+      await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "not_found" })
+      expect(await fixture.store.list()).toEqual([])
+    },
+  )
+
   test("does not delete a replacement SQLite family during failed-create cleanup", async () => {
     const fixture = await makeFixture("cleanup-swap")
     const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
@@ -694,6 +709,61 @@ describe("durable Astra work-session store", () => {
     },
   )
 
+  test("closes the current SQLite-family descriptor when validation fails before registration", async () => {
+    const fixture = await makeFixture("family-fd-balance")
+    const record = await fixture.store.create(fixture.createInput)
+    const descriptorEvents: Array<Readonly<{ state: "opened" | "closed"; suffix: string; fd: number }>> = []
+    const failing = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      nativeFailure: "database-family-stat",
+      observeDatabaseFamilyFD: (event) => descriptorEvents.push(event),
+    })
+
+    await expect(
+      failing.delete({
+        sessionID: fixture.sessionID,
+        expectedSequence: record.projection.sequence,
+        expectedProjectionDigest: record.projection.projectionDigest,
+      }),
+    ).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(descriptorEvents.map(({ state, suffix }) => ({ state, suffix }))).toEqual([
+      { state: "opened", suffix: "" },
+      { state: "closed", suffix: "" },
+    ])
+    expect(await fixture.store.load(fixture.sessionID)).toEqual(record)
+  })
+
+  test.each([
+    ["status", (record: Record<string, unknown>) => ({ ...record, status: "future" })],
+    ["session ID", (record: Record<string, unknown>) => ({ ...record, sessionID: "../invalid" })],
+    ["digest", (record: Record<string, unknown>) => ({ ...record, projectionDigest: "not-a-digest" })],
+    ["sequence", (record: Record<string, unknown>) => ({ ...record, sequence: 0 })],
+    [
+      "status union",
+      (record: Record<string, unknown>) => ({ ...record, status: "create-failed", sequence: 1 }),
+    ],
+  ] as const)("treats a corrupt tombstone %s as unavailable for load, list, and delete", async (_label, corrupt) => {
+    const fixture = await makeFixture(`corrupt-tombstone-${_label.replace(" ", "-")}`)
+    const record = await fixture.store.create(fixture.createInput)
+    const deleteInput = {
+      sessionID: fixture.sessionID,
+      expectedSequence: record.projection.sequence,
+      expectedProjectionDigest: record.projection.projectionDigest,
+    } as const
+    await fixture.store.delete(deleteInput)
+    await overwriteRawTombstone(fixture.stateRoot, fixture.sessionID, corrupt({
+      schemaVersion: 1,
+      sessionID: fixture.sessionID,
+      status: "deleted",
+      sequence: record.projection.sequence,
+      projectionDigest: record.projection.projectionDigest,
+    }))
+
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "state_unavailable" })
+    await expect(fixture.store.list()).rejects.toMatchObject({ code: "state_unavailable" })
+    await expect(fixture.store.delete(deleteInput)).rejects.toMatchObject({ code: "state_unavailable" })
+  })
+
   test("reloads ambiguous effects as reconciliation-required and never invokes an effect adapter", async () => {
     const fixture = await makeFixture("ambiguous-effect")
     const store = createWorkSessionStoreInternal({ stateRoot: fixture.stateRoot })
@@ -728,6 +798,29 @@ describe("durable Astra work-session store", () => {
     expect((await fixture.store.list()).map((record) => record.sessionID)).toEqual([fixture.sessionID])
     await writeFile(workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID), "corrupt")
     await expect(fixture.store.list()).rejects.toMatchObject({ code: "state_unavailable" })
+  })
+
+  test("counts only live sessions while strictly validating more than 256 tombstoned entries", async () => {
+    const fixture = await makeFixture("list-tombstone-capacity")
+    await fixture.store.create(fixture.createInput)
+    await seedRawTombstonedDirectories(
+      fixture.stateRoot,
+      Array.from({ length: 257 }, (_, index) => `tombstoned-${index.toString().padStart(3, "0")}`),
+    )
+
+    expect((await fixture.store.list()).map((entry) => entry.sessionID)).toEqual([fixture.sessionID])
+  })
+
+  test("refuses create before effects when the bounded physical inventory is full", async () => {
+    const fixture = await makeFixture("physical-capacity")
+    const sessionIDs = ["physical-capacity-0", "physical-capacity-1", "physical-capacity-2"]
+    await seedRawTombstonedDirectories(fixture.stateRoot, sessionIDs)
+    const before = await readdir(fixture.stateRoot)
+    const bounded = createWorkSessionStoreInternal({ stateRoot: fixture.stateRoot, physicalEntryLimit: 3 })
+
+    await expect(bounded.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(await readdir(fixture.stateRoot)).toEqual(before)
+    expect(await exists(workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID))).toBe(false)
   })
 })
 
@@ -771,6 +864,61 @@ function later(offset: number) {
 
 async function exists(path: string) {
   return lstat(path).then(() => true, () => false)
+}
+
+async function seedRawTombstonedDirectories(stateRoot: string, sessionIDs: ReadonlyArray<string>) {
+  await Promise.all(
+    sessionIDs.map((sessionID) => mkdir(dirname(workSessionDatabasePathInternal(stateRoot, sessionID)), { mode: 0o700 })),
+  )
+  const library = openXattrLibrary()
+  const handle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  try {
+    for (const sessionID of sessionIDs) {
+      writeRawTombstone(handle.fd, library, sessionID, {
+        schemaVersion: 1,
+        sessionID,
+        status: "deleted",
+        sequence: 1,
+        projectionDigest: `sha256:${"a".repeat(64)}`,
+      })
+    }
+    await handle.sync()
+  } finally {
+    await handle.close()
+    library.close()
+  }
+}
+
+async function overwriteRawTombstone(stateRoot: string, sessionID: string, tombstone: unknown) {
+  const library = openXattrLibrary()
+  const handle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+  try {
+    writeRawTombstone(handle.fd, library, sessionID, tombstone)
+    await handle.sync()
+  } finally {
+    await handle.close()
+    library.close()
+  }
+}
+
+function writeRawTombstone(
+  rootFD: number,
+  library: ReturnType<typeof openXattrLibrary>,
+  sessionID: string,
+  tombstone: unknown,
+) {
+  const directoryName = basename(dirname(workSessionDatabasePathInternal("/state", sessionID)))
+  const name = Buffer.from(`com.astra.work-session.tombstone.${directoryName}\0`)
+  const value = Buffer.from(canonicalJson(tombstone))
+  if (library.symbols.fsetxattr(rootFD, ptr(name), ptr(value), value.length, 0, 0) !== 0) {
+    throw new Error(`could not seed tombstone for ${sessionID}`)
+  }
+}
+
+function openXattrLibrary() {
+  return dlopen("/usr/lib/libSystem.B.dylib", {
+    fsetxattr: { args: ["i32", "ptr", "ptr", "usize", "u32", "i32"], returns: "i32" },
+  })
 }
 
 function canonicalJson(input: unknown): string {
