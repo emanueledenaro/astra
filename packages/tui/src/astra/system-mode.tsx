@@ -87,7 +87,9 @@ function AstraSystemModeContent(props: {
 }) {
   const dimensions = useTerminalDimensions()
   const compact = createMemo(() => dimensions().width < 62 || dimensions().height < 18)
-  const connectable = createMemo(() => props.snapshot.providers.find((provider) => provider.credential === "missing"))
+  const connectable = createMemo(() =>
+    props.snapshot.providers.find((provider) => provider.id === "anthropic" && provider.credential === "missing"),
+  )
 
   useKeyboard((event) => {
     if (isAstraSystemModeExitKey(event)) return props.onDecision({ kind: "exit" })

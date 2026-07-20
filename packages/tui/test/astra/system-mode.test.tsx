@@ -115,3 +115,25 @@ test("returns only typed Connect, Review, or Exit intent locally", async () => {
   expect(isAstraSystemModeExitKey({ name: "c", ctrl: true })).toBeTrue()
   expect(isAstraSystemModeExitKey({ name: "c", ctrl: false })).toBeFalse()
 })
+
+test("keeps an unsupported missing provider visible but does not expose Connect", async () => {
+  const unsupported = {
+    ...snapshot,
+    providers: [{ id: "unsupported", name: "Unsupported", credential: "missing" }],
+  } as const
+  const decisions: Array<unknown> = []
+  const app = await testRender(
+    () => <AstraSystemMode snapshot={unsupported} onDecision={(decision) => decisions.push(decision)} />,
+    { width: 96, height: 30 },
+  )
+  try {
+    await app.renderOnce()
+    app.mockInput.pressKey("c")
+
+    expect(app.captureCharFrame()).toContain("Unsupported · credential missing")
+    expect(app.captureCharFrame()).not.toContain("[C] Connect provider")
+    expect(decisions).toEqual([])
+  } finally {
+    app.renderer.destroy()
+  }
+})

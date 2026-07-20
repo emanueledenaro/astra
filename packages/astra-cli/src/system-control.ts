@@ -4,7 +4,6 @@ import {
   type AstraSystemDecision,
   type AstraSystemSnapshot,
 } from "@astra/domain/system-control"
-import { operationLedgerPath } from "./app-state"
 import { loadParentAnthropicAuthReader } from "./provider-auth-reader"
 import { readAstraProviderCatalog, type ProviderCatalogResult } from "./provider-catalog"
 import { connectParentAnthropicCredential } from "./provider-connect"
@@ -12,15 +11,13 @@ import { connectParentAnthropicCredential } from "./provider-connect"
 const astraSystemVersion = "1.18.3"
 
 type GlobalExtension = Readonly<{ kind: "skill" | "plugin" | "mcp"; id: string; state: string }>
-type OperationProjection = Readonly<{
-  operations: ReadonlyArray<Readonly<{ operationID: string; state: string; updatedAt: string }>>
-}>
+type RecentReceipt = AstraSystemSnapshot["recentReceipts"][number]
 
 export type AstraSystemControlDependencies = Readonly<{
   readCatalog: () => ProviderCatalogResult
   readCredential: () => Promise<unknown | undefined>
   listGlobalExtensions: () => Promise<ReadonlyArray<GlobalExtension>>
-  listOperations: (ledgerFilename: string) => Promise<OperationProjection>
+  listRecentReceipts: () => Promise<ReadonlyArray<RecentReceipt>>
 }>
 
 export type AstraSystemRouteResult =
@@ -40,7 +37,7 @@ export async function buildAstraSystemSnapshot(
   const catalog = readCatalog(dependencies.readCatalog)
   const [extensions, receipts] = await Promise.all([
     readExtensions(dependencies.listGlobalExtensions),
-    readReceipts(dependencies.listOperations),
+    readReceipts(dependencies.listRecentReceipts),
   ])
   const providers = catalog.ok
     ? [
@@ -116,8 +113,8 @@ export async function runAstraSystemControl(): Promise<number> {
 const defaultDependencies: AstraSystemControlDependencies = {
   readCatalog: readAstraProviderCatalog,
   readCredential: readParentAnthropicCredential,
-  listGlobalExtensions: readGlobalExtensions,
-  listOperations: readGlobalOperations,
+  listGlobalExtensions: emptyExtensions,
+  listRecentReceipts: emptyReceipts,
 }
 
 function readCatalog(read: () => ProviderCatalogResult) {
@@ -150,14 +147,9 @@ async function readExtensions(read: () => Promise<ReadonlyArray<GlobalExtension>
   }
 }
 
-async function readReceipts(read: (ledgerFilename: string) => Promise<OperationProjection>) {
+async function readReceipts(read: () => Promise<ReadonlyArray<RecentReceipt>>) {
   try {
-    const projection = await read(operationLedgerPath())
-    return projection.operations.map((operation) => ({
-      operationID: operation.operationID,
-      state: operation.state,
-      observedAt: operation.updatedAt,
-    }))
+    return await read()
   } catch {
     return []
   }
@@ -173,31 +165,12 @@ async function readParentAnthropicCredential() {
   }
 }
 
-async function readGlobalExtensions(): Promise<ReadonlyArray<GlobalExtension>> {
-  try {
-    const moduleURL = new URL("../../opencode/src/plugin/meta.ts", import.meta.url)
-    const loaded: unknown = await import(moduleURL.href)
-    if (!isGlobalPluginMetadataModule(loaded)) return []
-    const inventory = await loaded.PluginMeta.list()
-    const record = plainRecord(inventory)
-    if (!record) return []
-    return Object.values(record)
-      .flatMap((entry) => {
-        const record = plainRecord(entry)
-        if (!record || typeof record.id !== "string" || !safeExtensionID(record.id)) return []
-        return [{ kind: "plugin" as const, id: record.id, state: "recorded" as const }]
-      })
-      .toSorted((left, right) => left.id.localeCompare(right.id))
-  } catch {
-    return []
-  }
+async function emptyExtensions(): Promise<ReadonlyArray<GlobalExtension>> {
+  return []
 }
 
-async function readGlobalOperations(ledgerFilename: string): Promise<OperationProjection> {
-  const moduleName = ["@astra/runtime", "operation-view"].join("/")
-  const loaded: unknown = await import(moduleName)
-  if (!isOperationViewModule(loaded)) throw new Error("Astra Operation ledger projection is unavailable")
-  return loaded.listOperationViews(ledgerFilename)
+async function emptyReceipts(): Promise<ReadonlyArray<RecentReceipt>> {
+  return []
 }
 
 async function loadSystemModeModule(): Promise<Readonly<{
@@ -221,35 +194,6 @@ function plainRecord(input: unknown): Record<string, unknown> | null {
     output[key] = descriptor.value
   }
   return output
-}
-
-function safeExtensionID(input: string) {
-  return input.length > 0 && input.length <= 256 && input === input.trim() && !/\p{C}/u.test(input)
-}
-
-function isGlobalPluginMetadataModule(value: unknown): value is Readonly<{
-  PluginMeta: Readonly<{ list: () => Promise<unknown> }>
-}> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "PluginMeta" in value &&
-    typeof value.PluginMeta === "object" &&
-    value.PluginMeta !== null &&
-    "list" in value.PluginMeta &&
-    typeof value.PluginMeta.list === "function"
-  )
-}
-
-function isOperationViewModule(value: unknown): value is Readonly<{
-  listOperationViews: (ledgerFilename: string) => Promise<OperationProjection>
-}> {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    "listOperationViews" in value &&
-    typeof value.listOperationViews === "function"
-  )
 }
 
 function isSystemModeModule(value: unknown): value is Readonly<{

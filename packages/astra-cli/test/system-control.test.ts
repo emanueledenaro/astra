@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import {
   buildAstraSystemSnapshot,
   routeAstraSystemDecision,
@@ -21,19 +24,13 @@ const dependencies: AstraSystemControlDependencies = {
   }),
   readCredential: async () => ({ type: "api", key: "sk-ant-parent-only" }),
   listGlobalExtensions: async () => [{ kind: "plugin", id: "global-plugin", state: "recorded" }],
-  listOperations: async () => ({
-    coverage: "dispatched_operations_only",
-    operations: [
-      {
-        operationID: "90000000-0000-4000-8000-000000000001",
-        intentKind: "provider_turn",
-        state: "succeeded",
-        semanticKey: "succeeded",
-        sequence: 8,
-        updatedAt: "2026-07-20T00:00:00.000Z",
-      },
-    ],
-  }),
+  listRecentReceipts: async () => [
+    {
+      operationID: "90000000-0000-4000-8000-000000000001",
+      state: "succeeded",
+      observedAt: "2026-07-20T00:00:00.000Z",
+    },
+  ],
 }
 
 describe("Astra global System Control parent", () => {
@@ -67,7 +64,7 @@ describe("Astra global System Control parent", () => {
       listGlobalExtensions: async () => {
         throw new Error("inventory unavailable")
       },
-      listOperations: async () => {
+      listRecentReceipts: async () => {
         throw new Error("ledger unavailable")
       },
     })
@@ -77,6 +74,31 @@ describe("Astra global System Control parent", () => {
     expect(snapshot.extensions).toEqual([])
     expect(snapshot.recentSessions).toEqual([])
     expect(snapshot.recentReceipts).toEqual([])
+  })
+
+  test("default sources ignore project-directed state and invent no recent receipts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "astra-system-control-canary-"))
+    const canary = join(root, "plugin-meta.json")
+    const previousDataDirectory = process.env.ASTRA_DATA_DIR
+    const previousPluginMetadata = process.env.OPENCODE_PLUGIN_META_FILE
+    await writeFile(canary, JSON.stringify({ canary: { id: "canary-plugin" } }))
+    process.env.ASTRA_DATA_DIR = "."
+    process.env.OPENCODE_PLUGIN_META_FILE = canary
+    try {
+      const snapshot = await buildAstraSystemSnapshot("manual")
+      const source = await readFile(new URL("../src/system-control.ts", import.meta.url), "utf8")
+
+      expect(snapshot.extensions).toEqual([])
+      expect(snapshot.recentReceipts).toEqual([])
+      expect(JSON.stringify(snapshot)).not.toContain("canary-plugin")
+      expect(source).not.toMatch(/operationLedgerPath|plugin\/meta|PluginMeta|listOperationViews|ASTRA_DATA_DIR|OPENCODE_PLUGIN_META_FILE/)
+    } finally {
+      if (previousDataDirectory === undefined) delete process.env.ASTRA_DATA_DIR
+      else process.env.ASTRA_DATA_DIR = previousDataDirectory
+      if (previousPluginMetadata === undefined) delete process.env.OPENCODE_PLUGIN_META_FILE
+      else process.env.OPENCODE_PLUGIN_META_FILE = previousPluginMetadata
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   test("routes only missing-provider setup through the trusted parent and keeps review in this session", async () => {
