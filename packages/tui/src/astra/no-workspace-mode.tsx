@@ -2,7 +2,11 @@
 import { TextAttributes, createCliRenderer } from "@opentui/core"
 import { render, useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createMemo, createSignal } from "solid-js"
-import type { AstraLaunchpadDecision, AstraLaunchpadSnapshot } from "@astra/domain/launchpad"
+import {
+  parseAstraLaunchpadSnapshot,
+  type AstraLaunchpadDecision,
+  type AstraLaunchpadSnapshot,
+} from "@astra/domain/launchpad"
 import { lynxFrame } from "../component/lynx-model"
 
 const palette = {
@@ -20,10 +24,20 @@ const emptySnapshot: AstraLaunchpadSnapshot = { recentSessions: [] }
 
 export const ASTRA_NO_WORKSPACE_STATUS = "NO WORKSPACE · NO PROJECT EFFECTS"
 
+export type AstraNoWorkspaceModeEntry =
+  | Readonly<{ ok: true; snapshot: AstraLaunchpadSnapshot }>
+  | Readonly<{ ok: false }>
+
+export function createAstraNoWorkspaceModeEntry(snapshot: unknown): AstraNoWorkspaceModeEntry {
+  const parsed = parseAstraLaunchpadSnapshot(snapshot)
+  if (!parsed.ok) return { ok: false }
+  return { ok: true, snapshot: parsed.value }
+}
+
 /** Opens the inert Launchpad and returns the user's requested parent-owned action. */
-export async function runAstraNoWorkspaceMode(
-  snapshot: AstraLaunchpadSnapshot = emptySnapshot,
-): Promise<AstraLaunchpadDecision> {
+export async function runAstraNoWorkspaceMode(snapshot: unknown = emptySnapshot): Promise<AstraLaunchpadDecision> {
+  const entry = createAstraNoWorkspaceModeEntry(snapshot)
+  if (!entry.ok) return { kind: "exit" }
   const renderer = await createCliRenderer({
     targetFps: 30,
     exitOnCtrlC: false,
@@ -43,7 +57,7 @@ export async function runAstraNoWorkspaceMode(
   renderer.once("destroy", () => complete({ kind: "exit" }))
 
   try {
-    await render(() => <AstraNoWorkspaceMode snapshot={snapshot} onDecision={complete} />, renderer)
+    await render(() => <AstraNoWorkspaceMode snapshot={entry.snapshot} onDecision={complete} />, renderer)
     return await decision
   } finally {
     if (!renderer.isDestroyed) renderer.destroy()
@@ -51,6 +65,15 @@ export async function runAstraNoWorkspaceMode(
 }
 
 export function AstraNoWorkspaceMode(props: {
+  snapshot: unknown
+  onDecision: (decision: AstraLaunchpadDecision) => void
+}) {
+  const entry = createAstraNoWorkspaceModeEntry(props.snapshot)
+  if (!entry.ok) return <AstraNoWorkspaceModeUnavailable />
+  return <AstraNoWorkspaceModeContent snapshot={entry.snapshot} onDecision={props.onDecision} />
+}
+
+function AstraNoWorkspaceModeContent(props: {
   snapshot: AstraLaunchpadSnapshot
   onDecision: (decision: AstraLaunchpadDecision) => void
 }) {
@@ -166,6 +189,14 @@ export function AstraNoWorkspaceMode(props: {
           </Show>
         </box>
       </box>
+    </box>
+  )
+}
+
+function AstraNoWorkspaceModeUnavailable() {
+  return (
+    <box width="100%" height="100%" backgroundColor={palette.background} alignItems="center" justifyContent="center">
+      <text fg={palette.warning}>Launchpad data unavailable</text>
     </box>
   )
 }

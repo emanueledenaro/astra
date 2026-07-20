@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises"
 import {
   ASTRA_NO_WORKSPACE_STATUS,
   AstraNoWorkspaceMode,
+  createAstraNoWorkspaceModeEntry,
   isAstraNoWorkspaceModeExitKey,
 } from "../../src/astra/no-workspace-mode"
 
@@ -62,6 +63,34 @@ test("returns an Open decision only after an absolute path is submitted", async 
     app.mockInput.pressKey("\r")
 
     expect(decisions).toEqual([{ kind: "open-workspace", path: "/work/astra" }])
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("fails closed before rendering malformed supplied snapshot data", async () => {
+  const hostileSnapshot = {
+    recentSessions: [
+      { sessionID: "session-1", workspaceRoot: "/attacker\nDO NOT RENDER", updatedAt: "2026-07-20T00:00:00.000Z" },
+    ],
+  }
+  const decisions: Array<unknown> = []
+
+  expect(createAstraNoWorkspaceModeEntry(hostileSnapshot)).toEqual({ ok: false })
+
+  const app = await testRender(
+    () => <AstraNoWorkspaceMode snapshot={hostileSnapshot} onDecision={(decision) => decisions.push(decision)} />,
+    { width: 88, height: 24 },
+  )
+  try {
+    await app.renderOnce()
+    const frame = app.captureCharFrame()
+    app.mockInput.pressKey("s")
+    app.mockInput.pressKey("q")
+
+    expect(frame).toContain("Launchpad data unavailable")
+    expect(frame).not.toContain("DO NOT RENDER")
+    expect(decisions).toEqual([])
   } finally {
     app.renderer.destroy()
   }

@@ -1,7 +1,6 @@
 #!/usr/bin/env -S bun --config=/dev/null --no-env-file --no-install
 
 import { fileURLToPath } from "node:url"
-import { parseAstraLaunchpadDecision } from "@astra/domain/launchpad"
 import {
   runWorkspaceGate,
   type DurableDenial,
@@ -15,6 +14,7 @@ import { operationLedgerPath, receiptSpoolPath } from "./app-state"
 import { createTerminalIO } from "./terminal-io"
 import { openAstraWorkspaceSession } from "./workspace-session"
 import { parseAstraArguments } from "./arguments"
+import { routeAstraLaunchpadDecision } from "./launchpad-routing"
 
 type DeniedLedgerModule = Readonly<{
   recordDeniedControlledWrite: (
@@ -178,11 +178,10 @@ async function runNoWorkspaceMode() {
   const moduleName = ["@opencode-ai/tui", "astra/no-workspace-mode"].join("/")
   const loaded: unknown = await import(moduleName)
   if (!isNoWorkspaceModeModule(loaded)) throw new Error("The Astra No Workspace interface is unavailable")
-  const decision = parseAstraLaunchpadDecision(await loaded.runAstraNoWorkspaceMode())
-  if (!decision.ok) throw new Error("The Astra Launchpad returned an invalid decision")
-  if (decision.value.kind === "open-workspace") return openLaunchpadWorkspace(decision.value.path)
-  if (decision.value.kind === "open-system") return runSystemMode()
-  return 0
+  return routeAstraLaunchpadDecision(await loaded.runAstraNoWorkspaceMode(), {
+    openWorkspace: openLaunchpadWorkspace,
+    openSystem: runSystemMode,
+  })
 }
 
 async function openLaunchpadWorkspace(workspace: string) {

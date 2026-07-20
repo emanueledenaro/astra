@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { routeAstraLaunchpadDecision } from "../src/launchpad-routing"
 const roots: Array<string> = []
 const packageRoot = new URL("..", import.meta.url).pathname
 
@@ -10,18 +11,24 @@ afterAll(async () => {
 })
 
 describe("Astra CLI durable state", () => {
-  test("the CLI parent validates and routes Launchpad Open and System intents", async () => {
-    const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8")
+  test("the CLI parent routes Launchpad decisions through injected trusted seams", async () => {
+    const calls: Array<string> = []
+    const dependencies = {
+      openWorkspace: async (path: string) => {
+        calls.push(`workspace:${path}`)
+        return 41
+      },
+      openSystem: async () => {
+        calls.push("system")
+        return 42
+      },
+    }
 
-    expect(source).toContain('import { parseAstraLaunchpadDecision } from "@astra/domain/launchpad"')
-    expect(source).toContain("const decision = parseAstraLaunchpadDecision(await loaded.runAstraNoWorkspaceMode())")
-    expect(source).toContain(
-      'if (decision.value.kind === "open-workspace") return openLaunchpadWorkspace(decision.value.path)',
-    )
-    expect(source).toContain('if (decision.value.kind === "open-system") return runSystemMode()')
-    expect(source).toContain("async function openLaunchpadWorkspace(workspace: string)")
-    expect(source).toContain("? runProduct(workspace)")
-    expect(source).toContain(": relaunchProductWithBrowserRuntime([workspace])")
+    expect(await routeAstraLaunchpadDecision({ kind: "open-workspace", path: "/work/astra" }, dependencies)).toBe(41)
+    expect(await routeAstraLaunchpadDecision({ kind: "open-system" }, dependencies)).toBe(42)
+    expect(await routeAstraLaunchpadDecision({ kind: "exit" }, dependencies)).toBe(0)
+    expect(await routeAstraLaunchpadDecision({ kind: "open-workspace", path: "relative" }, dependencies)).toBe(1)
+    expect(calls).toEqual(["workspace:/work/astra", "system"])
   })
 
   test("System Mode rejects a non-interactive terminal before creating any local state", async () => {

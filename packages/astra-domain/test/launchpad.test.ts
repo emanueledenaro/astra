@@ -19,14 +19,20 @@ describe("Astra Launchpad contract", () => {
   })
 
   test("rejects relative and control-character workspace paths", () => {
-    expect(parseAstraLaunchpadDecision({ kind: "open-workspace", path: "relative/workspace" })).toEqual({
-      ok: false,
-      reason: "invalid_launchpad_decision",
-    })
-    expect(parseAstraLaunchpadDecision({ kind: "open-workspace", path: "/work/astra\nnext" })).toEqual({
-      ok: false,
-      reason: "invalid_launchpad_decision",
-    })
+    for (const path of [
+      "relative/workspace",
+      "/work/astra\nnext",
+      "/work/astra\rnext",
+      "/work/astra\u0000",
+      "/work/astra\u001b",
+      "/work/astra\u007f",
+      "/work/astra\u200e",
+    ]) {
+      expect(parseAstraLaunchpadDecision({ kind: "open-workspace", path })).toEqual({
+        ok: false,
+        reason: "invalid_launchpad_decision",
+      })
+    }
   })
 
   test("accepts exact recent-session records and rejects malformed records", () => {
