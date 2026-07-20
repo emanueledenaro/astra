@@ -349,12 +349,17 @@ function executeRawHttpRequest(
         if (settled) return
         try {
           assertBeforeDeadline(authority, now())
+          if (chunk.byteLength > maximumWireBytes - total) return fail()
+          chunks.push(Buffer.from(chunk))
+          total += chunk.byteLength
+          const response = tryParseCompleteRawResponse(
+            Buffer.concat(chunks, total),
+            adapterRequest.wireRequest.maximumResponseBytes,
+          )
+          if (response) succeed(response)
         } catch {
-          return fail()
+          fail()
         }
-        if (chunk.byteLength > maximumWireBytes - total) return fail()
-        chunks.push(Buffer.from(chunk))
-        total += chunk.byteLength
       })
       socket.once("error", fail)
       socket.once("end", () => {
@@ -410,6 +415,53 @@ function makeRawRequest(
 }
 
 function parseRawResponse(input: Buffer, maximumBodyBytes: number) {
+  const head = parseRawResponseHead(input)
+  const body = input.subarray(head.headerBytes)
+  let decodedBody: Uint8Array
+  if (head.transferEncoding) {
+    decodedBody = decodeChunkedBody(body, maximumBodyBytes)
+  } else if (head.contentLength !== undefined) {
+    const expected = parseContentLength(head.contentLength, maximumBodyBytes)
+    if (body.byteLength !== expected) throw new Error("Provider response length rejected")
+    decodedBody = Uint8Array.from(body)
+  } else {
+    if (body.byteLength > maximumBodyBytes) throw new Error("Provider response limit exceeded")
+    decodedBody = Uint8Array.from(body)
+  }
+  return Object.freeze({
+    body: decodedBody,
+    evidence: Object.freeze({
+      statusCode: head.statusCode,
+      contentType: normalizeContentType(singleHeader(head.headers, "content-type")),
+      headerBytes: head.headerBytes,
+    }),
+  })
+}
+
+function tryParseCompleteRawResponse(input: Buffer, maximumBodyBytes: number) {
+  const separator = input.indexOf("\r\n\r\n")
+  if (separator < 0) {
+    if (input.byteLength > maximumResponseHeaderBytes) throw new Error("Provider response headers invalid")
+    return undefined
+  }
+  const head = parseRawResponseHead(input)
+  const body = input.subarray(head.headerBytes)
+  if (head.transferEncoding) {
+    const encodedBytes = completeChunkedBodyBytes(body, maximumBodyBytes)
+    if (encodedBytes === undefined) return undefined
+    if (body.byteLength !== encodedBytes) throw new Error("Provider response contains trailing bytes")
+    return parseRawResponse(input, maximumBodyBytes)
+  }
+  if (head.contentLength !== undefined) {
+    const expected = parseContentLength(head.contentLength, maximumBodyBytes)
+    if (body.byteLength < expected) return undefined
+    if (body.byteLength > expected) throw new Error("Provider response length rejected")
+    return parseRawResponse(input, maximumBodyBytes)
+  }
+  return undefined
+}
+
+function parseRawResponseHead(input: Buffer) {
   const separator = input.indexOf("\r\n\r\n")
   const headerBytes = separator + 4
   if (separator < 0 || headerBytes > maximumResponseHeaderBytes) {
@@ -440,7 +492,6 @@ function parseRawResponse(input: Buffer, maximumBodyBytes: number) {
     const value = rawValue.trim()
     headers.set(name, [...(headers.get(name) ?? []), value])
   })
-  const body = input.subarray(separator + 4)
   const contentEncoding = singleHeader(headers, "content-encoding")
   if (contentEncoding && contentEncoding.toLowerCase() !== "identity") {
     throw new Error("Provider response encoding unsupported")
@@ -448,29 +499,25 @@ function parseRawResponse(input: Buffer, maximumBodyBytes: number) {
   const transferEncoding = singleHeader(headers, "transfer-encoding")
   const contentLength = singleHeader(headers, "content-length")
   if (transferEncoding && contentLength) throw new Error("Provider response framing ambiguous")
-  let decodedBody: Uint8Array
   if (transferEncoding) {
     if (transferEncoding.toLowerCase() !== "chunked") throw new Error("Provider response framing unsupported")
-    decodedBody = decodeChunkedBody(body, maximumBodyBytes)
-  } else if (contentLength !== undefined) {
-    if (!/^(?:0|[1-9][0-9]*)$/u.test(contentLength)) throw new Error("Provider response length invalid")
-    const expected = Number(contentLength)
-    if (!Number.isSafeInteger(expected) || expected > maximumBodyBytes || body.byteLength !== expected) {
-      throw new Error("Provider response length rejected")
-    }
-    decodedBody = Uint8Array.from(body)
-  } else {
-    if (body.byteLength > maximumBodyBytes) throw new Error("Provider response limit exceeded")
-    decodedBody = Uint8Array.from(body)
   }
   return Object.freeze({
-    body: decodedBody,
-    evidence: Object.freeze({
-      statusCode,
-      contentType: normalizeContentType(singleHeader(headers, "content-type")),
-      headerBytes,
-    }),
+    contentLength,
+    headerBytes,
+    headers,
+    statusCode,
+    transferEncoding,
   })
+}
+
+function parseContentLength(input: string, maximumBodyBytes: number) {
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(input)) throw new Error("Provider response length invalid")
+  const expected = Number(input)
+  if (!Number.isSafeInteger(expected) || expected > maximumBodyBytes) {
+    throw new Error("Provider response length rejected")
+  }
+  return expected
 }
 
 function normalizeContentType(input: string | undefined) {
@@ -513,6 +560,39 @@ function decodeChunkedBody(input: Buffer, maximumBodyBytes: number) {
       throw new Error("Provider chunk body is truncated")
     }
     chunks.push(input.subarray(offset, end))
+    total += size
+    offset = end + 2
+  }
+}
+
+function completeChunkedBodyBytes(input: Buffer, maximumBodyBytes: number) {
+  let offset = 0
+  let total = 0
+  while (true) {
+    const lineEnd = input.indexOf("\r\n", offset)
+    if (lineEnd < 0) {
+      if (input.byteLength - offset > 128) throw new Error("Provider chunk header invalid")
+      return undefined
+    }
+    if (lineEnd - offset > 128) throw new Error("Provider chunk header invalid")
+    const line = input.subarray(offset, lineEnd).toString("ascii")
+    const sizeText = line.split(";", 1)[0] ?? ""
+    if (!/^[0-9a-fA-F]+$/u.test(sizeText)) throw new Error("Provider chunk size invalid")
+    const size = Number.parseInt(sizeText, 16)
+    if (!Number.isSafeInteger(size) || size > maximumBodyBytes - total) {
+      throw new Error("Provider chunk exceeds response limit")
+    }
+    offset = lineEnd + 2
+    if (size === 0) {
+      if (input.byteLength < offset + 2) return undefined
+      if (input[offset] !== 13 || input[offset + 1] !== 10) {
+        throw new Error("Provider response trailers are unsupported")
+      }
+      return offset + 2
+    }
+    const end = offset + size
+    if (input.byteLength < end + 2) return undefined
+    if (input[end] !== 13 || input[end + 1] !== 10) throw new Error("Provider chunk body is truncated")
     total += size
     offset = end + 2
   }
@@ -825,6 +905,7 @@ function requireString(input: unknown, label: string) {
 export const providerTurnTransportTestOnly = Object.freeze({
   assertConnectedPeer,
   parseRawResponse,
+  tryParseCompleteRawResponse,
   pinnedAddress,
   resolveProviderNetwork,
   tlsConnectionOptions,

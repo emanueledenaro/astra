@@ -530,6 +530,25 @@ describe("trusted provider turn transport boundary", () => {
       ),
     ).toThrow("header repeated")
   })
+
+  test("completes framed HTTP responses without waiting for a keep-alive socket to close", () => {
+    const parseComplete = providerTurnTransportTestOnly.tryParseCompleteRawResponse
+    const chunkedHead = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n"
+    const partialChunked = Buffer.from(`${chunkedHead}5\r\nhello\r\n`)
+    expect(parseComplete(partialChunked, 32)).toBeUndefined()
+
+    const completeChunked = Buffer.concat([partialChunked, Buffer.from("0\r\n\r\n")])
+    expect(parseComplete(completeChunked, 32)).toMatchObject({
+      body: new TextEncoder().encode("hello"),
+      evidence: { statusCode: 200, contentType: "text/event-stream" },
+    })
+
+    const contentLengthHead = Buffer.from("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\n")
+    expect(parseComplete(Buffer.concat([contentLengthHead, Buffer.from("hell")]), 32)).toBeUndefined()
+    expect(parseComplete(Buffer.concat([contentLengthHead, Buffer.from("hello")]), 32)?.body).toEqual(
+      new TextEncoder().encode("hello"),
+    )
+  })
 })
 
 function startServer(fetch: (request: Request) => Response | Promise<Response>) {
