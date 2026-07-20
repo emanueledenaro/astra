@@ -87,6 +87,7 @@ type WorkSessionStoreInternalOptions = Readonly<{
   expectedUID?: number
   physicalEntryLimit?: number
   afterEventInsert?: () => void
+  afterStateRootLock?: () => void
   afterCreateFileBeforePin?: () => void
   afterFinalCreateIdentityCheck?: () => void
   afterProjectionRead?: () => void
@@ -102,6 +103,7 @@ type RequiredWorkSessionStoreInternalOptions = Readonly<{
   expectedUID: number
   physicalEntryLimit: number
   afterEventInsert?: () => void
+  afterStateRootLock?: () => void
   afterCreateFileBeforePin?: () => void
   afterFinalCreateIdentityCheck?: () => void
   afterProjectionRead?: () => void
@@ -118,6 +120,8 @@ type NativeFailure =
   | "tombstone-fsync"
   | "session-directory-fsync"
   | "state-root-fsync"
+  | "state-root-lock"
+  | "state-root-parent-fsync"
   | "database-family-stat"
 
 type DatabaseFamilyFDObservation = Readonly<{
@@ -136,6 +140,15 @@ type SessionRow = Readonly<{
 }>
 
 type PathIdentity = Readonly<{ device: string; inode: string }>
+
+type PinnedStateRoot = Readonly<{
+  stateRoot: string
+  rootHandle: Awaited<ReturnType<typeof open>>
+  rootIdentity: PathIdentity
+  library: ReturnType<typeof openSessionLibrary>
+}>
+
+type LockedStateRoot = PinnedStateRoot & Readonly<{ locked: true }>
 
 type PinnedSessionPath = Readonly<{
   stateRoot: string
@@ -178,6 +191,8 @@ const sqliteSuffixes = ["", "-journal", "-shm", "-wal"] as const
 const workSessionApplicationID = 0x41535452
 const workSessionSchemaVersion = 1
 const xattrCreate = 0x0002
+const lockExclusive = 0x02
+const lockUnlock = 0x08
 const maximumTombstoneBytes = 1_024
 const nativeFailures = new Set<NativeFailure>([
   "scrub",
@@ -185,6 +200,8 @@ const nativeFailures = new Set<NativeFailure>([
   "tombstone-fsync",
   "session-directory-fsync",
   "state-root-fsync",
+  "state-root-lock",
+  "state-root-parent-fsync",
   "database-family-stat",
 ])
 const workSessionTableSQL = `create table work_session (
@@ -237,7 +254,6 @@ async function createSession(
   if (!projected.ok) throw new WorkSessionStoreError("invalid_input", "The initial work-session projection is invalid")
   const directory = dirname(workSessionDatabasePathInternal(stateRoot, event.value.sessionID))
   const filename = join(directory, "work-session.sqlite")
-  await assertCreateCapacityIfStateRootExists(stateRoot, expectedUID, options.physicalEntryLimit)
   await prepareStateRoot(
     stateRoot,
     directory,
@@ -245,10 +261,42 @@ async function createSession(
     event.value.workspaceRoot,
     event.value.workspaceIdentity,
     expectedUID,
+    options.nativeFailure,
   )
-  await assertCreateCapacity(stateRoot, expectedUID, options.physicalEntryLimit)
-  await assertSessionIDNotTombstonedAtStateRoot(stateRoot, expectedUID, event.value.sessionID)
-  await createPrivateSessionDirectory(directory, expectedUID)
+  const lockedRoot = await acquireLockedStateRoot(
+    stateRoot,
+    expectedUID,
+    options.nativeFailure,
+    options.afterStateRootLock,
+  )
+  try {
+    await assertCreateCapacity(lockedRoot, expectedUID, options.physicalEntryLimit)
+    assertSessionIDNotTombstoned(lockedRoot, event.value.sessionID)
+    return await createSessionUnderLockedRoot(
+      lockedRoot,
+      expectedUID,
+      options,
+      event.value,
+      projected.value,
+      directory,
+      filename,
+    )
+  } finally {
+    await releaseLockedStateRoot(lockedRoot)
+  }
+}
+
+async function createSessionUnderLockedRoot(
+  lockedRoot: LockedStateRoot,
+  expectedUID: number,
+  options: RequiredWorkSessionStoreInternalOptions,
+  event: AstraWorkSessionEvent,
+  projection: AstraWorkSessionProjection,
+  directory: string,
+  filename: string,
+): Promise<AstraDurableWorkSession> {
+  const stateRoot = lockedRoot.stateRoot
+  await createPrivateSessionDirectoryAtLockedRoot(lockedRoot, directory, expectedUID)
   let createdFile = false
   let createdHandle: Awaited<ReturnType<typeof open>> | null = null
   let binding: PinnedSessionPath | null = null
@@ -264,35 +312,36 @@ async function createSession(
     const createdIdentity = identityOf(await handle.stat())
     options.afterCreateFileBeforePin?.()
     await assertHandleMatchesPath(handle, filename, expectedUID, false)
-    const bytes = buildInitialDatabaseBytes(event.value, projected.value, options.afterEventInsert)
+    const bytes = buildInitialDatabaseBytes(event, projection, options.afterEventInsert)
     options.afterFinalCreateIdentityCheck?.()
     await handle.writeFile(bytes)
     await handle.sync()
     await assertHandleMatchesPath(handle, filename, expectedUID, false)
     await assertSafeDatabaseFamily(filename, expectedUID)
     binding = await pinSessionPath(stateRoot, directory, filename, expectedUID, createdIdentity)
+    await assertBindingUsesLockedStateRoot(lockedRoot, binding)
     options.beforeDatabaseOpen?.()
     await assertPinnedSessionPath(binding, expectedUID)
     await assertSafeSessionState(
       stateRoot,
-      event.value.workspaceRoot,
-      event.value.workspaceIdentity,
+      event.workspaceRoot,
+      event.workspaceIdentity,
       directory,
       filename,
       expectedUID,
     )
     await assertPinnedSessionPath(binding, expectedUID)
     syncCreatedSessionPublication(binding, options.nativeFailure)
-    return freezeRecord({ projection: projected.value, events: [event.value] })
+    return freezeRecord({ projection, events: [event] })
   } catch (cause) {
     if (createdFile && createdHandle) {
       try {
         await scrubCreatedHandle(createdHandle)
-        await recordDeletionTombstoneAtStateRoot(stateRoot, expectedUID, event.value.sessionID, {
+        writeTombstone(lockedRoot.rootHandle.fd, event.sessionID, {
           status: "create-failed",
           sequence: 0,
           projectionDigest: null,
-        })
+        }, lockedRoot.library)
       } catch (cleanupCause) {
         throw new WorkSessionStoreError("state_unavailable", "The failed create could not be scrubbed and tombstoned", cleanupCause)
       }
@@ -939,8 +988,9 @@ async function prepareStateRoot(
   workspaceRoot: string,
   workspaceIdentity: WorkspaceIdentity,
   expectedUID: number,
+  nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
 ) {
-  await assertStateRootPlacementBeforeCreate(
+  const plan = await assertStateRootPlacementBeforeCreate(
     stateRoot,
     directory,
     filename,
@@ -948,22 +998,17 @@ async function prepareStateRoot(
     workspaceIdentity,
     expectedUID,
   )
-  await mkdir(stateRoot, { recursive: true, mode: 0o700 })
+  await createStateRootComponentsDurably(plan, expectedUID, nativeFailure)
   await assertExistingStateRoot(stateRoot, expectedUID)
   await assertNoWorkspaceStateOverlap(workspaceRoot, workspaceIdentity, stateRoot, directory, filename)
 }
 
-async function assertCreateCapacityIfStateRootExists(
-  stateRoot: string,
+async function assertCreateCapacity(
+  lockedRoot: LockedStateRoot,
   expectedUID: number,
   physicalEntryLimit: number,
 ) {
-  if (!(await pathExists(stateRoot))) return
-  await assertCreateCapacity(stateRoot, expectedUID, physicalEntryLimit)
-}
-
-async function assertCreateCapacity(stateRoot: string, expectedUID: number, physicalEntryLimit: number) {
-  const inventory = await scanSessionInventory(stateRoot, expectedUID, physicalEntryLimit)
+  const inventory = await scanPinnedStateRootInventory(lockedRoot, expectedUID, physicalEntryLimit)
   if (
     inventory.physicalCount >= physicalEntryLimit ||
     inventory.liveEntries.length >= maximumLiveSessions
@@ -976,11 +1021,33 @@ async function scanSessionInventory(stateRoot: string, expectedUID: number, phys
   await assertExistingStateRoot(stateRoot, expectedUID)
   const library = openSessionLibrary()
   let rootHandle: Awaited<ReturnType<typeof open>> | null = null
-  let directoryHandle: Awaited<ReturnType<typeof opendir>> | null = null
   try {
     rootHandle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
     await assertHandleMatchesPath(rootHandle, stateRoot, expectedUID, true)
-    directoryHandle = await opendir(stateRoot)
+    return await scanPinnedStateRootInventory({
+      stateRoot,
+      rootHandle,
+      rootIdentity: identityOf(await rootHandle.stat()),
+      library,
+    }, expectedUID, physicalEntryLimit)
+  } catch (cause) {
+    if (cause instanceof WorkSessionStoreError) throw cause
+    throw new WorkSessionStoreError("state_unavailable", "The bounded work-session inventory is unavailable", cause)
+  } finally {
+    await rootHandle?.close().catch(() => undefined)
+    library.close()
+  }
+}
+
+async function scanPinnedStateRootInventory(
+  pinnedRoot: PinnedStateRoot,
+  expectedUID: number,
+  physicalEntryLimit: number,
+) {
+  await assertPinnedStateRoot(pinnedRoot, expectedUID)
+  let directoryHandle: Awaited<ReturnType<typeof opendir>> | null = null
+  try {
+    directoryHandle = await opendir(pinnedRoot.stateRoot)
     const entries: Array<Dirent> = []
     for await (const entry of directoryHandle) {
       if (entries.length >= physicalEntryLimit) {
@@ -993,21 +1060,19 @@ async function scanSessionInventory(stateRoot: string, expectedUID: number, phys
       if (!entry.isDirectory() || entry.isSymbolicLink() || !sessionDirectoryPattern.test(entry.name)) {
         throw new WorkSessionStoreError("unsafe_state_path", "The work-session state root contains an unsafe entry")
       }
-      if (!readTombstone(rootHandle.fd, entry.name, library)) liveEntries.push(entry)
+      if (!readTombstone(pinnedRoot.rootHandle.fd, entry.name, pinnedRoot.library)) liveEntries.push(entry)
     }
-    await assertHandleMatchesPath(rootHandle, stateRoot, expectedUID, true)
+    await assertPinnedStateRoot(pinnedRoot, expectedUID)
     return Object.freeze({ physicalCount: entries.length, liveEntries: Object.freeze(liveEntries) })
   } catch (cause) {
     if (cause instanceof WorkSessionStoreError) throw cause
-    throw new WorkSessionStoreError("state_unavailable", "The bounded work-session inventory is unavailable", cause)
+    throw new WorkSessionStoreError("state_unavailable", "The pinned work-session inventory is unavailable", cause)
   } finally {
     try {
       await directoryHandle?.close()
     } catch {
       // Async directory iteration may already have closed the handle.
     }
-    await rootHandle?.close().catch(() => undefined)
-    library.close()
   }
 }
 
@@ -1032,7 +1097,7 @@ async function assertStateRootPlacementBeforeCreate(
       if (resolve(existing, ...missing) !== stateRoot) {
         throw new WorkSessionStoreError("unsafe_state_path", "The session-state path crosses an alias")
       }
-      return
+      return Object.freeze({ existingAncestor: existing, missing: Object.freeze(missing) })
     }
     const parent = dirname(existing)
     if (parent === existing) throw new WorkSessionStoreError("unsafe_state_path", "No safe state ancestor exists")
@@ -1041,22 +1106,78 @@ async function assertStateRootPlacementBeforeCreate(
   }
 }
 
+async function createStateRootComponentsDurably(
+  plan: Readonly<{ existingAncestor: string; missing: ReadonlyArray<string> }>,
+  expectedUID: number,
+  nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
+) {
+  let parent = plan.existingAncestor
+  for (const component of plan.missing) {
+    const parentHandle = await open(
+      parent,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    ).catch((cause) => {
+      throw new WorkSessionStoreError("state_unavailable", "A state-root creation parent could not be pinned", cause)
+    })
+    try {
+      await assertCreationParentHandle(parentHandle, parent, expectedUID)
+      const child = join(parent, component)
+      await mkdir(child, { mode: 0o700 }).catch((cause) => {
+        if (!isNodeError(cause, "EEXIST")) throw cause
+      })
+      await assertPrivateDirectory(child, expectedUID, "new state-root component")
+      if (nativeFailure === "state-root-parent-fsync") {
+        throw new WorkSessionStoreError("state_unavailable", "Injected state-root parent publication failure")
+      }
+      await parentHandle.sync().catch((cause) => {
+        throw new WorkSessionStoreError("state_unavailable", "A state-root component was not durably published", cause)
+      })
+      parent = child
+    } finally {
+      await parentHandle.close().catch(() => undefined)
+    }
+  }
+}
+
+async function assertCreationParentHandle(
+  handle: Awaited<ReturnType<typeof open>>,
+  path: string,
+  expectedUID: number,
+) {
+  const [pinned, current] = await Promise.all([handle.stat(), lstat(path)])
+  if (
+    !sameIdentity(pinned, current) ||
+    !pinned.isDirectory() ||
+    current.isSymbolicLink() ||
+    pinned.uid !== expectedUID ||
+    (pinned.mode & 0o022) !== 0
+  ) {
+    throw new WorkSessionStoreError("unsafe_state_path", "A state-root creation parent is unsafe")
+  }
+}
+
 async function assertExistingStateRoot(stateRoot: string, expectedUID: number) {
   await assertPrivateDirectory(stateRoot, expectedUID, "state root")
 }
 
-async function createPrivateSessionDirectory(directory: string, expectedUID: number) {
-  let created = false
-  await mkdir(directory, { mode: 0o700 }).then(
-    () => {
-      created = true
-    },
-    (cause) => {
-      if (!isNodeError(cause, "EEXIST")) throw cause
-    },
+async function createPrivateSessionDirectoryAtLockedRoot(
+  lockedRoot: LockedStateRoot,
+  directory: string,
+  expectedUID: number,
+) {
+  if (dirname(directory) !== lockedRoot.stateRoot) {
+    throw new WorkSessionStoreError("unsafe_state_path", "The session directory is outside the locked state root")
+  }
+  const result = lockedRoot.library.symbols.mkdirat(
+    lockedRoot.rootHandle.fd,
+    cString(basename(directory)),
+    0o700,
   )
+  if (result !== 0 && lastErrno(lockedRoot.library) !== 17) {
+    throw new WorkSessionStoreError("state_unavailable", "The session directory could not be claimed under the locked root")
+  }
+  await assertPinnedStateRoot(lockedRoot, expectedUID)
   await assertSafeSessionDirectory(directory, expectedUID)
-  return created
 }
 
 async function assertSafeSessionState(
@@ -1221,6 +1342,7 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     "expectedUID",
     "physicalEntryLimit",
     "afterEventInsert",
+    "afterStateRootLock",
     "afterCreateFileBeforePin",
     "afterFinalCreateIdentityCheck",
     "afterProjectionRead",
@@ -1247,6 +1369,7 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
   }
   for (const key of [
     "afterEventInsert",
+    "afterStateRootLock",
     "afterCreateFileBeforePin",
     "afterFinalCreateIdentityCheck",
     "afterProjectionRead",
@@ -1267,6 +1390,9 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     expectedUID: expectedUID as number,
     physicalEntryLimit: physicalEntryLimit as number,
     ...(typeof record.afterEventInsert === "function" ? { afterEventInsert: record.afterEventInsert as () => void } : {}),
+    ...(typeof record.afterStateRootLock === "function"
+      ? { afterStateRootLock: record.afterStateRootLock as () => void }
+      : {}),
     ...(typeof record.afterCreateFileBeforePin === "function"
       ? { afterCreateFileBeforePin: record.afterCreateFileBeforePin as () => void }
       : {}),
@@ -1292,6 +1418,83 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
       ? { nativeFailure: record.nativeFailure as NativeFailure }
       : {}),
   })
+}
+
+async function acquireLockedStateRoot(
+  stateRoot: string,
+  expectedUID: number,
+  nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
+  afterLock?: RequiredWorkSessionStoreInternalOptions["afterStateRootLock"],
+): Promise<LockedStateRoot> {
+  const library = openSessionLibrary()
+  let rootHandle: Awaited<ReturnType<typeof open>> | null = null
+  let locked = false
+  try {
+    rootHandle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    await assertHandleMatchesPath(rootHandle, stateRoot, expectedUID, true)
+    if (nativeFailure === "state-root-lock" || library.symbols.flock(rootHandle.fd, lockExclusive) !== 0) {
+      throw new WorkSessionStoreError("state_unavailable", "The pinned state-root lock could not be acquired")
+    }
+    locked = true
+    const pinned = Object.freeze({
+      stateRoot,
+      rootHandle,
+      rootIdentity: identityOf(await rootHandle.stat()),
+      library,
+      locked: true as const,
+    })
+    await assertPinnedStateRoot(pinned, expectedUID)
+    afterLock?.()
+    await assertPinnedStateRoot(pinned, expectedUID)
+    return pinned
+  } catch (cause) {
+    if (locked && rootHandle) library.symbols.flock(rootHandle.fd, lockUnlock)
+    await rootHandle?.close().catch(() => undefined)
+    library.close()
+    if (cause instanceof WorkSessionStoreError) throw cause
+    throw new WorkSessionStoreError("state_unavailable", "The state-root lock boundary is unavailable", cause)
+  }
+}
+
+async function releaseLockedStateRoot(lockedRoot: LockedStateRoot) {
+  let failure: unknown = null
+  if (lockedRoot.library.symbols.flock(lockedRoot.rootHandle.fd, lockUnlock) !== 0) {
+    failure = new WorkSessionStoreError("state_unavailable", "The pinned state-root lock could not be released")
+  }
+  await lockedRoot.rootHandle.close().catch((cause) => {
+    failure ??= new WorkSessionStoreError("state_unavailable", "The locked state-root descriptor could not be closed", cause)
+  })
+  try {
+    lockedRoot.library.close()
+  } catch (cause) {
+    failure ??= new WorkSessionStoreError("state_unavailable", "The state-root native library could not be closed", cause)
+  }
+  if (failure) throw failure
+}
+
+async function assertPinnedStateRoot(pinnedRoot: PinnedStateRoot, expectedUID: number) {
+  await assertHandleMatchesPath(pinnedRoot.rootHandle, pinnedRoot.stateRoot, expectedUID, true)
+  const facts = await pinnedRoot.rootHandle.stat()
+  if (!sameIdentityValue(pinnedRoot.rootIdentity, facts)) {
+    throw new WorkSessionStoreError("state_unavailable", "The pinned state-root identity changed")
+  }
+}
+
+async function assertBindingUsesLockedStateRoot(
+  lockedRoot: LockedStateRoot,
+  binding: PinnedSessionPath,
+) {
+  const [lockedFacts, bindingFacts] = await Promise.all([
+    lockedRoot.rootHandle.stat(),
+    binding.rootHandle.stat(),
+  ])
+  if (
+    binding.stateRoot !== lockedRoot.stateRoot ||
+    !sameIdentity(lockedFacts, bindingFacts) ||
+    !sameIdentityValue(lockedRoot.rootIdentity, bindingFacts)
+  ) {
+    throw new WorkSessionStoreError("state_unavailable", "The session claim escaped the locked state-root inode")
+  }
 }
 
 async function pinSessionPath(
@@ -1574,55 +1777,18 @@ async function scrubCreatedHandle(handle: Awaited<ReturnType<typeof open>>) {
   }
 }
 
-async function assertSessionIDNotTombstonedAtStateRoot(
-  stateRoot: string,
-  expectedUID: number,
-  sessionID: string,
-) {
-  const tombstone = await readTombstoneAtStateRoot(stateRoot, expectedUID, sessionDirectoryName(sessionID))
+function assertSessionIDNotTombstoned(lockedRoot: LockedStateRoot, sessionID: string) {
+  const tombstone = readTombstone(
+    lockedRoot.rootHandle.fd,
+    sessionDirectoryName(sessionID),
+    lockedRoot.library,
+  )
   if (tombstone) throw new WorkSessionStoreError("already_exists", "The work session has a durable tombstone")
 }
 
 async function assertSessionNotDeleted(binding: PinnedSessionPath, sessionID: string) {
   const tombstone = readTombstone(binding.rootHandle.fd, sessionDirectoryName(sessionID), binding.library)
   if (tombstone) throw new WorkSessionStoreError("not_found", "The work session was explicitly deleted")
-}
-
-async function readTombstoneAtStateRoot(stateRoot: string, expectedUID: number, directoryName: string) {
-  const library = openSessionLibrary()
-  let handle: Awaited<ReturnType<typeof open>> | null = null
-  try {
-    handle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-    await assertHandleMatchesPath(handle, stateRoot, expectedUID, true)
-    return readTombstone(handle.fd, directoryName, library)
-  } catch (cause) {
-    if (cause instanceof WorkSessionStoreError) throw cause
-    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone registry is unavailable", cause)
-  } finally {
-    await handle?.close().catch(() => undefined)
-    library.close()
-  }
-}
-
-async function recordDeletionTombstoneAtStateRoot(
-  stateRoot: string,
-  expectedUID: number,
-  sessionID: string,
-  details: Pick<WorkSessionTombstone, "status" | "sequence" | "projectionDigest">,
-) {
-  const library = openSessionLibrary()
-  let handle: Awaited<ReturnType<typeof open>> | null = null
-  try {
-    handle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
-    await assertHandleMatchesPath(handle, stateRoot, expectedUID, true)
-    writeTombstone(handle.fd, sessionID, details, library)
-  } catch (cause) {
-    if (cause instanceof WorkSessionStoreError) throw cause
-    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone could not be recorded", cause)
-  } finally {
-    await handle?.close().catch(() => undefined)
-    library.close()
-  }
 }
 
 function writeDeletionTombstone(
@@ -1760,8 +1926,10 @@ function openSessionLibrary() {
     fgetxattr: { args: ["i32", "ptr", "ptr", "usize", "u32", "i32"], returns: "i64" },
     fremovexattr: { args: ["i32", "ptr", "i32"], returns: "i32" },
     fsetxattr: { args: ["i32", "ptr", "ptr", "usize", "u32", "i32"], returns: "i32" },
+    flock: { args: ["i32", "i32"], returns: "i32" },
     fsync: { args: ["i32"], returns: "i32" },
     ftruncate: { args: ["i32", "i64"], returns: "i32" },
+    mkdirat: { args: ["i32", "ptr", "i32"], returns: "i32" },
     openat: { args: ["i32", "ptr", "i32", "i32"], returns: "i32" },
   })
 }

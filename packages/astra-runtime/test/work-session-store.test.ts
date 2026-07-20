@@ -556,6 +556,57 @@ describe("durable Astra work-session store", () => {
     },
   )
 
+  test("serializes concurrent interprocess creates across capacity scan and publication", async () => {
+    const fixture = await makeFixture("interprocess-create-lock")
+    const children = [
+      spawnConcurrentCreate(fixture, "interprocess-session-a"),
+      spawnConcurrentCreate(fixture, "interprocess-session-b"),
+    ]
+    const results = await Promise.all(children.map(readConcurrentCreate))
+
+    expect(results.filter((result) => result.status === "created")).toHaveLength(1)
+    expect(results.filter((result) => result.status === "failed" && result.code === "state_unavailable")).toHaveLength(1)
+    expect(await readdir(fixture.stateRoot)).toHaveLength(1)
+  })
+
+  test("fails closed without a session claim when the pinned state-root lock cannot be acquired", async () => {
+    const fixture = await makeFixture("state-root-lock-failure")
+    const before = await readdir(fixture.stateRoot)
+    const failing = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      nativeFailure: "state-root-lock",
+    })
+
+    await expect(failing.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(await readdir(fixture.stateRoot)).toEqual(before)
+    expect(await exists(workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID))).toBe(false)
+  })
+
+  test("never reports first-start success when a newly created state component parent cannot sync", async () => {
+    const parent = await temporaryDirectory("astra-session-first-start-parent-")
+    const stateRoot = join(parent, "Astra", "Sessions")
+    const fixture = await makeFixture("first-start-parent-fsync", { stateRoot })
+    const failing = createWorkSessionStoreInternal({
+      stateRoot,
+      nativeFailure: "state-root-parent-fsync",
+    })
+
+    await expect(failing.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(await exists(workSessionDatabasePathInternal(stateRoot, fixture.sessionID))).toBe(false)
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "not_found" })
+  })
+
+  test("does not require parent publication sync when the state root already exists", async () => {
+    const fixture = await makeFixture("existing-root-parent-sync")
+    const store = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      nativeFailure: "state-root-parent-fsync",
+    })
+
+    const created = await store.create(fixture.createInput)
+    expect(await store.load(fixture.sessionID)).toEqual(created)
+  })
+
   test("does not delete a replacement SQLite family during failed-create cleanup", async () => {
     const fixture = await makeFixture("cleanup-swap")
     const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
@@ -930,4 +981,41 @@ function canonicalJson(input: unknown): string {
     .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
     .map(([key, value]) => `${JSON.stringify(key)}:${canonicalJson(value)}`)
     .join(",")}}`
+}
+
+function spawnConcurrentCreate(
+  fixture: Awaited<ReturnType<typeof makeFixture>>,
+  sessionID: string,
+) {
+  const helperURL = new URL("../src/work-session-store-internal.ts", import.meta.url).href
+  const input = { ...fixture.createInput, sessionID }
+  const source = `
+    const { createWorkSessionStoreInternal } = await import(${JSON.stringify(helperURL)});
+    const store = createWorkSessionStoreInternal({
+      stateRoot: ${JSON.stringify(fixture.stateRoot)},
+      physicalEntryLimit: 1,
+      afterStateRootLock: () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150),
+    });
+    try {
+      await store.create(${JSON.stringify(input)});
+      process.stdout.write(JSON.stringify({ status: "created" }));
+    } catch (error) {
+      process.stdout.write(JSON.stringify({ status: "failed", code: error?.code ?? "unknown" }));
+    }
+  `
+  return Bun.spawn([process.execPath, "--eval", source], {
+    cwd: import.meta.dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+}
+
+async function readConcurrentCreate(child: ReturnType<typeof spawnConcurrentCreate>) {
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ])
+  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" })
+  return JSON.parse(stdout) as Readonly<{ status: "created" | "failed"; code?: string }>
 }
