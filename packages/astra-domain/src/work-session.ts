@@ -75,6 +75,7 @@ export type AstraWorkSessionProjection = Readonly<{
   decisions: ReadonlyArray<AstraWorkSessionDecision>
   evidence: ReadonlyArray<AstraWorkSessionEvidence>
   candidatePatchID: string | null
+  reconciliationPending: boolean
   updatedAt: string
 }>
 
@@ -210,6 +211,14 @@ const reconciliationTargets = new Set<AstraWorkPhase>([
   "applying",
   "checking",
   "blocked",
+])
+const reconciliationProtectedPhases = new Set<AstraWorkPhase>([
+  "working",
+  "review-ready",
+  "applying",
+  "checking",
+  "commit-ready",
+  "completed",
 ])
 const agentStates = new Set<AstraAgentProjection["state"]>([
   "queued",
@@ -397,6 +406,7 @@ export function parseAstraWorkSessionProjection(
     "decisions",
     "evidence",
     "candidatePatchID",
+    "reconciliationPending",
     "updatedAt",
   ])
   if (!record || record.schemaVersion !== 1) return rejected("invalid_projection")
@@ -413,6 +423,7 @@ export function parseAstraWorkSessionProjection(
   const decisions = parseDecisions(record.decisions)
   const evidence = parseEvidenceArray(record.evidence)
   const candidatePatchID = nullableID(record.candidatePatchID, 256)
+  const reconciliationPending = typeof record.reconciliationPending === "boolean" ? record.reconciliationPending : null
   const updatedAt = canonicalTimestamp(record.updatedAt)
   if (
     !sessionID ||
@@ -429,6 +440,7 @@ export function parseAstraWorkSessionProjection(
     !decisions ||
     !evidence ||
     candidatePatchID === undefined ||
+    reconciliationPending === null ||
     !updatedAt
   ) {
     return rejected("invalid_projection")
@@ -447,6 +459,7 @@ export function parseAstraWorkSessionProjection(
     decisions,
     evidence,
     candidatePatchID,
+    reconciliationPending,
     updatedAt,
   } as const
   if (projectionDigest !== computeAstraWorkSessionProjectionDigest(authority)) {
@@ -497,6 +510,7 @@ function projectInitialEvent(event: AstraWorkSessionEvent): AstraWorkSessionPars
     decisions: [],
     evidence: [],
     candidatePatchID: null,
+    reconciliationPending: false,
     updatedAt: event.observedAt,
   })
 }
@@ -517,7 +531,17 @@ function applyEvent(
     if (!ordinaryPhaseTransitions.has(`${previous.phase}\0${event.payload.phase}`)) {
       return rejected("illegal_transition")
     }
-    return finalizeProjection({ ...base, phase: event.payload.phase })
+    if (previous.reconciliationPending && reconciliationProtectedPhases.has(event.payload.phase)) {
+      return rejected("illegal_transition")
+    }
+    return finalizeProjection({
+      ...base,
+      phase: event.payload.phase,
+      reconciliationPending:
+        previous.reconciliationPending ||
+        event.payload.phase === "uncertain" ||
+        event.payload.phase === "reconciliation-required",
+    })
   }
   if (event.type === "agent.added") {
     if (previous.agents.length >= maximumAgents || previous.agents.some((agent) => agent.agentID === event.payload.agent.agentID)) {
@@ -569,7 +593,11 @@ function applyEvent(
   }
   if (event.type === "evidence.recorded") return withEvidence(base, previous, event.payload.evidence)
   if (event.type === "candidate-patch.recorded") {
-    if ((previous.phase !== "working" && previous.phase !== "checking") || hasEvidence(previous, event.payload.evidence)) {
+    if (
+      previous.reconciliationPending ||
+      (previous.phase !== "working" && previous.phase !== "checking") ||
+      hasEvidence(previous, event.payload.evidence)
+    ) {
       return rejected("illegal_transition")
     }
     return finalizeProjection({
@@ -580,7 +608,11 @@ function applyEvent(
     })
   }
   if (event.type === "commit-ready.recorded") {
-    if ((previous.phase !== "review-ready" && previous.phase !== "checking") || event.payload.evidence.kind !== "git") {
+    if (
+      previous.reconciliationPending ||
+      (previous.phase !== "review-ready" && previous.phase !== "checking") ||
+      event.payload.evidence.kind !== "git"
+    ) {
       return rejected("illegal_transition")
     }
     if (hasEvidence(previous, event.payload.evidence)) return rejected("illegal_transition")
@@ -591,7 +623,7 @@ function applyEvent(
     })
   }
   if (event.type === "session.completed") {
-    if (previous.phase !== "commit-ready" || hasEvidence(previous, event.payload.evidence)) {
+    if (previous.reconciliationPending || previous.phase !== "commit-ready" || hasEvidence(previous, event.payload.evidence)) {
       return rejected("illegal_transition")
     }
     return finalizeProjection({
@@ -604,6 +636,7 @@ function applyEvent(
     return finalizeProjection({
       ...base,
       phase: "reconciliation-required",
+      reconciliationPending: true,
       intent: { summary: event.payload.summary, next: `Reconcile Operation ${event.payload.operationID}` },
     })
   }
@@ -618,6 +651,7 @@ function applyEvent(
     return finalizeProjection({
       ...base,
       phase: event.payload.nextPhase,
+      reconciliationPending: false,
       evidence: [...previous.evidence, event.payload.evidence],
     })
   }

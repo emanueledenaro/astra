@@ -37,7 +37,8 @@
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsgo --noEmit && tsgo --noEmit -p tsconfig.ledger.json"
+    "typecheck": "tsgo --noEmit && tsgo --noEmit -p tsconfig.ledger.json && bun run typecheck:work-session",
+    "typecheck:work-session": "tsgo --noEmit -p tsconfig.work-session.json"
   },
   "dependencies": {
     "@astra/domain": "workspace:*",

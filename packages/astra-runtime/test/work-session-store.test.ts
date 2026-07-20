@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { chmod, lstat, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import {
   createWorkSessionStoreInternal,
   workSessionDatabasePathInternal,
@@ -201,6 +202,34 @@ describe("durable Astra work-session store", () => {
     expect(await readdir(foreign.stateRoot)).toEqual([])
   })
 
+  test.each(["session-directory", "session-directory-child"] as const)(
+    "rejects a workspace that is inside the %s before creating SQLite state",
+    async (placement) => {
+      const stateRoot = await temporaryDirectory(`astra-session-overlap-${placement}-`)
+      const sessionID = `session-overlap-${placement}`
+      const sessionDirectory = dirname(workSessionDatabasePathInternal(stateRoot, sessionID))
+      await mkdir(sessionDirectory, { mode: 0o700 })
+      const workspace = placement === "session-directory" ? sessionDirectory : join(sessionDirectory, "workspace")
+      if (workspace !== sessionDirectory) await mkdir(workspace, { mode: 0o700 })
+      await writeFile(join(workspace, "README.md"), "fixture\n")
+      const facts = await lstat(workspace)
+      const store = createWorkSessionStoreInternal({ stateRoot })
+
+      await expect(
+        store.create({
+          sessionID,
+          workspaceRoot: await realpath(workspace),
+          workspaceIdentity: { device: String(facts.dev), inode: String(facts.ino) },
+          objective: "Reject overlapping state",
+          intent: { summary: "Validate placement", next: "Create nothing" },
+          observedAt: startedAt,
+          actor,
+        }),
+      ).rejects.toMatchObject({ code: "unsafe_state_path" })
+      expect(await exists(workSessionDatabasePathInternal(stateRoot, sessionID))).toBe(false)
+    },
+  )
+
   test("rejects accessor-backed create, append, and delete inputs without invoking accessors or changing state", async () => {
     const fixture = await makeFixture("accessor-input")
     let getterCalls = 0
@@ -237,16 +266,30 @@ describe("durable Astra work-session store", () => {
     expect(getterCalls).toBe(0)
     expect((await fixture.store.load(fixture.sessionID)).projection.sequence).toBe(1)
 
-    const deleteInput = Object.defineProperty({ sessionID: fixture.sessionID }, "expectedProjectionDigest", {
+    const deleteInput = Object.defineProperty(
+      { sessionID: fixture.sessionID, expectedSequence: record.projection.sequence },
+      "expectedProjectionDigest",
+      {
       enumerable: true,
       get() {
         getterCalls += 1
         return record.projection.projectionDigest
       },
-    })
+      },
+    )
     await expect(fixture.store.delete(deleteInput as DeleteWorkSessionInput)).rejects.toMatchObject({ code: "invalid_input" })
     expect(getterCalls).toBe(0)
     expect((await fixture.store.load(fixture.sessionID)).projection.sessionID).toBe(fixture.sessionID)
+
+    const optionAccessor = Object.defineProperty({}, "stateRoot", {
+      enumerable: true,
+      get() {
+        getterCalls += 1
+        return fixture.stateRoot
+      },
+    })
+    expect(() => createWorkSessionStoreInternal(optionAccessor as { stateRoot: string })).toThrow()
+    expect(getterCalls).toBe(0)
   })
 
   test("exports canonical projection-only JSON without credential, secret text, or event payload fields", async () => {
@@ -281,7 +324,11 @@ describe("durable Astra work-session store", () => {
     const firstRecord = await first.store.create(first.createInput)
     await second.store.create(second.createInput)
 
-    await first.store.delete({ sessionID: first.sessionID, expectedProjectionDigest: firstRecord.projection.projectionDigest })
+    await first.store.delete({
+      sessionID: first.sessionID,
+      expectedSequence: firstRecord.projection.sequence,
+      expectedProjectionDigest: firstRecord.projection.projectionDigest,
+    })
     await expect(first.store.load(first.sessionID)).rejects.toMatchObject({ code: "not_found" })
     expect((await second.store.load(second.sessionID)).projection.sessionID).toBe(second.sessionID)
 
@@ -295,10 +342,194 @@ describe("durable Astra work-session store", () => {
     await expect(
       alias.store.delete({
         sessionID: alias.sessionID,
+        expectedSequence: aliasRecord.projection.sequence,
         expectedProjectionDigest: aliasRecord.projection.projectionDigest,
       }),
     ).rejects.toMatchObject({ code: "unsafe_state_path" })
     expect(await exists(preserved)).toBe(true)
+  })
+
+  test("holds an exclusive CAS through delete and rejects a concurrent newer projection", async () => {
+    const fixture = await makeFixture("delete-cas")
+    const record = await fixture.store.create(fixture.createInput)
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    let writerRejected = false
+    const deleting = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      beforeDeleteUnlink: () => {
+        const writer = new Database(databasePath)
+        writer.exec("PRAGMA busy_timeout = 0")
+        try {
+          writer.exec("BEGIN IMMEDIATE")
+          writer.query("update work_session set current_sequence = current_sequence + 1 where singleton = 1").run()
+          writer.exec("COMMIT")
+        } catch {
+          writerRejected = true
+          try {
+            writer.exec("ROLLBACK")
+          } catch {
+            // The competing transaction never acquired authority.
+          }
+        } finally {
+          writer.close()
+        }
+      },
+    })
+
+    await deleting.delete({
+      sessionID: fixture.sessionID,
+      expectedSequence: record.projection.sequence,
+      expectedProjectionDigest: record.projection.projectionDigest,
+    })
+    expect(writerRejected).toBe(true)
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "not_found" })
+  })
+
+  test("preserves a newer session when delete carries stale sequence and digest authority", async () => {
+    const fixture = await makeFixture("delete-stale")
+    const original = await fixture.store.create(fixture.createInput)
+    const newer = await fixture.store.append({
+      sessionID: fixture.sessionID,
+      expectedSequence: original.projection.sequence,
+      observedAt: later(1),
+      actor,
+      draft: { type: "phase.changed", payload: { phase: "analyzing" } },
+    })
+
+    await expect(
+      fixture.store.delete({
+        sessionID: fixture.sessionID,
+        expectedSequence: original.projection.sequence,
+        expectedProjectionDigest: original.projection.projectionDigest,
+      }),
+    ).rejects.toMatchObject({ code: "sequence_conflict" })
+    expect(await fixture.store.load(fixture.sessionID)).toEqual(newer)
+  })
+
+  test("loads projection and events from one read snapshot", async () => {
+    const fixture = await makeFixture("load-snapshot")
+    const record = await fixture.store.create(fixture.createInput)
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    let writerRejected = false
+    let hookCalls = 0
+    const observing = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      afterProjectionRead: () => {
+        hookCalls += 1
+        const writer = new Database(databasePath)
+        writer.exec("PRAGMA busy_timeout = 0")
+        try {
+          writer.exec("BEGIN IMMEDIATE")
+          writer.query("update work_session set current_sequence = current_sequence + 1 where singleton = 1").run()
+          writer.exec("COMMIT")
+        } catch {
+          writerRejected = true
+          try {
+            writer.exec("ROLLBACK")
+          } catch {
+            // The read snapshot keeps the competing writer out.
+          }
+        } finally {
+          writer.close()
+        }
+      },
+    })
+
+    expect(await observing.load(fixture.sessionID)).toEqual(record)
+    expect(hookCalls).toBe(1)
+    expect(writerRejected).toBe(true)
+  })
+
+  test.each([
+    ["user version", "PRAGMA user_version = 2"],
+    ["application id", "PRAGMA application_id = 7"],
+    ["extra schema object", "create table injected_state(value text) strict"],
+    ["unknown column", "alter table work_session add column injected_value text"],
+    [
+      "extra event row",
+      `insert into work_session_event(sequence, event_digest, previous_digest, event_json) values (99, 'sha256:${"9".repeat(64)}', 'sha256:${"8".repeat(64)}', '{}')`,
+    ],
+  ] as const)("rejects %s schema tampering", async (_label, mutation) => {
+    const fixture = await makeFixture(`schema-${_label.replaceAll(" ", "-")}`)
+    await fixture.store.create(fixture.createInput)
+    const database = new Database(workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID))
+    database.exec(mutation)
+    database.close()
+
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "state_unavailable" })
+  })
+
+  test("does not delete a replacement SQLite family during failed-create cleanup", async () => {
+    const fixture = await makeFixture("cleanup-swap")
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    const directory = dirname(databasePath)
+    const displaced = `${directory}.displaced`
+    const replacement = "replacement-must-survive"
+    const swapping = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      afterEventInsert: () => {
+        renameSync(directory, displaced)
+        mkdirSync(directory, { mode: 0o700 })
+        writeFileSync(databasePath, replacement, { mode: 0o600 })
+        throw new Error("swap after SQLite insert")
+      },
+    })
+
+    await expect(swapping.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(await readFile(databasePath, "utf8")).toBe(replacement)
+    expect(await exists(displaced)).toBe(true)
+  })
+
+  test("fails closed when a session directory is replaced before database open", async () => {
+    const fixture = await makeFixture("open-swap")
+    await fixture.store.create(fixture.createInput)
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    const directory = dirname(databasePath)
+    const displaced = `${directory}.displaced`
+    const replacement = "replacement-open-target"
+    let swapped = false
+    const opening = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      beforeDatabaseOpen: () => {
+        swapped = true
+        renameSync(directory, displaced)
+        mkdirSync(directory, { mode: 0o700 })
+        writeFileSync(databasePath, replacement, { mode: 0o600 })
+      },
+    })
+
+    await expect(opening.load(fixture.sessionID)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(swapped).toBe(true)
+    expect(await readFile(databasePath, "utf8")).toBe(replacement)
+  })
+
+  test("fails closed and preserves replacement files on a delete path swap", async () => {
+    const fixture = await makeFixture("delete-swap")
+    const record = await fixture.store.create(fixture.createInput)
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    const directory = dirname(databasePath)
+    const displaced = `${directory}.displaced`
+    const replacement = "replacement-delete-target"
+    let swapped = false
+    const deleting = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      beforeDeleteUnlink: () => {
+        swapped = true
+        renameSync(directory, displaced)
+        mkdirSync(directory, { mode: 0o700 })
+        writeFileSync(databasePath, replacement, { mode: 0o600 })
+      },
+    })
+
+    await expect(
+      deleting.delete({
+        sessionID: fixture.sessionID,
+        expectedSequence: record.projection.sequence,
+        expectedProjectionDigest: record.projection.projectionDigest,
+      }),
+    ).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(swapped).toBe(true)
+    expect(await readFile(databasePath, "utf8")).toBe(replacement)
   })
 
   test("reloads ambiguous effects as reconciliation-required and never invokes an effect adapter", async () => {

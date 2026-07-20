@@ -167,12 +167,29 @@ describe("Astra work-session domain", () => {
     const uncertain = advance(initialProjection(), { type: "phase.changed", payload: { phase: "uncertain" } })
     expect(makeEvent(uncertain, { type: "phase.changed", payload: { phase: "working" } }).ok).toBe(false)
 
+    const blocked = advance(uncertain, { type: "phase.changed", payload: { phase: "blocked" } })
+    expect(makeEvent(blocked, { type: "phase.changed", payload: { phase: "working" } }).ok).toBe(false)
+
+    const idle = advance(blocked, { type: "phase.changed", payload: { phase: "idle" } })
+    const analyzing = advance(idle, { type: "phase.changed", payload: { phase: "analyzing" } })
+    expect(makeEvent(analyzing, { type: "phase.changed", payload: { phase: "working" } }).ok).toBe(false)
+
     const reconciled = advance(uncertain, {
       type: "reconciliation.recorded",
       payload: { nextPhase: "working", evidence: evidence("reconciliation-proof", "receipt") },
     })
     expect(reconciled.phase).toBe("working")
     expect(reconciled.evidence.at(-1)?.evidenceID).toBe("reconciliation-proof")
+
+    const ambiguous = advance(initialProjection(), {
+      type: "effect.ambiguous",
+      payload: {
+        operationID: "0196e4cb-5d80-7b1d-8fb2-263b81670431",
+        summary: "The host effect is ambiguous",
+      },
+    })
+    const ambiguousBlocked = advance(ambiguous, { type: "phase.changed", payload: { phase: "blocked" } })
+    expect(makeEvent(ambiguousBlocked, { type: "phase.changed", payload: { phase: "working" } }).ok).toBe(false)
   })
 
   test("forces subagents to no authority and validates parent/terminal state rules", () => {
