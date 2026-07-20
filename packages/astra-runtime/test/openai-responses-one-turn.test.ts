@@ -96,6 +96,47 @@ describe("Astra OpenAI Responses one-turn protocol", () => {
     })
   })
 
+  test("accepts the inherited Codex message sequence and a trailing provider ping", () => {
+    const response = parseOpenAIResponsesOneTurnResponse(
+      rawResponse(
+        [
+          { type: "response.created", response: { status: "in_progress" } },
+          { type: "response.in_progress", response: { status: "in_progress" } },
+          { type: "response.output_item.added", item: { type: "message", status: "in_progress" } },
+          { type: "response.content_part.added", part: { type: "output_text", text: "" } },
+          { type: "response.output_text.delta", delta: "ASTRA" },
+          { type: "response.output_text.delta", delta: "-ONE" },
+          { type: "response.output_text.done", text: "ASTRA-ONE" },
+          { type: "response.content_part.done", part: { type: "output_text", text: "ASTRA-ONE" } },
+          { type: "response.output_item.done", item: { type: "message", status: "completed" } },
+          { type: "response.completed", response: { status: "completed" } },
+          { type: "ping", cost: "0" },
+        ],
+        false,
+      ),
+    )
+
+    expect(response).toMatchObject({
+      status: "observed_not_verified",
+      assistantText: "ASTRA-ONE",
+      finishReason: "stop",
+    })
+  })
+
+  test("accepts the inherited response.done terminal alias as observed, not verified", () => {
+    const response = parseOpenAIResponsesOneTurnResponse(
+      rawResponse(
+        [
+          { type: "response.output_text.delta", delta: "ASTRA-ONE" },
+          { type: "response.done", response: { id: "resp_1" } },
+        ],
+        false,
+      ),
+    )
+
+    expect(response).toMatchObject({ assistantText: "ASTRA-ONE", finishReason: "stop" })
+  })
+
   test("rejects tool use, failed or truncated streams, and a forged adapter before transport", () => {
     expect(() =>
       parseOpenAIResponsesOneTurnResponse(

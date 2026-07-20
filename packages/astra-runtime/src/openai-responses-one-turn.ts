@@ -146,11 +146,12 @@ export function parseOpenAIResponsesOneTurnResponse(
       done = true
       continue
     }
-    if (done || terminal) fail("event_sequence_rejected")
     const event = decodeEvent(frame)
+    const eventType = requireEventType(event)
+    if (eventType === "ping") continue
+    if (done || terminal) fail("event_sequence_rejected")
     eventCount += 1
     rejectToolEvent(event)
-    const eventType = requireEventType(event)
     if (eventType === "error" || eventType === "response.failed") fail("provider_error")
     if (eventType === "response.output_text.delta") {
       const delta = event.delta
@@ -161,7 +162,12 @@ export function parseOpenAIResponsesOneTurnResponse(
       assistantTextBytes += bytes
       continue
     }
-    if (eventType === "response.completed") {
+    if (eventType === "response.completed" || eventType === "response.done") {
+      if (eventType === "response.done") {
+        terminal = true
+        finishReason = "stop"
+        continue
+      }
       if (responseStatus(event) !== "completed") fail("terminal_stop_rejected")
       terminal = true
       finishReason = "stop"
