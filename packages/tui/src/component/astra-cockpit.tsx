@@ -3,10 +3,25 @@
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createMemo, createSignal, onCleanup, Show, type JSX } from "solid-js"
+import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js"
 import { createAstraProviderClient, type AstraProviderClient } from "../astra/provider-client"
+import {
+  createAstraWorkSessionClient,
+  type AstraWorkSessionClient,
+  type AstraWorkSessionView,
+} from "../astra/work-session-client"
+import { useTuiConfig } from "../config"
 import { AstraChatView, type AstraChatActivity } from "../feature-plugins/system/astra-chat"
-import { Lynx, type LynxPresentationState } from "./lynx"
+import { useBindings } from "../keymap"
+import { Locale } from "../util/locale"
+import { AstraControlRail } from "./astra-control-rail"
+import {
+  AstraReviewMode,
+  validateAstraCandidatePatchDetails,
+  type AstraCandidatePatchDetails,
+} from "./astra-review-mode"
+
+export type { AstraCandidatePatchDetails } from "./astra-review-mode"
 
 const initialActivity: AstraChatActivity = {
   status: "loading_catalog",
@@ -15,42 +30,123 @@ const initialActivity: AstraChatActivity = {
   decisionRequired: false,
 }
 
-/** The primary Astra product surface: conversation stays visible while control remains observable. */
+/** Parent-owned work state surrounds a continuously mounted conversation surface. */
 export function AstraCockpit(props: {
   api: TuiPluginApi
   authority: AstraSessionAuthority
   providerClient?: AstraProviderClient
+  workSessionClient?: AstraWorkSessionClient
+  candidatePatchDetails?: unknown
 }) {
   const dimensions = useTerminalDimensions()
+  const tuiConfig = useTuiConfig()
   const [activity, setActivity] = createSignal(initialActivity)
-  const sideBySide = createMemo(() => dimensions().width >= 72 && dimensions().height >= 18)
-  const detailedRail = createMemo(() => dimensions().width >= 104 && dimensions().height >= 32)
-  const workspace = createMemo(() => workspaceName(props.authority.workspace.root))
+  const [workView, setWorkView] = createSignal<AstraWorkSessionView>({
+    status: "state_unavailable",
+    reason: "transport_failed",
+  })
+  const [compactControl, setCompactControl] = createSignal(false)
+  const [reviewOpen, setReviewOpen] = createSignal(false)
+  const sideBySide = createMemo(
+    () =>
+      (dimensions().width >= 124 && dimensions().height >= 28) ||
+      (dimensions().width >= 92 && dimensions().height >= 22),
+  )
+  const railWidth = createMemo(() =>
+    dimensions().width >= 124 ? Math.min(44, Math.max(36, Math.floor(dimensions().width * 0.3))) : 34,
+  )
+  const projection = createMemo(() => {
+    const view = workView()
+    return view.status === "available" ? view.projection : undefined
+  })
+  const pending = createMemo(() => projection()?.decisions.filter((decision) => decision.state === "pending") ?? [])
+  const candidate = createMemo(() =>
+    validateAstraCandidatePatchDetails(props.candidatePatchDetails, projection(), props.authority),
+  )
   const ownsProviderClient = !props.providerClient
   const providerClient = props.providerClient ?? createAstraProviderClient(process.env, props.authority.sessionID)
+  const ownsWorkSessionClient = !props.workSessionClient
+  const workSessionClient = props.workSessionClient ?? createAstraWorkSessionClient(process.env, props.authority.sessionID)
+  const subscription = new AbortController()
+
+  const decide = (outcome: "approved" | "rejected") => {
+    const decision = pending()[0]
+    if (!decision) return
+    void workSessionClient.decide(decision.decisionID, outcome).catch(() => {
+      setWorkView({ status: "state_unavailable", reason: "transport_failed" })
+    })
+  }
+  const toggleReview = () => {
+    if (reviewOpen()) return setReviewOpen(false)
+    if (props.api.ui.dialog.open || !candidate()) return
+    setReviewOpen(true)
+  }
+
+  onMount(() => {
+    let active = true
+    void workSessionClient
+      .snapshot()
+      .then((view) => {
+        if (!active) return
+        setWorkView(view)
+        if (view.status !== "available") return
+        return workSessionClient.subscribe(
+          (next) => {
+            if (active) setWorkView(next)
+          },
+          { signal: subscription.signal },
+        )
+      })
+      .catch(() => {
+        if (active) setWorkView({ status: "state_unavailable", reason: "transport_failed" })
+      })
+    onCleanup(() => {
+      active = false
+    })
+  })
+
+  useBindings(() => ({
+    enabled: !props.api.ui.dialog.open,
+    commands: [
+      {
+        name: "astra.control.toggle",
+        title: "Toggle Astra Control Rail",
+        category: "Astra",
+        run: () => {
+          if (!sideBySide() && !reviewOpen()) setCompactControl((value) => !value)
+        },
+      },
+      { name: "astra.work.approve", title: "Approve Parent Decision", category: "Astra", run: () => decide("approved") },
+      { name: "astra.work.reject", title: "Reject Parent Decision", category: "Astra", run: () => decide("rejected") },
+      { name: "astra.review.toggle", title: "Open Candidate Review", category: "Astra", run: toggleReview },
+      { name: "astra.review.close", title: "Return to Astra Chat", category: "Astra", run: () => setReviewOpen(false) },
+    ],
+    bindings: [
+      ...tuiConfig.keybinds.get("astra.control.toggle"),
+      ...tuiConfig.keybinds.get("astra.review.toggle"),
+      ...(pending().length > 0
+        ? [
+            { key: "a", cmd: "astra.work.approve", desc: "Approve" },
+            { key: "d", cmd: "astra.work.reject", desc: "Reject" },
+          ]
+        : []),
+      ...(reviewOpen() ? [{ key: "escape", cmd: "astra.review.close", desc: "Back to chat" }] : []),
+    ],
+  }))
 
   onCleanup(() => {
+    subscription.abort()
     if (ownsProviderClient) providerClient.dispose()
+    if (ownsWorkSessionClient) workSessionClient.dispose()
   })
 
   return (
-    <box
-      width={dimensions().width}
-      height={dimensions().height}
-      flexDirection="column"
-      paddingLeft={1}
-      paddingRight={1}
-    >
-      <box height={1} flexShrink={0} flexDirection="row">
-        <text fg={props.api.theme.current.primary}>◆ ASTRA COCKPIT</text>
-        <text fg={props.api.theme.current.textMuted}> PROJECT / </text>
-        <text fg={props.api.theme.current.text}>{workspace()}</text>
-        <box flexGrow={1} />
-        <text fg={modeColor(props.api, props.authority.mode)}>{modeLabel(props.authority.mode)}</text>
-      </box>
+    <box width={dimensions().width} height={dimensions().height} flexDirection="column" paddingLeft={1} paddingRight={1}>
+      <ContextBar api={props.api} authority={props.authority} activity={activity()} reviewOpen={reviewOpen()} width={dimensions().width - 2} />
 
-      <box flexGrow={1} minHeight={0} flexDirection={sideBySide() ? "row" : "column"} gap={1}>
+      <box flexGrow={1} minHeight={0} flexDirection="row" gap={sideBySide() ? 1 : 0}>
         <box
+          visible={sideBySide() || !compactControl()}
           flexGrow={1}
           minWidth={0}
           minHeight={0}
@@ -58,206 +154,98 @@ export function AstraCockpit(props: {
           borderStyle="rounded"
           borderColor={props.api.theme.current.primary}
         >
-          <AstraChatView
-            embedded
-            api={props.api}
-            authority={props.authority}
-            client={providerClient}
-            onActivity={setActivity}
-          />
+          <box visible={!reviewOpen()} width="100%" height="100%">
+            <AstraChatView
+              embedded
+              api={props.api}
+              authority={props.authority}
+              client={providerClient}
+              bindingsSuspended={reviewOpen() || pending().length > 0}
+              onActivity={setActivity}
+            />
+          </box>
+          <box visible={reviewOpen()} width="100%" height="100%">
+            <Show when={candidate()}>{(details) => <AstraReviewMode api={props.api} details={details()} />}</Show>
+          </box>
         </box>
 
         <box
-          width={
-            sideBySide()
-              ? detailedRail()
-                ? Math.min(46, Math.max(36, Math.floor(dimensions().width * 0.34)))
-                : 32
-              : "100%"
-          }
-          height={sideBySide() ? "100%" : 9}
+          visible={sideBySide() || compactControl()}
+          width={sideBySide() ? railWidth() : "100%"}
           flexShrink={0}
           minHeight={0}
           border
           borderStyle="rounded"
-          borderColor={activity().decisionRequired ? props.api.theme.current.warning : props.api.theme.current.border}
+          borderColor={pending().length > 0 ? props.api.theme.current.warning : props.api.theme.current.border}
           paddingLeft={1}
           paddingRight={1}
         >
           <AstraControlRail
             api={props.api}
-            authority={props.authority}
-            activity={activity()}
-            compact={!detailedRail()}
+            view={workView()}
+            candidateAvailable={candidate() !== undefined}
           />
         </box>
       </box>
 
-      <box height={1} flexShrink={0} flexDirection="row">
-        <text fg={props.api.theme.current.textMuted}>P message · Ctrl+P actions · M model</text>
-        <box flexGrow={1} />
-        <Show when={dimensions().width >= 100}>
-          <text fg={props.api.theme.current.warning}>VISIBLE INTENT → OBSERVED ACTION → EVIDENCE</text>
-        </Show>
-      </box>
+      <BoundaryBar
+        api={props.api}
+        authority={props.authority}
+        compact={!sideBySide()}
+        controlVisible={compactControl()}
+      />
     </box>
   )
 }
 
-export function AstraControlRail(props: {
+function ContextBar(props: {
   api: TuiPluginApi
   authority: AstraSessionAuthority
   activity: AstraChatActivity
-  compact?: boolean
+  reviewOpen: boolean
+  width: number
 }) {
-  const lynxState = createMemo(() => activityLynxState(props.activity))
-
+  const provider = () =>
+    props.activity.providerName && props.activity.modelID
+      ? `${props.activity.providerName}/${props.activity.modelID}`
+      : "PROVIDER OFFLINE"
+  const raw = () =>
+    `◆ ASTRA │ ${workspaceName(props.authority.workspace.root)} │ ${branchAtAdmission(props.authority)} │ ${provider()} │ REVIEW MANUAL${props.reviewOpen ? " · CANDIDATE" : ""}`
   return (
-    <box width="100%" height="100%" flexDirection="column">
-      <box flexDirection="row" flexShrink={0}>
-        <text fg={props.api.theme.current.primary}>CONTROL RAIL</text>
-        <box flexGrow={1} />
-        <text fg={activityColor(props.api, props.activity)}>{activityStatus(props.activity)}</text>
-      </box>
-
-      <Show when={!props.compact}>
-        <box marginTop={1} flexShrink={0}>
-          <Lynx state={lynxState()} size="compact" />
-        </box>
-
-        <Section title="LIVE ACTIVITY" api={props.api}>
-          <RailRow label="STATE" value={props.activity.label} api={props.api} />
-          <RailRow label="NOW" value={props.activity.summary} api={props.api} />
-          <Show when={props.activity.providerName ?? props.activity.providerID}>
-            {(provider) => <RailRow label="PROVIDER" value={provider()} api={props.api} />}
-          </Show>
-          <Show when={props.activity.modelID}>
-            {(modelID) => <RailRow label="MODEL" value={modelID()} api={props.api} />}
-          </Show>
-          <Show when={props.activity.operationID}>
-            {(operationID) => <RailRow label="OP" value={shortID(operationID())} api={props.api} />}
-          </Show>
-          <Show when={props.activity.destination}>
-            {(destination) => <RailRow label="NETWORK" value={destination()} api={props.api} />}
-          </Show>
-          <Show when={props.activity.payloadBytes !== undefined}>
-            <RailRow label="PAYLOAD" value={`${props.activity.payloadBytes} bytes`} api={props.api} />
-          </Show>
-        </Section>
-
-        <Show when={props.activity.decisionRequired}>
-          <box marginTop={1} border borderStyle="rounded" borderColor={props.api.theme.current.warning} paddingLeft={1}>
-            <text fg={props.api.theme.current.warning}>DECISION REQUIRED · A approve · D reject</text>
-          </box>
-        </Show>
-
-        <Section title="AGENTS" api={props.api}>
-          <RailRow label="LYNX" value="Lynx coordinator · ACTIVE" api={props.api} />
-          <RailRow label="TEAM" value="No subagents active" api={props.api} />
-        </Section>
-
-        <Section title="WORKSPACE" api={props.api}>
-          <RailRow label="MODE" value={modeLabel(props.authority.mode)} api={props.api} />
-          <RailRow
-            label="GIT"
-            value={props.authority.repositoryBaseline ? "BASELINE LOCKED" : "NO BASELINE"}
-            api={props.api}
-          />
-          <RailRow label="TRUST" value="SESSION ONLY · NOT PERSISTED" api={props.api} />
-        </Section>
-
-        <Section title="BOUNDARY" api={props.api}>
-          <Show
-            when={props.authority.mode === "activate-once"}
-            fallback={<text fg={props.api.theme.current.primary}>EFFECTS DENIED — NO HOST EXECUTION</text>}
-          >
-            <text fg={props.api.theme.current.error}>HOST EXECUTION — NO SANDBOX</text>
-            <RailRow label="WRITE" value="EXPLICIT CONSENT" api={props.api} />
-            <RailRow label="SHELL" value="EXPLICIT CONSENT" api={props.api} />
-            <RailRow label="NETWORK" value="PER TURN CONSENT" api={props.api} />
-          </Show>
-        </Section>
-      </Show>
-
-      <Show when={props.compact}>
-        <RailRow label="NOW" value={props.activity.summary} api={props.api} />
-        <RailRow label="MODE" value={modeLabel(props.authority.mode)} api={props.api} />
-        <RailRow label="AGENTS" value="Lynx coordinator · 0 subagents" api={props.api} />
-        <text
-          fg={
-            props.authority.mode === "activate-once" ? props.api.theme.current.error : props.api.theme.current.primary
-          }
-        >
-          {props.authority.mode === "activate-once"
-            ? "HOST EXECUTION — NO SANDBOX"
-            : "EFFECTS DENIED — NO HOST EXECUTION"}
-        </text>
-      </Show>
-    </box>
-  )
-}
-
-function Section(props: { title: string; api: TuiPluginApi; children: JSX.Element }) {
-  return (
-    <box marginTop={1} flexDirection="column" flexShrink={0}>
-      <text fg={props.api.theme.current.primary}>{props.title}</text>
-      {props.children}
-    </box>
-  )
-}
-
-function RailRow(props: { label: string; value: string; api: TuiPluginApi }) {
-  return (
-    <box flexDirection="row" flexShrink={0}>
-      <text width={9} fg={props.api.theme.current.textMuted}>
-        {props.label}
+    <box height={1} flexShrink={0}>
+      <text fg={props.api.theme.current.primary} wrapMode="none">
+        {Locale.truncate(raw(), Math.max(1, props.width))}
       </text>
-      <text fg={props.api.theme.current.text}>{props.value}</text>
     </box>
   )
 }
 
-function activityLynxState(activity: AstraChatActivity): LynxPresentationState {
-  if (activity.status === "prepared") return "awaiting-decision"
-  if (activity.status === "preparing" || activity.status === "deciding" || activity.status === "progress")
-    return "working"
-  if (activity.status === "completed") return "success"
-  if (activity.status === "blocked" || activity.status === "denied") return "blocked"
-  if (activity.status === "reconciliation") return "uncertain"
-  if (activity.status === "loading_catalog") return "initializing"
-  return "idle"
-}
-
-function activityStatus(activity: AstraChatActivity) {
-  if (activity.status === "prepared") return "DECISION"
-  if (activity.status === "preparing" || activity.status === "deciding" || activity.status === "progress")
-    return "WORKING"
-  if (activity.status === "completed") return "OBSERVED"
-  if (activity.status === "blocked") return "BLOCKED"
-  if (activity.status === "reconciliation") return "UNCERTAIN"
-  if (activity.status === "loading_catalog") return "STARTING"
-  return "IDLE"
-}
-
-function activityColor(api: TuiPluginApi, activity: AstraChatActivity) {
-  if (activity.status === "completed") return api.theme.current.success
-  if (activity.status === "blocked" || activity.status === "reconciliation") return api.theme.current.error
-  if (activity.status === "prepared" || activity.status === "denied") return api.theme.current.warning
-  return api.theme.current.primary
-}
-
-function modeLabel(mode: AstraSessionAuthority["mode"]) {
-  return mode === "activate-once" ? "ACTIVE ONCE" : "READ ONLY"
-}
-
-function modeColor(api: TuiPluginApi, mode: AstraSessionAuthority["mode"]) {
-  return mode === "activate-once" ? api.theme.current.warning : api.theme.current.primary
+function BoundaryBar(props: {
+  api: TuiPluginApi
+  authority: AstraSessionAuthority
+  compact: boolean
+  controlVisible: boolean
+}) {
+  return (
+    <box height={1} flexShrink={0} flexDirection="row">
+      <text fg={props.authority.mode === "activate-once" ? props.api.theme.current.error : props.api.theme.current.primary}>
+        {props.authority.mode === "activate-once" ? "HOST EXECUTION — NO SANDBOX" : "READ ONLY — EFFECTS DENIED"}
+      </text>
+      <box flexGrow={1} />
+      <text fg={props.api.theme.current.textMuted} wrapMode="none">
+        {props.compact ? `Ctrl+X I ${props.controlVisible ? "CHAT" : "CONTROL"}` : "Ctrl+X I CONTROL · Ctrl+P ACTIONS"}
+      </text>
+    </box>
+  )
 }
 
 function workspaceName(root: string) {
   return root.split(/[\\/]/u).filter(Boolean).at(-1) ?? root
 }
 
-function shortID(value: string) {
-  return value.length > 16 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value
+function branchAtAdmission(authority: AstraSessionAuthority) {
+  const head = authority.repositoryBaseline?.head
+  if (!head) return "NO GIT"
+  if (head.kind === "unborn" || head.kind === "symbolic") return head.symbolicRef.replace(/^refs\/heads\//u, "")
+  return `DETACHED ${head.oid.slice(0, 8)}`
 }

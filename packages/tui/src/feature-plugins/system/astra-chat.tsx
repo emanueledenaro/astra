@@ -81,6 +81,7 @@ export function AstraChatView(props: {
   client: AstraProviderClient
   returnRoute?: TuiRouteCurrent
   embedded?: boolean
+  bindingsSuspended?: boolean
   onActivity?: (activity: AstraChatActivity) => void
 }) {
   const dimensions = useTerminalDimensions()
@@ -256,7 +257,7 @@ export function AstraChatView(props: {
   })
 
   useBindings(() => ({
-    enabled: !props.api.ui.dialog.open,
+    enabled: !props.api.ui.dialog.open && props.bindingsSuspended !== true,
     commands: [
       { name: "astra.chat.model", title: "Select Chat Model", category: "Astra", run: selectModel },
       { name: "astra.chat.compose", title: "Compose Chat Message", category: "Astra", run: compose },
