@@ -42,6 +42,7 @@ export type ProviderTurnSelection =
 
 export type ProviderConversationTranscriptTurn = Readonly<{
   providerID: string
+  credentialProfile: "anthropic-api-key" | "openai-api-key" | "openai-codex-oauth"
   modelID: string
   userText: string
   assistantText: string
@@ -474,9 +475,20 @@ function parseTranscriptTurn(input: unknown): ProviderConversationTranscriptTurn
   const record = plainRecord(input)
   if (
     !record ||
-    !exactKeys(record, ["providerID", "modelID", "userText", "assistantText", "finishReason", "assurance"]) ||
+    !exactKeys(record, [
+      "providerID",
+      "credentialProfile",
+      "modelID",
+      "userText",
+      "assistantText",
+      "finishReason",
+      "assurance",
+    ]) ||
     typeof record.providerID !== "string" ||
     !modelPattern.test(record.providerID) ||
+    (record.credentialProfile !== "anthropic-api-key" &&
+      record.credentialProfile !== "openai-api-key" &&
+      record.credentialProfile !== "openai-codex-oauth") ||
     typeof record.modelID !== "string" ||
     !modelPattern.test(record.modelID) ||
     typeof record.userText !== "string" ||

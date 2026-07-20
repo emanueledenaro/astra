@@ -764,6 +764,7 @@ function publicTranscript(input: AstraProviderConversation): ProviderConversatio
       input.turns.map((turn) =>
         Object.freeze({
           providerID: turn.providerID,
+          credentialProfile: publicCredentialProfile(turn.credentialProfile),
           modelID: turn.modelID,
           userText: turn.userText,
           assistantText: turn.assistantText,
@@ -776,6 +777,11 @@ function publicTranscript(input: AstraProviderConversation): ProviderConversatio
     totalBytes: input.totalBytes,
     retention: providerConversationRetentionLabel,
   })
+}
+
+function publicCredentialProfile(input: string) {
+  if (input === "anthropic-api-key" || input === "openai-api-key" || input === "openai-codex-oauth") return input
+  throw new Error("The durable provider credential profile is invalid")
 }
 
 function blockedPrepare(reason: Extract<PublicPrepareResult, { status: "blocked" }>["reason"]): PublicPrepareResult {

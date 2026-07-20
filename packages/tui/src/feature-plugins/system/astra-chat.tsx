@@ -121,7 +121,7 @@ export function AstraChatView(props: {
           setState({ status: "blocked", reason: result.reason })
           return
         }
-        const selection = initialSelection(result.catalog)
+        const selection = initialSelection(result.catalog, result.transcript)
         if (!selection) {
           setState({ status: "blocked", reason: "provider_rejected" })
           return
@@ -838,8 +838,21 @@ function unverifiedProviderLabel(state: ChatState) {
     : providers.map((provider) => `${provider.providerName} · ${provider.assurance} · DISABLED`).join("; ")
 }
 
-function initialSelection(catalog: ProviderControlCatalog): ProviderTurnSelection | undefined {
-  return providerSelectionChoices(catalog)[0]?.selection
+export function initialSelection(
+  catalog: ProviderControlCatalog,
+  transcript: ProviderConversationTranscript,
+): ProviderTurnSelection | undefined {
+  const choices = providerSelectionChoices(catalog)
+  const lastTurn = transcript.turns.at(-1)
+  if (!lastTurn) return choices[0]?.selection
+  const matchingChoice = choices.find(
+    (choice) =>
+      choice.selection.providerID === lastTurn.providerID &&
+      choice.selection.credentialProfile === lastTurn.credentialProfile,
+  )
+  const provider = catalog.providers.find((candidate) => candidate.providerID === lastTurn.providerID)
+  if (!matchingChoice || !provider?.models.some((model) => model.id === lastTurn.modelID)) return choices[0]?.selection
+  return { ...matchingChoice.selection, modelID: lastTurn.modelID }
 }
 
 function selectionsForProvider(

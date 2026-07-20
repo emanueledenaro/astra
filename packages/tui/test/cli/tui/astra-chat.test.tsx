@@ -14,6 +14,7 @@ import { expect, test } from "bun:test"
 import { createSignal, onMount, type JSX } from "solid-js"
 import type { AstraProviderClient } from "../../../src/astra/provider-client"
 import {
+  initialSelection,
   providerSelectionChoices,
   registerAstraChat,
 } from "../../../src/feature-plugins/system/astra-chat"
@@ -75,6 +76,31 @@ test("offers explicit certified OpenAI API-key and Codex OAuth credential choice
     "openai:openai-codex-oauth",
   ])
   expect(choices.every((choice) => choice.description.includes("CERTIFIED"))).toBeTrue()
+})
+
+test("resumes the exact provider route and model used by the latest durable turn", () => {
+  expect(
+    initialSelection(catalogResult.catalog, {
+      turns: [
+        {
+          providerID: "openai",
+          credentialProfile: "openai-codex-oauth",
+          modelID: "gpt-5.2-codex",
+          userText: "First question",
+          assistantText: "First answer",
+          finishReason: "stop",
+          assurance: "observed_not_verified",
+        },
+      ],
+      historyDigest: digest,
+      totalBytes: 26,
+      retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
+    }),
+  ).toEqual({
+    providerID: "openai",
+    credentialProfile: "openai-codex-oauth",
+    modelID: "gpt-5.2-codex",
+  })
 })
 
 test("applies the exact OpenAI credential profile selected through the provider dialog", async () => {
@@ -321,6 +347,7 @@ test("restores the durable transcript and keeps compatible unverified providers 
           turns: [
             {
               providerID: "openai",
+              credentialProfile: "openai-codex-oauth",
               modelID: "gpt-5.2-codex",
               userText: "What did we decide?",
               assistantText: restoredText,
