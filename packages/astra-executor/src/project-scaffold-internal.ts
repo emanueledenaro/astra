@@ -57,6 +57,8 @@ export type ProjectScaffoldInternalDependencies = Readonly<{
   afterParentPinned?: () => Promise<void>
   afterStagingCreatedBeforeOpen?: (context: Readonly<{ stagingName: string }>) => Promise<void>
   beforePublish?: (context: Readonly<{ stagingName: string }>) => Promise<void>
+  afterFinalStagingRebindBeforeRename?: (context: Readonly<{ stagingName: string }>) => Promise<void>
+  afterCleanupReboundBeforeUnlink?: (context: Readonly<{ stagingName: string }>) => Promise<void>
   stagingName?: string
 }>
 
@@ -123,18 +125,47 @@ export async function executeProjectScaffoldInternal(
     await createBoundedFiles(stagingFD, binding.draft, library)
     await dependencies.beforePublish?.({ stagingName })
     if (!(await parentAndTargetStillAuthorised(parent, binding, library))) {
-      const removed = await proveStagingRemoved(parent, binding, stagingName, stagingIdentity, library)
+      await attemptStagingCleanup(
+        parent,
+        binding,
+        stagingName,
+        stagingIdentity,
+        stagingFD,
+        library,
+        dependencies,
+      )
       stagingName = null
-      return removed
-        ? noEffect(binding.preview.proposalDigest, "parent_or_target_changed_before_publish")
-        : unknown(binding.preview.proposalDigest, "staging_cleanup_unproved")
+      return unknown(binding.preview.proposalDigest, "staging_cleanup_unproved")
     }
-    if (!publishExclusiveAt(parent.fd, stagingName, binding.authority.targetName, library)) {
-      const removed = await proveStagingRemoved(parent, binding, stagingName, stagingIdentity, library)
+    const publishBindingFD = await openBoundStagingName(
+      parent.fd,
+      stagingName,
+      stagingFD,
+      stagingIdentity,
+      library,
+    )
+    if (publishBindingFD < 0) {
+      return unknown(binding.preview.proposalDigest, "staging_name_identity_changed_before_publish")
+    }
+    let publishedExclusive = false
+    try {
+      await dependencies.afterFinalStagingRebindBeforeRename?.({ stagingName })
+      publishedExclusive = publishExclusiveAt(parent.fd, stagingName, binding.authority.targetName, library)
+    } finally {
+      library.symbols.close(publishBindingFD)
+    }
+    if (!publishedExclusive) {
+      await attemptStagingCleanup(
+        parent,
+        binding,
+        stagingName,
+        stagingIdentity,
+        stagingFD,
+        library,
+        dependencies,
+      )
       stagingName = null
-      return removed
-        ? noEffect(binding.preview.proposalDigest, "exclusive_publish_rejected")
-        : unknown(binding.preview.proposalDigest, "staging_cleanup_unproved")
+      return unknown(binding.preview.proposalDigest, "staging_cleanup_unproved")
     }
     published = true
     stagingName = null
@@ -143,7 +174,15 @@ export async function executeProjectScaffoldInternal(
     if (targetFD < 0) return unknown(binding.preview.proposalDigest, "published_target_identity_unavailable")
     try {
       const target = await Bun.file(targetFD).stat()
-      if (!target.isDirectory()) {
+      const pinned = await Bun.file(stagingFD).stat()
+      if (
+        !target.isDirectory() ||
+        !pinned.isDirectory() ||
+        String(target.dev) !== stagingIdentity.device ||
+        String(target.ino) !== stagingIdentity.inode ||
+        target.dev !== pinned.dev ||
+        target.ino !== pinned.ino
+      ) {
         return unknown(binding.preview.proposalDigest, "published_target_identity_unavailable")
       }
       return Object.freeze({
@@ -159,10 +198,19 @@ export async function executeProjectScaffoldInternal(
     }
   } catch (cause) {
     if (published) return unknown(binding.preview.proposalDigest, errorName(cause))
-    const removed = stagingName
-      ? await proveStagingRemoved(parent, binding, stagingName, stagingIdentity, library)
-      : await parentAndTargetStillAuthorised(parent, binding, library)
-    return removed && (await parentHandleStillAuthorised(parent, binding))
+    if (stagingName) {
+      await attemptStagingCleanup(
+        parent,
+        binding,
+        stagingName,
+        stagingIdentity,
+        stagingFD,
+        library,
+        dependencies,
+      )
+      return unknown(binding.preview.proposalDigest, errorName(cause))
+    }
+    return (await parentAndTargetStillAuthorised(parent, binding, library))
       ? noEffect(binding.preview.proposalDigest, errorName(cause))
       : unknown(binding.preview.proposalDigest, errorName(cause))
   } finally {
@@ -347,38 +395,95 @@ function publishExclusiveAt(
   )
 }
 
-async function proveStagingRemoved(
+async function attemptStagingCleanup(
   parent: Awaited<ReturnType<typeof open>>,
   binding: ReturnType<typeof requireBinding>,
   stagingName: string,
   identity: Readonly<{ device: string; inode: string }> | null,
+  pinnedStagingFD: number,
   library: ReturnType<typeof openScaffoldLibrary>,
+  dependencies: ProjectScaffoldInternalDependencies,
 ) {
-  if (!identity || !(await parentHandleStillAuthorised(parent, binding))) return false
-  const stagingFD = openDirectoryAt(parent.fd, stagingName, library)
-  if (stagingFD < 0) return false
+  if (!identity || pinnedStagingFD < 0 || !(await parentHandleStillAuthorised(parent, binding))) return false
+  const reboundFD = await openBoundStagingName(parent.fd, stagingName, pinnedStagingFD, identity, library)
+  if (reboundFD < 0) return false
   try {
-    const facts = await Bun.file(stagingFD).stat()
-    if (
-      !facts.isDirectory() ||
-      String(facts.dev) !== identity.device ||
-      String(facts.ino) !== identity.inode
-    ) {
-      return false
-    }
     const budget = { remaining: maximumCleanupEntries }
-    if (!(await removeDirectoryContents(stagingFD, library, budget))) return false
+    if (!(await removeDirectoryContents(pinnedStagingFD, library, budget))) return false
+    await dependencies.afterCleanupReboundBeforeUnlink?.({ stagingName })
+    const finalBindingFD = await openBoundStagingName(
+      parent.fd,
+      stagingName,
+      pinnedStagingFD,
+      identity,
+      library,
+    )
+    if (finalBindingFD < 0) return false
+    try {
+      const before = await Bun.file(pinnedStagingFD).stat()
+      if (
+        !before.isDirectory() ||
+        String(before.dev) !== identity.device ||
+        String(before.ino) !== identity.inode ||
+        before.nlink < 1
+      ) {
+        return false
+      }
+      if (library.symbols.unlinkat(parent.fd, cString(stagingName), removeDirectory) !== 0) return false
+      const after = await Bun.file(pinnedStagingFD).stat()
+      // Darwin keeps an open directory's link count stable after rmdir, so fstat cannot prove that this
+      // exact directory has no renamed link elsewhere. The checks below can reject cleanup, never prove it.
+      if (
+        after.dev !== before.dev ||
+        after.ino !== before.ino ||
+        after.nlink > before.nlink ||
+        targetStateAt(parent.fd, stagingName, library) !== "absent"
+      ) {
+        return false
+      }
+    } finally {
+      library.symbols.close(finalBindingFD)
+    }
   } catch {
     return false
   } finally {
-    library.symbols.close(stagingFD)
+    library.symbols.close(reboundFD)
   }
-  if (library.symbols.unlinkat(parent.fd, cString(stagingName), removeDirectory) !== 0) return false
   syncDescriptor(parent.fd, library)
-  return (
-    targetStateAt(parent.fd, stagingName, library) === "absent" &&
-    (await parentHandleStillAuthorised(parent, binding))
-  )
+  await parentHandleStillAuthorised(parent, binding)
+  return false
+}
+
+async function openBoundStagingName(
+  parentFD: number,
+  stagingName: string,
+  pinnedStagingFD: number,
+  identity: Readonly<{ device: string; inode: string }>,
+  library: ReturnType<typeof openScaffoldLibrary>,
+) {
+  const reboundFD = openDirectoryAt(parentFD, stagingName, library)
+  if (reboundFD < 0) return -1
+  try {
+    const [rebound, pinned] = await Promise.all([
+      Bun.file(reboundFD).stat(),
+      Bun.file(pinnedStagingFD).stat(),
+    ])
+    if (
+      !rebound.isDirectory() ||
+      !pinned.isDirectory() ||
+      String(rebound.dev) !== identity.device ||
+      String(rebound.ino) !== identity.inode ||
+      rebound.dev !== pinned.dev ||
+      rebound.ino !== pinned.ino
+    ) {
+      library.symbols.close(reboundFD)
+      return -1
+    }
+    return reboundFD
+  } catch {
+    library.symbols.close(reboundFD)
+    return -1
+  }
 }
 
 async function removeDirectoryContents(

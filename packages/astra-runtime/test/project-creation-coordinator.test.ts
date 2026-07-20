@@ -16,6 +16,7 @@ import {
 } from "../src/project-creation-coordinator"
 import {
   createProjectScaffoldCoordinatorInternal,
+  projectScaffoldStateRootInternal,
   type ProjectScaffoldCoordinatorInternalOptions,
 } from "../src/project-creation-coordinator-internal"
 import { makeProjectScaffoldOperationFacts } from "../src/project-creation-operation-facts"
@@ -36,6 +37,42 @@ describe("durable project scaffold coordination", () => {
     expect(verifyDurableProjectScaffold.length).toBe(1)
     expect("createProjectScaffoldCoordinatorInternal" in publicAPI).toBe(false)
     expect("projectScaffoldFaultPoints" in publicAPI).toBe(false)
+  })
+
+  test("derives the public macOS state root from the account database and never from HOME", async () => {
+    const fixture = await makeFixture("astra-project-hostile-home-", "rejected")
+    const before = await readdir(fixture.parent)
+    const transpilerCache = await realpath(await mkdtemp(join(tmpdir(), "astra-project-probe-cache-")))
+    cleanup.push(() => rm(transpilerCache, { recursive: true, force: true }))
+    const helperModuleURL = new URL("../src/macos-account-home-internal.ts", import.meta.url).href
+    const coordinatorModuleURL = new URL("../src/project-creation-coordinator.ts", import.meta.url).href
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--eval",
+        `await import(${JSON.stringify(coordinatorModuleURL)}); const { projectScaffoldStateRootInternal } = await import(${JSON.stringify(helperModuleURL)}); process.stdout.write(projectScaffoldStateRootInternal())`,
+      ],
+      {
+        cwd: import.meta.dir,
+        env: {
+          ...process.env,
+          HOME: fixture.target,
+          BUN_RUNTIME_TRANSPILER_CACHE_PATH: transpilerCache,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ])
+
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" })
+    expect(stdout).toBe(projectScaffoldStateRootInternal())
+    expect(stdout.startsWith(fixture.parent)).toBe(false)
+    expect(await readdir(fixture.parent)).toEqual(before)
   })
 
   test("keeps rejection pure: no target, staging, ledger, spool, or host adapter", async () => {
@@ -75,6 +112,25 @@ describe("durable project scaffold coordination", () => {
     expect(hostEntries).toBe(0)
     expect(await exists(fixture.target)).toBe(false)
     expect(await readdir(fixture.state)).toEqual([])
+  })
+
+  test("rejects an uncreated state root inside the project parent before any mkdir or adapter entry", async () => {
+    const fixture = await makeFixture("astra-project-state-root-inside-")
+    const stateRoot = join(fixture.parent, ".astra-state")
+    let hostEntries = 0
+    const coordinator = createProjectScaffoldCoordinatorInternal({
+      stateRoot,
+      now: fixture.now,
+      onHostAdapterEntered: () => {
+        hostEntries += 1
+      },
+    })
+
+    await expect(coordinator.execute(fixture.input)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(hostEntries).toBe(0)
+    expect(await exists(stateRoot)).toBe(false)
+    expect(await exists(fixture.target)).toBe(false)
+    expect(await readdir(fixture.parent)).toEqual([])
   })
 
   test("blocks a replaced parent before durable admission or adapter entry", async () => {

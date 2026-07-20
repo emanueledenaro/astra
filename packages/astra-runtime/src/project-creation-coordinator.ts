@@ -1,6 +1,5 @@
 import { access, lstat, mkdir, realpath } from "node:fs/promises"
-import { homedir } from "node:os"
-import { join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
 import {
   parseOperationEffectUncertainty,
   parseOperationEvidence,
@@ -26,6 +25,7 @@ import {
   type ProjectScaffoldOperationFactsInput,
 } from "./project-creation-operation-facts"
 import { expectedTreeDigest, verifyProjectScaffoldTree } from "./project-creation-verifier"
+import { projectScaffoldStateRootInternal } from "./macos-account-home-internal"
 import { revalidateProjectParentAuthority } from "./project-parent-authority"
 import {
   assertSafeStateFile,
@@ -110,7 +110,7 @@ export function createProjectScaffoldCoordinatorInternal(options: ProjectScaffol
 }
 
 const publicProjectScaffoldCoordinator = createProjectScaffoldCoordinatorInternal({
-  stateRoot: join(homedir(), "Library", "Application Support", "Astra", "Operations", "project-scaffold"),
+  stateRoot: projectScaffoldStateRootInternal(),
   now: Date.now,
 })
 
@@ -728,6 +728,7 @@ function bindStatePaths(input: DurableProjectScaffoldInput, stateRootInput: stri
 }
 
 async function prepareProjectStateFiles(workspace: string, input: StatefulProjectScaffoldInput) {
+  await assertStateRootPlacementBeforeCreate(workspace, input.stateRoot)
   await mkdir(input.stateRoot, { recursive: true, mode: 0o700 })
   await assertPrivateStateDirectory(input.stateRoot, "state root")
   await mkdir(input.operationStateDirectory, { mode: 0o700 }).catch((cause) => {
@@ -738,10 +739,52 @@ async function prepareProjectStateFiles(workspace: string, input: StatefulProjec
 }
 
 async function assertProjectStatePaths(input: StatefulProjectScaffoldInput) {
+  await assertStateRootPlacementBeforeCreate(input.authority.parentPath, input.stateRoot)
   await assertPrivateStateDirectory(input.stateRoot, "state root")
   await assertPrivateStateDirectory(input.operationStateDirectory, "operation state directory")
   await assertSafeStateFile(input.authority.parentPath, input.ledgerFilename)
   await assertSafeStateFile(input.authority.parentPath, input.spoolFilename)
+}
+
+async function assertStateRootPlacementBeforeCreate(workspace: string, stateRoot: string) {
+  const workspacePath = await realpath(workspace).catch((cause) => {
+    throw new ProjectScaffoldCoordinationError("state_unavailable", "The project parent is not canonical", cause)
+  })
+  if (!isAbsolute(stateRoot) || resolve(stateRoot) !== stateRoot || isInside(workspacePath, stateRoot)) {
+    throw new ProjectScaffoldCoordinationError(
+      "state_unavailable",
+      "The Astra state root must be canonical and outside the project parent",
+    )
+  }
+
+  let existing = stateRoot
+  const missing: Array<string> = []
+  while (true) {
+    const facts = await lstat(existing).catch((cause) => {
+      if (isNodeError(cause, "ENOENT")) return null
+      throw new ProjectScaffoldCoordinationError("state_unavailable", "The Astra state path is unreadable", cause)
+    })
+    if (facts) {
+      const owner = typeof process.geteuid === "function" ? process.geteuid() : facts.uid
+      const canonical = await realpath(existing).catch(() => null)
+      if (!facts.isDirectory() || facts.isSymbolicLink() || facts.uid !== owner || canonical !== existing) {
+        throw new ProjectScaffoldCoordinationError(
+          "state_unavailable",
+          "The nearest Astra state ancestor is not canonical and account-owned",
+        )
+      }
+      if (resolve(canonical, ...missing) !== stateRoot) {
+        throw new ProjectScaffoldCoordinationError("state_unavailable", "The Astra state path crosses an alias")
+      }
+      return
+    }
+    const parent = dirname(existing)
+    if (parent === existing) {
+      throw new ProjectScaffoldCoordinationError("state_unavailable", "No safe Astra state ancestor is available")
+    }
+    missing.unshift(basename(existing))
+    existing = parent
+  }
 }
 
 async function assertPrivateStateDirectory(path: string, label: string) {
@@ -767,6 +810,11 @@ async function exists(path: string) {
   } catch {
     return false
   }
+}
+
+function isInside(root: string, candidatePath: string) {
+  const candidate = relative(resolve(root), resolve(candidatePath))
+  return candidate === "" || (!candidate.startsWith("..") && !isAbsolute(candidate))
 }
 
 function isNodeError(cause: unknown, code: string): cause is NodeJS.ErrnoException {

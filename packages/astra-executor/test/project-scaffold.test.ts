@@ -13,7 +13,7 @@ import { executeProjectScaffoldInternal } from "../src/project-scaffold-internal
 const cleanup: Array<() => Promise<void>> = []
 
 afterAll(async () => {
-  await Promise.all(cleanup.map((remove) => remove()))
+  for (const remove of cleanup.reverse()) await remove()
 })
 
 describe("dedicated project scaffold adapter", () => {
@@ -65,7 +65,7 @@ describe("dedicated project scaffold adapter", () => {
       },
     })
 
-    expect(result.status).toBe("failed_without_effect")
+    expect(result.status).toBe("effect_unknown")
     expect(await readFile(join(fixture.target, "owner.txt"), "utf8")).toBe("preserve\n")
     expect((await readdir(fixture.parent)).filter((name) => name.startsWith(".astra-scaffold-"))).toEqual([])
   })
@@ -106,6 +106,67 @@ describe("dedicated project scaffold adapter", () => {
     expect(result.status).toBe("effect_unknown")
     expect(await readFile(join(replacementPath, "owner.txt"), "utf8")).toBe("preserve replacement\n")
     expect(await exists(fixture.target)).toBe(false)
+  })
+
+  test("never publishes a staging-name replacement that appears before publication", async () => {
+    const fixture = await makeFixture("astra-scaffold-publish-replacement-")
+    let replacementPath = ""
+    const result = await executeProjectScaffoldInternal(fixture.input, async () => "claimed", {
+      beforePublish: async ({ stagingName }) => {
+        const stagingPath = join(fixture.parent, stagingName)
+        const original = `${stagingPath}-original`
+        cleanup.push(() => rm(original, { recursive: true, force: true }))
+        await rename(stagingPath, original)
+        await mkdir(stagingPath)
+        replacementPath = stagingPath
+        await writeFile(join(stagingPath, "owner.txt"), "preserve replacement\n")
+      },
+    })
+
+    expect(result.status).toBe("effect_unknown")
+    expect(await exists(fixture.target)).toBe(false)
+    expect(await readFile(join(replacementPath, "owner.txt"), "utf8")).toBe("preserve replacement\n")
+  })
+
+  test("reports uncertainty when staging is replaced after the final publish rebind", async () => {
+    const fixture = await makeFixture("astra-scaffold-final-publish-race-")
+    const result = await executeProjectScaffoldInternal(fixture.input, async () => "claimed", {
+      afterFinalStagingRebindBeforeRename: async ({ stagingName }) => {
+        const stagingPath = join(fixture.parent, stagingName)
+        const original = `${stagingPath}-original`
+        cleanup.push(() => rm(original, { recursive: true, force: true }))
+        await rename(stagingPath, original)
+        await mkdir(stagingPath)
+        await writeFile(join(stagingPath, "owner.txt"), "replacement published under uncertainty\n")
+      },
+    })
+
+    expect(result.status).toBe("effect_unknown")
+    expect(await readFile(join(fixture.target, "owner.txt"), "utf8")).toBe(
+      "replacement published under uncertainty\n",
+    )
+  })
+
+  test("does not unlink a cleanup-name replacement introduced after rebind", async () => {
+    const fixture = await makeFixture("astra-scaffold-cleanup-rebind-race-")
+    let replacementPath = ""
+    const result = await executeProjectScaffoldInternal(fixture.input, async () => "claimed", {
+      beforePublish: async () => {
+        await mkdir(fixture.target)
+      },
+      afterCleanupReboundBeforeUnlink: async ({ stagingName }) => {
+        const stagingPath = join(fixture.parent, stagingName)
+        const original = `${stagingPath}-original`
+        cleanup.push(() => rm(original, { recursive: true, force: true }))
+        await rename(stagingPath, original)
+        await mkdir(stagingPath)
+        replacementPath = stagingPath
+        await writeFile(join(stagingPath, "owner.txt"), "preserve cleanup replacement\n")
+      },
+    })
+
+    expect(result.status).toBe("effect_unknown")
+    expect(await readFile(join(replacementPath, "owner.txt"), "utf8")).toBe("preserve cleanup replacement\n")
   })
 
   test("reports uncertainty and preserves a replacement when staging cleanup identity is unproved", async () => {
