@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test"
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { parseContentDigest } from "@astra/domain/operation-contract"
+import { providerConversationGenesisDigest, type AstraProviderConversationTurn } from "@astra/domain/work-session"
 import type { DurableProviderTurnResult } from "@astra/runtime/provider-turn-coordinator"
 import { makeProviderTurnOperationFacts } from "@astra/runtime/provider-turn-operation-facts"
 import type { TrustedObservedProviderCompletion } from "@astra/runtime/provider-turn-transport"
@@ -69,6 +70,7 @@ test("hands one activated skill into governed chat and reuses it only after prov
     {
       readCatalog: catalog,
       credentialBroker: broker(sessionID),
+      conversationHistory: memoryHistory(),
       skillBundleSource: skillControl,
       execute: async (input, resolveWire, parse, dependencies) => {
         const decision = await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)
@@ -235,4 +237,41 @@ function validSse(text: string) {
 
 function digest(value: string) {
   return `sha256:${Bun.CryptoHasher.hash("sha256", value, "hex")}` as const
+}
+
+function memoryHistory() {
+  const turns: Array<AstraProviderConversationTurn> = []
+  let historyDigest: `sha256:${string}` = providerConversationGenesisDigest
+  const snapshot = () => ({
+    turns: [...turns],
+    historyDigest,
+    totalBytes: turns.reduce(
+      (bytes, turn) => bytes + Buffer.byteLength(turn.userText) + Buffer.byteLength(turn.assistantText),
+      0,
+    ),
+  })
+  return {
+    async load() {
+      return snapshot()
+    },
+    async append(priorHistoryDigest: `sha256:${string}`, turn: AstraProviderConversationTurn) {
+      if (priorHistoryDigest !== historyDigest) throw new Error("stale history")
+      turns.push(turn)
+      historyDigest = digest(
+        `astra.provider-conversation.v1\0${canonicalJson({ previousDigest: priorHistoryDigest, turn })}`,
+      )
+      return snapshot()
+    },
+  }
+}
+
+function canonicalJson(input: unknown): string {
+  if (input === null || typeof input === "string" || typeof input === "boolean" || typeof input === "number") {
+    return JSON.stringify(input)
+  }
+  if (Array.isArray(input)) return `[${input.map(canonicalJson).join(",")}]`
+  return `{${Object.entries(input as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${JSON.stringify(key)}:${canonicalJson(value)}`)
+    .join(",")}}`
 }

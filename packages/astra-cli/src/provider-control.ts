@@ -14,6 +14,7 @@ import {
   type ProviderTurnPreview,
   type ProviderTurnProgress,
 } from "@astra/domain/provider-control"
+import type { AstraProviderConversationTurn } from "@astra/domain/work-session"
 import {
   anthropicOneTurnMaximumConversationBytes,
   anthropicOneTurnMaximumConversationTurns,
@@ -32,7 +33,10 @@ import {
   providerTurnTransportImplementationDigest,
 } from "@astra/runtime/provider-turn-network-policy"
 import type { DurableProviderTurnResult, ExecuteProviderTurnInput } from "@astra/runtime/provider-turn-coordinator"
-import { makeProviderTurnOperationFacts } from "@astra/runtime/provider-turn-operation-facts"
+import {
+  makeProviderTurnOperationFacts,
+  providerTurnAdapterDigest,
+} from "@astra/runtime/provider-turn-operation-facts"
 import {
   executeProviderTurnWithTrustedObservedTransport,
   type TrustedObservedProviderCompletion,
@@ -47,6 +51,7 @@ import type {
   PromptSkillBundleTakeResult,
   TrustedPromptSkillBundle,
 } from "./skill-activation-control"
+import type { ParentProviderConversationHistory } from "./provider-conversation-history"
 
 const maximumPreparedOperations = 16
 const requestTimeoutMilliseconds = 30_000
@@ -68,6 +73,7 @@ type PendingTurn = Readonly<{
   preview: ProviderTurnPreview
   skillBundle: TrustedPromptSkillBundle | null
   userText: string
+  priorHistoryDigest: `sha256:${string}`
 }>
 
 export type AstraProviderControl = Readonly<{
@@ -88,6 +94,7 @@ export type AstraProviderControl = Readonly<{
 export type AstraProviderControlDependencies = Readonly<{
   readCatalog: () => ProviderCatalogResult
   credentialBroker: ParentProviderCredentialBroker
+  conversationHistory: ParentProviderConversationHistory
   skillBundleSource?: Pick<AstraSkillActivationControl, "takePromptBundle">
   execute?: typeof executeProviderTurnWithTrustedObservedTransport
   createCatalogAuthority?: () => AnthropicCatalogAuthority
@@ -95,7 +102,7 @@ export type AstraProviderControlDependencies = Readonly<{
   randomUUID?: () => string
 }>
 
-/** Parent-only owner for one in-memory, one-turn Anthropic proposal. */
+/** Parent-only owner for one consent-bound Anthropic proposal backed by durable history. */
 export function createAstraProviderControl(
   session: OpenedWorkspace,
   sessionID: string,
@@ -107,8 +114,6 @@ export function createAstraProviderControl(
   const execute = dependencies.execute ?? executeProviderTurnWithTrustedObservedTransport
   const catalogAuthority = (dependencies.createCatalogAuthority ?? createAnthropicCatalogAuthority)()
   const consumed = new Set<string>()
-  /** Consented prior exchanges for this activation. Parent memory only; never persisted. */
-  const conversation: Array<AnthropicConversationTurn> = []
   let pending: PendingTurn | undefined
   let availableSkill: TrustedPromptSkillBundle | undefined
   let prepared = 0
@@ -127,7 +132,13 @@ export function createAstraProviderControl(
     const result = dependencies.readCatalog()
     if (!result.ok) return blockedPrepare("catalog_unavailable")
     if (!result.catalog.models.some((model) => model.id === modelID)) return blockedPrepare("model_rejected")
-    const historyBytes = conversationHistoryBytes(conversation)
+    const durableConversation = await dependencies.conversationHistory.load().catch(() => null)
+    if (!durableConversation) return blockedPrepare("control_unavailable")
+    const conversation: ReadonlyArray<AnthropicConversationTurn> = durableConversation.turns.map((turn) => ({
+      userText: turn.userText,
+      assistantText: turn.assistantText,
+    }))
+    const historyBytes = durableConversation.totalBytes
     if (
       conversation.length >= anthropicOneTurnMaximumConversationTurns ||
       historyBytes + Buffer.byteLength(userText, "utf8") > anthropicOneTurnMaximumConversationBytes
@@ -175,6 +186,7 @@ export function createAstraProviderControl(
         conversation: {
           priorTurns: conversation.length,
           historyBytes,
+          historyDigest: durableConversation.historyDigest,
           retention: providerConversationRetentionLabel,
         },
         providerCapabilityDigest,
@@ -189,7 +201,17 @@ export function createAstraProviderControl(
         networkBoundaryLabel: providerNetworkExecutionBoundaryLabel,
         assurance: "NOT VERIFIED",
       })
-      pending = { proposalID, operationID, facts, request, grant: credential.grant, preview, skillBundle, userText }
+      pending = {
+        proposalID,
+        operationID,
+        facts,
+        request,
+        grant: credential.grant,
+        preview,
+        skillBundle,
+        userText,
+        priorHistoryDigest: durableConversation.historyDigest,
+      }
       if (skillBundle) availableSkill = undefined
       prepared += 1
       return { status: "prepared", preview }
@@ -252,6 +274,10 @@ export function createAstraProviderControl(
           mode: "production_https",
           requestApproval: async (runtimePreview) => {
             if (!previewMatches(proposal, runtimePreview)) throw new Error("Provider preview binding changed")
+            const currentConversation = await dependencies.conversationHistory.load()
+            if (currentConversation.historyDigest !== proposal.priorHistoryDigest) {
+              throw new Error("Provider conversation changed after consent preview")
+            }
             return decision
           },
           onNetworkDispatch: () => progress("network_dispatch"),
@@ -259,7 +285,41 @@ export function createAstraProviderControl(
       )
       if (result.status === "response_observed_not_verified" && result.response && result.receiptID) {
         if (!responseObserved) return reconciliation(proposal, result.receiptID)
-        conversation.push({ userText: proposal.userText, assistantText: result.response.assistantText })
+        const operation = makeProviderTurnOperationFacts(proposal.facts)
+        const turn: AstraProviderConversationTurn = {
+          turnID: proposal.facts.plan.messageID,
+          operationID: proposal.operationID,
+          receiptID: result.receiptID,
+          providerID: proposal.facts.plan.providerID,
+          modelID: proposal.facts.plan.modelID,
+          adapterDigest: providerHistoryDigest(providerTurnAdapterDigest),
+          credentialProfile: "anthropic-api-key",
+          accountFingerprint: providerHistoryDigest(proposal.grant.accountFingerprint),
+          destination: proposal.request.destination,
+          contextDigest: proposal.request.evidence.skillContextBindingDigest ?? fixedProviderContextDigest,
+          requestBodyDigest: proposal.request.evidence.requestDigest,
+          requestBytes: proposal.request.evidence.requestBytes,
+          workspaceBaselineDigest: providerHistoryDigest(operation.baselineTrustDigest),
+          gitBaselineDigest: operation.repositorySnapshotDigest
+            ? providerHistoryDigest(operation.repositorySnapshotDigest)
+            : null,
+          userText: proposal.userText,
+          assistantText: result.response.assistantText,
+          assistantTextDigest: providerHistoryDigest(result.response.assistantTextDigest),
+          assistantTextBytes: result.response.assistantTextBytes,
+          finishReason: result.response.finishReason,
+          assurance: "observed_not_verified",
+        }
+        const persisted = await dependencies.conversationHistory
+          .append(proposal.priorHistoryDigest, turn, new Date(now()).toISOString())
+          .catch(() => null)
+        if (
+          !persisted ||
+          persisted.turns.at(-1)?.turnID !== turn.turnID ||
+          persisted.historyDigest === proposal.priorHistoryDigest
+        ) {
+          return reconciliation(proposal, result.receiptID)
+        }
         progress("receipt_acknowledged")
       }
       if (result.status === "denied_without_effect") prepared -= 1
@@ -281,6 +341,17 @@ export function createAstraProviderControl(
   }
 
   return Object.freeze({ catalog, prepare, decide })
+}
+
+const fixedProviderContextDigest = `sha256:${Bun.CryptoHasher.hash(
+  "sha256",
+  "astra-provider-context:fixed-system:v1",
+  "hex",
+)}` as const
+
+function providerHistoryDigest(input: string): `sha256:${string}` {
+  if (!/^sha256:[0-9a-f]{64}$/u.test(input)) throw new Error("Provider evidence digest is invalid")
+  return input as `sha256:${string}`
 }
 
 function revokeCredential(broker: ParentProviderCredentialBroker, grant: ProviderCredentialGrant) {

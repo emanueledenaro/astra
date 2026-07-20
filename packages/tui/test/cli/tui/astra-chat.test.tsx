@@ -261,7 +261,12 @@ const preview = {
   modelID,
   destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
   logicalPayload: { digest, bytes: 256, contextBindingDigest: digest },
-  conversation: { priorTurns: 0, historyBytes: 0, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
+  conversation: {
+    priorTurns: 0,
+    historyBytes: 0,
+    historyDigest: `sha256:${"0".repeat(64)}`,
+    retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
+  },
   providerCapabilityDigest: digest,
   skillContext: {
     kind: "activated_skill",

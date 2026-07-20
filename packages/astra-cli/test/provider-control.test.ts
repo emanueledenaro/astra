@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { providerObservedCompletionLabel } from "@astra/domain/provider-control"
+import { providerConversationGenesisDigest, type AstraProviderConversationTurn } from "@astra/domain/work-session"
 import { parseContentDigest } from "@astra/domain/operation-contract"
 import type { DurableProviderTurnResult } from "@astra/runtime/provider-turn-coordinator"
 import { makeProviderTurnOperationFacts } from "@astra/runtime/provider-turn-operation-facts"
@@ -29,6 +30,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ onIssue: () => issues++ }),
+      conversationHistory: historyPort().port,
       async execute() {
         executions += 1
         throw new Error("read-only transport must not execute")
@@ -45,6 +47,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: unavailableBroker(),
+      conversationHistory: historyPort().port,
       execute: async () => {
         throw new Error("transport must not execute")
       },
@@ -65,6 +68,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ secret, onTake: () => tookCredential++ }),
+      conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, resolveWire, parse, dependencies) => {
         expect(tookCredential).toBe(0)
@@ -123,6 +127,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ onTake: () => takes++ }),
+      conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, _resolveWire, _parse, dependencies) => {
         expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("reject")
@@ -166,6 +171,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker,
+      conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, _resolveWire, _parse, dependencies) => {
         expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("reject")
@@ -194,6 +200,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker(),
+      conversationHistory: historyPort().port,
       skillBundleSource: {
         async takePromptBundle() {
           takes += 1
@@ -249,6 +256,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker(),
+      conversationHistory: historyPort().port,
       skillBundleSource: {
         async takePromptBundle() {
           takes += 1
@@ -280,6 +288,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ onIssue: () => issues++ }),
+      conversationHistory: historyPort().port,
       skillBundleSource: {
         async takePromptBundle() {
           return { status: "blocked", reason: "bundle_busy" }
@@ -307,6 +316,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ onIssue: () => issues++ }),
+      conversationHistory: historyPort().port,
       skillBundleSource: {
         async takePromptBundle() {
           return { status: "taken", bundle: foreign }
@@ -334,6 +344,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ expiresAt: 1_500 }),
+      conversationHistory: historyPort().port,
       skillBundleSource: {
         async takePromptBundle() {
           takes += 1
@@ -366,6 +377,7 @@ describe("parent provider control", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker(),
+      conversationHistory: historyPort().port,
       skillBundleSource: {
         async takePromptBundle() {
           takes += 1
@@ -400,6 +412,84 @@ describe("parent provider control", () => {
 })
 
 describe("consented multi-turn conversation", () => {
+  test("loads verified parent history before preview and binds the exact history digest", async () => {
+    const fixture = await makeFixture("activate-once")
+    const restoredTurn = conversationTurn("restored-turn", "Restored question", "Restored answer")
+    const history = historyPort({ turns: [restoredTurn] })
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker: broker(),
+      conversationHistory: history.port,
+      randomUUID: uuidSequence(),
+    })
+
+    const prepared = await control.prepare(modelID, "Question after restart")
+    if (prepared.status !== "prepared") throw new Error(prepared.reason)
+    expect(history.loads).toBe(1)
+    expect(prepared.preview.conversation).toMatchObject({
+      priorTurns: 1,
+      historyBytes: Buffer.byteLength("Restored questionRestored answer"),
+      historyDigest: history.historyDigest,
+    })
+  })
+
+  test("rejects without appending durable history or taking a credential", async () => {
+    const fixture = await makeFixture("activate-once")
+    const history = historyPort()
+    let takes = 0
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker: broker({ onTake: () => takes++ }),
+      conversationHistory: history.port,
+      randomUUID: uuidSequence(),
+      execute: async (input, _resolveWire, _parse, dependencies) => {
+        expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("reject")
+        return denied(input.plan.operationID)
+      },
+    })
+
+    const prepared = await control.prepare(modelID, "Do not send")
+    if (prepared.status !== "prepared") throw new Error(prepared.reason)
+    expect(await control.decide(prepared.preview.proposalID, "reject", () => {})).toMatchObject({
+      status: "denied_without_effect",
+    })
+    expect(history.appends).toBe(0)
+    expect(takes).toBe(0)
+  })
+
+  test("requires reconciliation without retry when durable append fails after egress", async () => {
+    const fixture = await makeFixture("activate-once")
+    const history = historyPort({ appendFailure: new Error("state unavailable") })
+    let executions = 0
+    const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
+      readCatalog: catalog,
+      credentialBroker: broker(),
+      conversationHistory: history.port,
+      randomUUID: uuidSequence(),
+      execute: async (input, resolveWire, parse, dependencies) => {
+        executions += 1
+        expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("approve")
+        await resolveWire()
+        const completion = parse({
+          statusCode: 200,
+          headers: [["content-type", "text/event-stream"]],
+          body: validSse("Observed but not persisted"),
+        })
+        return completed(input.plan.operationID, completion)
+      },
+    })
+
+    const prepared = await control.prepare(modelID, "One irreversible send")
+    if (prepared.status !== "prepared") throw new Error(prepared.reason)
+    expect(await control.decide(prepared.preview.proposalID, "approve", () => {})).toMatchObject({
+      status: "reconciliation_required",
+      reason: "effect_unknown",
+    })
+    expect(executions).toBe(1)
+    expect(history.appends).toBe(1)
+    expect((await history.port.load()).turns).toHaveLength(0)
+  })
+
   test("sends parent-held history with each approved turn and previews its exact size", async () => {
     const fixture = await makeFixture("activate-once")
     let issues = 0
@@ -409,6 +499,7 @@ describe("consented multi-turn conversation", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ onIssue: () => issues++, onTake: () => takes++ }),
+      conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, resolveWire, parse, dependencies) => {
         expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("approve")
@@ -429,7 +520,8 @@ describe("consented multi-turn conversation", () => {
     expect(first.preview.conversation).toEqual({
       priorTurns: 0,
       historyBytes: 0,
-      retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED",
+      historyDigest: providerConversationGenesisDigest,
+      retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
     })
     expect(await control.decide(first.preview.proposalID, "approve", () => {})).toMatchObject({
       status: "response_observed_not_verified",
@@ -438,11 +530,12 @@ describe("consented multi-turn conversation", () => {
 
     const second = await control.prepare(modelID, "Second user question")
     if (second.status !== "prepared") throw new Error(second.reason)
-    expect(second.preview.conversation).toEqual({
+    expect(second.preview.conversation).toMatchObject({
       priorTurns: 1,
       historyBytes: Buffer.byteLength("First user question") + Buffer.byteLength("Answer 1"),
-      retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED",
+      retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
     })
+    expect(second.preview.conversation.historyDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
     expect(second.preview.logicalPayload.bytes).toBeGreaterThan(first.preview.logicalPayload.bytes)
     expect(await control.decide(second.preview.proposalID, "approve", () => {})).toMatchObject({
       status: "response_observed_not_verified",
@@ -468,6 +561,7 @@ describe("consented multi-turn conversation", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ onTake: () => takes++ }),
+      conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, resolveWire, parse, dependencies) => {
         const decision = await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)
@@ -524,6 +618,7 @@ describe("consented multi-turn conversation", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker: broker({ onIssue: () => issues++ }),
+      conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, resolveWire, parse, dependencies) => {
         expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("approve")
@@ -575,6 +670,7 @@ describe("consented multi-turn conversation", () => {
     const control = createAstraProviderControl(fixture.session, fixture.sessionID, fixture.state, {
       readCatalog: catalog,
       credentialBroker,
+      conversationHistory: historyPort().port,
       randomUUID: uuidSequence(),
       execute: async (input, resolveWire, parse, dependencies) => {
         expect(await dependencies.requestApproval(makeProviderTurnOperationFacts(input).preview)).toBe("approve")
@@ -772,4 +868,88 @@ function contentDigest(value: string) {
   const parsed = parseContentDigest(digest(value))
   if (!parsed.ok) throw new Error("Invalid digest fixture")
   return parsed.value
+}
+
+function conversationTurn(turnID: string, userText: string, assistantText: string): AstraProviderConversationTurn {
+  return {
+    turnID,
+    operationID: "40000000-0000-4000-8000-000000000004",
+    receiptID: "50000000-0000-4000-8000-000000000005",
+    providerID: "anthropic",
+    modelID,
+    adapterDigest: digest("adapter"),
+    credentialProfile: "anthropic-api-key",
+    accountFingerprint: digest("account"),
+    destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
+    contextDigest: digest("context"),
+    requestBodyDigest: digest("body"),
+    requestBytes: Buffer.byteLength(userText),
+    workspaceBaselineDigest: digest("workspace"),
+    gitBaselineDigest: null,
+    userText,
+    assistantText,
+    assistantTextDigest: digest(assistantText),
+    assistantTextBytes: Buffer.byteLength(assistantText),
+    finishReason: "stop",
+    assurance: "observed_not_verified",
+  }
+}
+
+function historyPort(
+  input: Readonly<{ turns?: ReadonlyArray<AstraProviderConversationTurn>; appendFailure?: Error }> = {},
+) {
+  const turns = [...(input.turns ?? [])]
+  const initialHistoryDigest = turns.reduce(
+    (current, turn) => digest(`astra.provider-conversation.v1\0${canonicalJson({ previousDigest: current, turn })}`),
+    providerConversationGenesisDigest as `sha256:${string}`,
+  )
+  let historyDigest = initialHistoryDigest
+  let loads = 0
+  let appends = 0
+  const snapshot = () => ({
+    turns: [...turns],
+    historyDigest,
+    totalBytes: turns.reduce(
+      (bytes, turn) => bytes + Buffer.byteLength(turn.userText) + Buffer.byteLength(turn.assistantText),
+      0,
+    ),
+  })
+  return {
+    get loads() {
+      return loads
+    },
+    get appends() {
+      return appends
+    },
+    get historyDigest() {
+      return historyDigest
+    },
+    port: {
+      async load() {
+        loads += 1
+        return snapshot()
+      },
+      async append(priorHistoryDigest: `sha256:${string}`, turn: AstraProviderConversationTurn) {
+        appends += 1
+        if (input.appendFailure) throw input.appendFailure
+        if (priorHistoryDigest !== historyDigest) throw new Error("stale history")
+        turns.push(turn)
+        historyDigest = digest(
+          `astra.provider-conversation.v1\0${canonicalJson({ previousDigest: priorHistoryDigest, turn })}`,
+        )
+        return snapshot()
+      },
+    },
+  }
+}
+
+function canonicalJson(input: unknown): string {
+  if (input === null || typeof input === "string" || typeof input === "boolean" || typeof input === "number") {
+    return JSON.stringify(input)
+  }
+  if (Array.isArray(input)) return `[${input.map(canonicalJson).join(",")}]`
+  return `{${Object.entries(input as Record<string, unknown>)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${JSON.stringify(key)}:${canonicalJson(value)}`)
+    .join(",")}}`
 }

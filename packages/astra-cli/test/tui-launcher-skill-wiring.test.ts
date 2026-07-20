@@ -33,8 +33,13 @@ test("wires provider chat to the exact parent-owned skill control instance", () 
     },
   } satisfies ParentProviderCredentialBroker
 
-  const dependencies = makeAstraProviderSessionDependencies(credentialBroker, skillBundleSource)
+  const dependencies = makeAstraProviderSessionDependencies(
+    credentialBroker,
+    skillBundleSource,
+    "10000000-0000-4000-8000-000000000001",
+  )
 
   expect(dependencies.skillBundleSource).toBe(skillBundleSource)
   expect(dependencies.credentialBroker).toBe(credentialBroker)
+  expect(dependencies.conversationHistory).toBeDefined()
 })

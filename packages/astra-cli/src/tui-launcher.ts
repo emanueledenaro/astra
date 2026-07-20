@@ -33,6 +33,7 @@ import { createAstraMcpActivationControl } from "./mcp-activation-control"
 import { createAstraMcpActivationAdapter } from "./mcp-activation-adapter"
 import { connectParentAnthropicCredential } from "./provider-connect"
 import { createAstraWorkSessionControl } from "./work-session-control"
+import { createParentProviderConversationHistory } from "./provider-conversation-history"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -58,8 +59,14 @@ type OpenedWorkspace = Extract<AstraWorkspaceSessionResult, { status: "opened" }
 export function makeAstraProviderSessionDependencies(
   credentialBroker: ParentProviderCredentialBroker,
   skillBundleSource: Pick<AstraSkillActivationControl, "takePromptBundle">,
+  durableSessionID: string,
 ) {
-  return Object.freeze({ readCatalog: readAstraProviderCatalog, credentialBroker, skillBundleSource })
+  return Object.freeze({
+    readCatalog: readAstraProviderCatalog,
+    credentialBroker,
+    skillBundleSource,
+    conversationHistory: createParentProviderConversationHistory(durableSessionID),
+  })
 }
 
 export function makeAstraTuiLaunchSpec(
@@ -252,7 +259,7 @@ export async function launchAstraTui(session: OpenedWorkspace) {
           session,
           authority.authority.sessionID,
           { ledgerFilename: operationLedgerPath(), spoolFilename: receiptSpoolPath() },
-          makeAstraProviderSessionDependencies(credentialBroker, skillActivationControl),
+          makeAstraProviderSessionDependencies(credentialBroker, skillActivationControl, durableSessionID),
         ),
       })
       const spec = makeAstraTuiLaunchSpec(session.report.root, session.mode, authority, control, provider)

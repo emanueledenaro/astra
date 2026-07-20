@@ -5,7 +5,7 @@ export const providerNetworkExecutionBoundaryLabel = "NETWORK EGRESS — HOST TR
 export const providerObservedCompletionLabel = "COMPLETED — RESPONSE OBSERVED — NOT VERIFIED" as const
 export const providerSkillInstructionTrustLabel = "UNTRUSTED INSTRUCTION DATA" as const
 export const providerSkillInstructionAssuranceLabel = "OBSERVED NOT VERIFIED" as const
-export const providerConversationRetentionLabel = "IN-MEMORY PARENT ONLY — NOT PERSISTED" as const
+export const providerConversationRetentionLabel = "PARENT-OWNED DURABLE — VERIFIED ON LOAD" as const
 export const providerControlRequestWireLimitBytes = 6 * 65_536 + 16_384
 export const providerControlResponseWireLimitBytes = 6 * 1_048_576 + 262_144
 
@@ -70,6 +70,7 @@ export type ProviderTurnPreview = Readonly<{
   conversation: Readonly<{
     priorTurns: number
     historyBytes: number
+    historyDigest: string
     retention: typeof providerConversationRetentionLabel
   }>
   providerCapabilityDigest: string
@@ -434,10 +435,11 @@ function parsePreview(input: unknown): ProviderTurnPreview | null {
     !positive(payload.bytes) ||
     (payload.contextBindingDigest !== null && !digest(payload.contextBindingDigest)) ||
     !conversation ||
-    !exactKeys(conversation, ["priorTurns", "historyBytes", "retention"]) ||
+    !exactKeys(conversation, ["priorTurns", "historyBytes", "historyDigest", "retention"]) ||
     !nonNegative(conversation.priorTurns) ||
     !nonNegative(conversation.historyBytes) ||
     (conversation.priorTurns === 0) !== (conversation.historyBytes === 0) ||
+    !digest(conversation.historyDigest) ||
     conversation.retention !== providerConversationRetentionLabel ||
     !digest(record.providerCapabilityDigest) ||
     (record.skillContext !== null && !skillContext) ||

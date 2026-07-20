@@ -155,7 +155,12 @@ function prepared() {
         bytes: 512,
         contextBindingDigest: computeProviderSkillContextBindingDigest(skillContext()),
       },
-      conversation: { priorTurns: 0, historyBytes: 0, retention: "IN-MEMORY PARENT ONLY — NOT PERSISTED" },
+      conversation: {
+        priorTurns: 0,
+        historyBytes: 0,
+        historyDigest: `sha256:${"0".repeat(64)}`,
+        retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
+      },
       providerCapabilityDigest: digest("b"),
       skillContext: skillContext(),
       headerNames: ["anthropic-version", "content-type", "x-api-key"],
