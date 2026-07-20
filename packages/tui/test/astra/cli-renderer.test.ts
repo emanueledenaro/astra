@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test"
 import { ASTRA_ALTERNATE_SCREEN_RESET, prepareAstraTerminalRenderer } from "../../src/astra/cli-renderer"
 
-test("resets the alternate viewport and disables unsupported Kitty input on Apple Terminal", () => {
+test("resets the alternate viewport without changing OpenTUI keyboard ownership on Apple Terminal", () => {
   const writes: Array<string> = []
   let disabled = 0
   const renderer = { disableKittyKeyboard: () => disabled++ }
@@ -12,7 +12,7 @@ test("resets the alternate viewport and disables unsupported Kitty input on Appl
       write: (value) => writes.push(value),
     }),
   ).toBe(renderer)
-  expect(disabled).toBe(1)
+  expect(disabled).toBe(0)
   expect(writes).toEqual([ASTRA_ALTERNATE_SCREEN_RESET])
 })
 

@@ -5,7 +5,7 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "astra": "./src/index.ts"
+    "astra": "./bin/astra"
   },
   "exports": {
     ".": "./src/index.ts",
@@ -15,10 +15,10 @@
   },
   "scripts": {
     "check:provider-catalog": "bun run ./script/generate-provider-catalog.ts --check --offline-source ../opencode/test/tool/fixtures/models-api.json",
-    "demo": "bun run ./src/index.ts open",
+    "demo": "./bin/astra open",
     "generate:provider-catalog": "bun run ./script/generate-provider-catalog.ts",
     "refresh:provider-catalog:offline": "bun run ./script/generate-provider-catalog.ts --offline-source ../opencode/test/tool/fixtures/models-api.json",
-    "start": "bun run ./src/index.ts",
+    "start": "./bin/astra",
     "test": "bun test",
     "typecheck": "tsgo --noEmit",
     "verify:demo": "bun run ./script/verify-demo.ts"

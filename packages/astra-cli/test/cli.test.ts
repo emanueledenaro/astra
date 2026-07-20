@@ -11,6 +11,18 @@ afterAll(async () => {
 })
 
 describe("Astra CLI durable state", () => {
+  test("the interactive bin keeps terminal ownership in one browser-runtime process", async () => {
+    const source = await readFile(join(packageRoot, "src/index.ts"), "utf8")
+    const bin = await readFile(join(packageRoot, "bin/astra"), "utf8")
+
+    expect(source.startsWith("#!/usr/bin/env -S bun --config=/dev/null --no-env-file --no-install --conditions=browser\n")).toBeTrue()
+    expect(source).not.toContain("relaunchProductWithBrowserRuntime")
+    expect(source).not.toContain("ASTRA_BROWSER_RUNTIME")
+    expect(bin).toContain("exec \"$bun_binary\"")
+    expect(bin).toContain("--conditions=browser")
+    expect(bin).toContain("export ASTRA_INVOCATION_CWD=$PWD")
+  })
+
   test("the CLI parent routes Launchpad decisions through injected trusted seams", async () => {
     const calls: Array<string> = []
     const dependencies = {

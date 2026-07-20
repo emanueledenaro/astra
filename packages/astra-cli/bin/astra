@@ -1,0 +1,22 @@
+#!/bin/sh
+
+set -eu
+
+source_path=$0
+while [ -h "$source_path" ]; do
+  source_directory=$(CDPATH= cd -P -- "$(dirname -- "$source_path")" && pwd)
+  source_path=$(readlink "$source_path")
+  case $source_path in
+    /*) ;;
+    *) source_path=$source_directory/$source_path ;;
+  esac
+done
+
+bin_directory=$(CDPATH= cd -P -- "$(dirname -- "$source_path")" && pwd)
+cli_root=$(CDPATH= cd -P -- "$bin_directory/.." && pwd)
+tui_root=$(CDPATH= cd -P -- "$cli_root/../tui" && pwd)
+bun_binary=$(command -v bun)
+
+export ASTRA_INVOCATION_CWD=$PWD
+cd "$tui_root"
+exec "$bun_binary" --config=/dev/null --no-env-file --no-install --conditions=browser ../astra-cli/src/index.ts "$@"

@@ -10,10 +10,8 @@ type AstraTerminalHost = Readonly<{
   write: (value: string) => void
 }>
 
-type AstraCompatibleRenderer = Pick<CliRenderer, "disableKittyKeyboard">
-
-/** Applies the compatibility boundary required by the built-in macOS Terminal. */
-export function prepareAstraTerminalRenderer<Renderer extends AstraCompatibleRenderer>(
+/** Applies the viewport compatibility boundary required by the built-in macOS Terminal. */
+export function prepareAstraTerminalRenderer<Renderer>(
   renderer: Renderer,
   host: AstraTerminalHost = {
     program: process.env.TERM_PROGRAM,
@@ -21,7 +19,9 @@ export function prepareAstraTerminalRenderer<Renderer extends AstraCompatibleRen
   },
 ): Renderer {
   if (host.program !== appleTerminalProgram) return renderer
-  renderer.disableKittyKeyboard()
+  // OpenTUI owns keyboard negotiation and parsing. Disabling one protocol after
+  // terminal setup can leave Terminal.app keys encoded for a parser mode that
+  // is no longer active, making every visible control inert.
   host.write(ASTRA_ALTERNATE_SCREEN_RESET)
   return renderer
 }

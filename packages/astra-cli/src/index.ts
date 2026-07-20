@@ -1,6 +1,5 @@
-#!/usr/bin/env -S bun --config=/dev/null --no-env-file --no-install
-
-import { fileURLToPath } from "node:url"
+#!/usr/bin/env -S bun --config=/dev/null --no-env-file --no-install --conditions=browser
+import { resolve } from "node:path"
 import {
   runWorkspaceGate,
   type DurableDenial,
@@ -18,6 +17,9 @@ import { routeAstraLaunchpadDecision } from "./launchpad-routing"
 import { runAstraSystemControl } from "./system-control"
 import { parseAstraLaunchpadDecision } from "@astra/domain/launchpad"
 import type { GuidedProjectCreationOutcome } from "./project-creation-control"
+
+const invocationDirectory = process.env.ASTRA_INVOCATION_CWD ?? process.cwd()
+delete process.env.ASTRA_INVOCATION_CWD
 
 type DeniedLedgerModule = Readonly<{
   recordDeniedControlledWrite: (
@@ -109,18 +111,11 @@ if (!parsed.ok) {
   process.exitCode = parsed.help ? 0 : 1
 } else {
   if (parsed.arguments.experience === "no-workspace") {
-    process.exitCode =
-      process.env.ASTRA_BROWSER_RUNTIME === "1" ? await runNoWorkspaceMode() : await relaunchProductWithBrowserRuntime([])
+    process.exitCode = await runNoWorkspaceMode()
   } else if (parsed.arguments.experience === "system") {
-    process.exitCode =
-      process.env.ASTRA_BROWSER_RUNTIME === "1"
-        ? await runSystemMode()
-        : await relaunchProductWithBrowserRuntime(["system"])
+    process.exitCode = await runSystemMode()
   } else if (parsed.arguments.experience === "product") {
-    process.exitCode =
-      process.env.ASTRA_BROWSER_RUNTIME === "1"
-        ? await runProduct(parsed.arguments.workspace)
-        : await relaunchProductWithBrowserRuntime(Bun.argv.slice(2))
+    process.exitCode = await runProduct(parsed.arguments.workspace)
   } else {
     const terminal = createTerminalIO(parsed.arguments)
     try {
@@ -206,30 +201,7 @@ async function runLaunchpadProjectCreation() {
 }
 
 async function openLaunchpadWorkspace(workspace: string) {
-  return process.env.ASTRA_BROWSER_RUNTIME === "1"
-    ? runProduct(workspace)
-    : relaunchProductWithBrowserRuntime([workspace])
-}
-
-async function relaunchProductWithBrowserRuntime(arguments_: ReadonlyArray<string>) {
-  const child = Bun.spawn(
-    [
-      process.execPath,
-      "--config=/dev/null",
-      "--no-env-file",
-      "--no-install",
-      "--conditions=browser",
-      fileURLToPath(import.meta.url),
-      ...arguments_.filter((value) => value !== "--"),
-    ],
-    {
-      env: { ...process.env, ASTRA_BROWSER_RUNTIME: "1" },
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    },
-  )
-  return await child.exited
+  return runProduct(workspace)
 }
 
 async function runProduct(workspace: string) {
@@ -300,7 +272,10 @@ function parseArguments(
     if (values.length !== 2 || !values[1] || values[1].startsWith("--")) {
       return { ok: false, help: false, message: "The `inspect-git` command requires exactly one workspace path." }
     }
-    return { ok: true, arguments: { workspace: values[1], experience: "demo", decision: "inspect-git" } }
+    return {
+      ok: true,
+      arguments: { workspace: resolve(invocationDirectory, values[1]), experience: "demo", decision: "inspect-git" },
+    }
   }
   if (values[0] !== "open") return parseProductTarget(values)
 
@@ -310,7 +285,7 @@ function parseArguments(
   }
 
   if (values.length === 3 && values[2] === "--developer-demo") {
-    return { ok: true, arguments: { workspace, experience: "demo" } }
+    return { ok: true, arguments: { workspace: resolve(invocationDirectory, workspace), experience: "demo" } }
   }
 
   let decision: WorkspaceDecision | undefined
@@ -336,7 +311,7 @@ function parseArguments(
   return {
     ok: true,
     arguments: {
-      workspace,
+      workspace: resolve(invocationDirectory, workspace),
       experience: decision || approval ? "demo" : "product",
       ...(decision ? { decision } : {}),
       ...(approval ? { approval } : {}),
@@ -351,7 +326,10 @@ function parseProductTarget(
   if (!parsed.ok) return { ok: false, help: false, message: parsed.reason }
   if (parsed.target.kind === "no-workspace") return { ok: true, arguments: { experience: "no-workspace" } }
   if (parsed.target.kind === "system") return { ok: true, arguments: { experience: "system" } }
-  return { ok: true, arguments: { workspace: parsed.target.path, experience: "product" } }
+  return {
+    ok: true,
+    arguments: { workspace: resolve(invocationDirectory, parsed.target.path), experience: "product" },
+  }
 }
 
 function isOperationLedgerModule(value: unknown): value is DeniedLedgerModule {
