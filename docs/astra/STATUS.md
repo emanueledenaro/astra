@@ -13,6 +13,9 @@ Updated: 2026-07-20 (Astra cockpit integration checkpoint; pushed to `astra-cock
   it produced no dispatch, executor claim, effect event, or conversation turn.
 - The 140x34 cockpit shows chat on the left and the live Control Rail on the right.
   The 80x24 layout keeps chat usable and exposes control through its compact path.
+- Independent final review found and then confirmed closure of two compact-cockpit
+  P1 findings: provider consent now requires a rendered preview, and every live or
+  restored provider response keeps `NOT VERIFIED` visible. No P0/P1 remains open.
 - The four cross-package `ReadableStream` type errors are closed by one shared
   bounded reader. The complete pre-push typecheck is now green: 37/37 tasks.
 - All current Astra package suites, Astra-focused TUI suites, and `verify:demo`
@@ -159,8 +162,8 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 - Executor: 19 tests, 56 expectations; typecheck passes.
 - Git: 96 tests, 361 expectations; typecheck passes.
 - CLI: 223 tests, 1,114 expectations; typecheck passes.
-- Astra-focused TUI: 142 tests, 700 expectations; typecheck passes.
-- Current focused total: 1,032 tests and 6,784 expectations, with zero failures.
+- Astra-focused TUI: 149 tests, 722 expectations; typecheck passes.
+- Current focused total: 1,039 tests and 6,806 expectations, with zero failures.
 - Complete monorepo pre-push typecheck: 37/37 tasks successful across 43 packages.
 - The inherited OpenCode full test suite was not rerun in this checkpoint. Its older
   recorded PTY timing failure remains historical evidence, not a current green claim.
@@ -184,9 +187,11 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 - Real `/connect` PTY smoke showed the write/network/secret preview, transferred control
   to the trusted parent, used hidden input, and returned to the same active cockpit
   after cancellation. No credential was added or changed in that smoke.
-- Local technical review found and closed ambiguous provider-storage and provider
-  response paths. No independent final review has yet been run for the complete
-  2026-07-20 increment.
+- Independent final review found two P1 truthfulness gaps in the compact cockpit.
+  Commit `5a758e233` closes both: A/D is unavailable until the exact provider preview
+  has been rendered and cannot be hidden while pending; live, restored, and embedded
+  responses keep `NOT VERIFIED` visible. Focused re-review passed 24 tests with 125
+  expectations and approved the increment with no remaining P0/P1.
 - Real large-repository diagnosis proved that the earlier false `STALE` result was a timeout. With realistic bounded limits, two captures produced the same digest.
 - Independent security review confirmed closure of the three safe-opening P1 findings: inherited project/Git startup, child authority replacement, and nested-symlink read escape.
 - The latest independent review also confirmed closure of workspace Bun startup execution and generic safe-start Git process bypasses; no P0/P1 remains in the reviewed host checkpoint.
@@ -219,9 +224,8 @@ General macOS sandboxing is deferred to hardening. The experimental sandbox work
 
 ## Next executable work
 
-1. Run one independent final review of the integrated cockpit and close any P0/P1 finding.
-2. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
-3. Move credential-store setup behind a durable Operation receipt while preserving the trusted-parent secret boundary.
-4. Add MCP tool invocation and extension capability grants while keeping plugin code quarantined by default.
-5. Complete branch/fetch/merge recovery flows, keeping push and destructive Git actions behind separate authorization.
-6. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.
+1. Add governed file edits beyond the current create-only developer action, with exact diff preview and post-state verification.
+2. Move credential-store setup behind a durable Operation receipt while preserving the trusted-parent secret boundary.
+3. Add MCP tool invocation and extension capability grants while keeping plugin code quarantined by default.
+4. Complete branch/fetch/merge recovery flows, keeping push and destructive Git actions behind separate authorization.
+5. Harden the product, integrate the preserved sandbox backend, verify multiple platforms, and prepare a local release candidate.

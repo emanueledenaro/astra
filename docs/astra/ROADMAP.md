@@ -47,6 +47,8 @@ a write was observed in a real PTY. This setup handoff does not yet produce a du
 Operation receipt and says so before consent. Certified Anthropic, OpenAI API-key, and
 OpenAI Codex OAuth routes are selectable. Live two-turn Codex chat, durable transcript
 reload, exact provider recovery, and rejection without dispatch are observed on macOS.
-Next from section 1: final independent review, general verified file effects, a durable
-credential-setup receipt, MCP tool invocation with capability grants, live
-delegated-agent telemetry, richer extension views, and hardening.
+Independent final review confirmed that compact consent always follows a rendered
+preview and that live or restored responses always retain `NOT VERIFIED`; no P0/P1
+remains open. Next from section 1: general verified file effects, a durable
+credential-setup receipt, MCP tool invocation with capability grants, live delegated-
+agent telemetry, richer extension views, and hardening.
