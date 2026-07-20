@@ -274,6 +274,9 @@ function requireEventStreamContentType(headers: OpenAIResponsesOneTurnRawRespons
   const values = headers
     .filter(([name]) => name.trim().toLowerCase() === "content-type")
     .map(([, value]) => value.trim().toLowerCase())
+  // The inherited Codex OAuth backend can omit this header. The body still has
+  // to pass Astra's strict, bounded SSE framing and event parser below.
+  if (values.length === 0) return
   if (values.length !== 1) fail("content_type_rejected")
   const [mediaType, ...parameters] = values[0]!.split(";").map((part) => part.trim())
   if (

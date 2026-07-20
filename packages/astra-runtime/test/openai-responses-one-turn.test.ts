@@ -137,6 +137,22 @@ describe("Astra OpenAI Responses one-turn protocol", () => {
     expect(response).toMatchObject({ assistantText: "ASTRA-ONE", finishReason: "stop" })
   })
 
+  test("accepts strict Codex SSE when the inherited backend omits content type", () => {
+    const response = parseOpenAIResponsesOneTurnResponse({
+      ...rawResponse([
+        { type: "response.output_text.delta", delta: "ASTRA-ONE" },
+        { type: "response.completed", response: { status: "completed" } },
+      ]),
+      headers: [],
+    })
+
+    expect(response).toMatchObject({
+      status: "observed_not_verified",
+      assistantText: "ASTRA-ONE",
+      finishReason: "stop",
+    })
+  })
+
   test("rejects tool use, failed or truncated streams, and a forged adapter before transport", () => {
     expect(() =>
       parseOpenAIResponsesOneTurnResponse(
