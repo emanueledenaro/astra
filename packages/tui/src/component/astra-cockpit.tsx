@@ -184,6 +184,7 @@ export function AstraCockpit(props: {
             api={props.api}
             view={workView()}
             candidateAvailable={candidate() !== undefined}
+            providerOperation={activity().providerOperation}
           />
         </box>
       </box>

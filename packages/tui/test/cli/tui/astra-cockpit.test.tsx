@@ -1,6 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
+import type { ProviderTurnPreview } from "@astra/domain/provider-control"
 import {
   createAstraWorkSessionEvent,
   makeAstraWorkSessionEvent,
@@ -15,7 +16,7 @@ import { testRender, useRenderer } from "@opentui/solid"
 import { expect, test } from "bun:test"
 import { mkdir } from "node:fs/promises"
 import path from "node:path"
-import { createSignal, ErrorBoundary, type JSX } from "solid-js"
+import { createSignal, ErrorBoundary, onMount, type JSX } from "solid-js"
 import type { AstraProviderClient } from "../../../src/astra/provider-client"
 import type { AstraWorkSessionClient, AstraWorkSessionView } from "../../../src/astra/work-session-client"
 import { AstraCockpit, type AstraCandidatePatchDetails } from "../../../src/component/astra-cockpit"
@@ -68,7 +69,8 @@ test("keeps a 34-column rail beside chat at 100x26", async () => {
     const frame = await app.render.waitForFrame((value) => value.includes("DECISION"))
     expect(lineWith(frame, "CONVERSATION")).toContain("CONTROL")
     expect(frame).toContain("Write src/index.ts")
-    expect(frame).toContain("BOUNDARY host/filesystem")
+    expect(frame).toContain("BOUNDARY")
+    expect(frame).toContain("host/filesystem")
     expect(frame).toContain("workspace:file:src/index.ts")
     expect(frame).toContain("1 OTHER PENDING")
     expect(frame).toContain("A APPROVE · D REJECT")
@@ -133,6 +135,87 @@ test("replaces stale control state with STATE UNAVAILABLE after stream loss", as
     expect(frame).not.toContain("WORK TREE")
     expect(frame).not.toContain("Implement the governed change")
     expect(frame).not.toContain("12 passed")
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
+test("shows the parent provider preview beside chat while work state is unavailable", async () => {
+  const providerClient = {
+    catalog: () => Promise.resolve(catalogResult),
+    prepare: () =>
+      Promise.resolve({
+        schemaVersion: 1,
+        requestId: "10000000-0000-4000-8000-000000000001",
+        status: "prepared",
+        preview: providerPreview,
+      } as const),
+    decide: () => Promise.reject(new Error("No provider decision expected")),
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderCockpit({
+    width: 140,
+    height: 34,
+    projection: workingProjection(),
+    streamView: { status: "state_unavailable", reason: "transport_failed" },
+    providerClient,
+    prompt: "Explain the current task",
+  })
+  try {
+    await app.render.waitForFrame((value) => value.includes("CONVERSATION") && value.includes("STATE UNAVAILABLE"))
+    app.dispatch("astra.chat.compose")
+    const prepared = await app.render.waitForFrame((value) => value.includes("PROVIDER OPERATION"))
+    expect(lineWith(prepared, "CONVERSATION")).toContain("CONTROL")
+    expect(prepared).toContain("AWAITING DECISION · NO")
+    expect(prepared).toContain("NETWORK")
+    expect(prepared).toContain("Anthropic / claude-sonnet")
+    expect(prepared).toContain("anthropic-api-key")
+    expect(prepared).toContain("STATE UNAVAILABLE")
+    expect(prepared).toContain("A APPROVE · D REJECT")
+
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
+test("keeps the provider preview mounted in the compact control alternate", async () => {
+  let catalogCalls = 0
+  const providerClient = {
+    catalog: () => {
+      catalogCalls += 1
+      return Promise.resolve(catalogResult)
+    },
+    prepare: () =>
+      Promise.resolve({
+        schemaVersion: 1,
+        requestId: "10000000-0000-4000-8000-000000000001",
+        status: "prepared",
+        preview: providerPreview,
+      } as const),
+    decide: () => Promise.reject(new Error("No provider decision expected")),
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderCockpit({
+    width: 80,
+    height: 24,
+    projection: workingProjection(),
+    streamView: { status: "state_unavailable", reason: "transport_failed" },
+    providerClient,
+    prompt: "Show the compact preview",
+  })
+  try {
+    await app.render.waitForFrame((value) => value.includes("CONVERSATION"))
+    app.dispatch("astra.control.toggle")
+    await app.render.waitForFrame((value) => value.includes("STATE UNAVAILABLE") && !value.includes("CONVERSATION"))
+    app.dispatch("astra.chat.compose")
+    const control = await app.render.waitForFrame(
+      (value) => value.includes("PROVIDER OPERATION") && value.includes("A APPROVE · D REJECT"),
+    )
+    expect(control).toContain("AWAITING DECISION · NO NETWORK")
+    expect(control).toContain("STATE UNAVAILABLE")
+    expect(control).not.toContain("CONVERSATION")
+    expect(catalogCalls).toBe(1)
+
   } finally {
     app.render.renderer.destroy()
   }
@@ -314,6 +397,8 @@ type RenderOptions = Readonly<{
   candidatePatchDetails?: unknown
   dialogOpen?: boolean
   animations?: boolean
+  providerClient?: AstraProviderClient
+  prompt?: string
 }>
 
 async function renderCockpit(options: RenderOptions) {
@@ -327,7 +412,7 @@ async function renderCockpit(options: RenderOptions) {
   const decisions: Array<Readonly<{ decisionID: string; outcome: "approved" | "rejected" }>> = []
   let dispatch = (_command: string) => undefined
   let catalogCalls = 0
-  const providerClient = {
+  const fallbackProviderClient = {
     catalog() {
       catalogCalls += 1
       return Promise.resolve(catalogResult)
@@ -336,18 +421,36 @@ async function renderCockpit(options: RenderOptions) {
     decide: () => Promise.reject(new Error("No provider decision expected")),
     dispose() {},
   } satisfies AstraProviderClient
+  const providerClient = options.providerClient ?? fallbackProviderClient
   const workSessionClient = createWorkSessionClient(options.projection, options.streamView, decisions)
 
   function Harness() {
     const renderer = useRenderer()
     const keymap = createDefaultOpenTuiKeymap(renderer)
     const base = createTuiPluginApi({ keymap })
-    const [dialog] = createSignal<JSX.Element>()
+    const [dialog, setDialog] = createSignal<JSX.Element>()
+    function TestDialogPrompt(props: { onConfirm?: (value: string) => void }) {
+      onMount(() => props.onConfirm?.(options.prompt ?? "Test prompt"))
+      return null
+    }
+    const dialogApi = {
+      ...base.ui.dialog,
+      replace(render: () => JSX.Element) {
+        setDialog(render())
+      },
+      clear() {
+        setDialog(undefined)
+      },
+      get open() {
+        return options.dialogOpen ?? dialog() !== undefined
+      },
+    }
     const api = {
       ...base,
       ui: {
         ...base.ui,
-        dialog: { ...base.ui.dialog, open: options.dialogOpen ?? false },
+        dialog: dialogApi,
+        DialogPrompt: TestDialogPrompt,
       },
     } satisfies TuiPluginApi
     dispatch = (command) => void keymap.dispatchCommand(command)
@@ -656,3 +759,39 @@ const catalogResult = {
     retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
   },
 } as const
+
+const providerPreview = {
+  proposalID: "20000000-0000-4000-8000-000000000002",
+  operationID: "30000000-0000-4000-8000-000000000003",
+  providerID: "anthropic",
+  modelID: "claude-sonnet",
+  adapter: {
+    adapterID: "anthropic.messages.api-key.v1",
+    adapterDigest: digest,
+    assurance: "CERTIFIED",
+  },
+  destination: {
+    method: "POST",
+    origin: "https://api.anthropic.com",
+    path: "/v1/messages",
+  },
+  logicalPayload: { digest, bytes: 256, contextBindingDigest: digest },
+  conversation: {
+    priorTurns: 2,
+    historyBytes: 128,
+    historyDigest: digest,
+    retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
+  },
+  providerCapabilityDigest: digest,
+  skillContext: null,
+  headerNames: ["anthropic-version", "content-type", "x-api-key"],
+  credential: {
+    profile: "anthropic-api-key",
+    accountFingerprint: digest,
+    headerName: "x-api-key",
+  },
+  expiresAt: "2026-07-20T12:00:00.000Z",
+  hostBoundaryLabel: "HOST EXECUTION — NO SANDBOX",
+  networkBoundaryLabel: "NETWORK EGRESS — HOST TRANSPORT — NO NETWORK SANDBOX",
+  assurance: "NOT VERIFIED",
+} as const satisfies ProviderTurnPreview

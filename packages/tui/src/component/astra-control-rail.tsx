@@ -3,6 +3,7 @@
 import type { AstraAgentProjection, AstraWorkSessionProjection } from "@astra/domain/work-session"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For, Show, type JSX } from "solid-js"
+import type { AstraProviderOperationView } from "../astra/provider-operation-view"
 import type { AstraWorkSessionView } from "../astra/work-session-client"
 import { Lynx, type LynxPresentationState } from "./lynx"
 
@@ -10,28 +11,95 @@ export function AstraControlRail(props: {
   api: TuiPluginApi
   view: AstraWorkSessionView
   candidateAvailable: boolean
+  providerOperation?: AstraProviderOperationView
 }) {
   return (
     <box width="100%" height="100%" flexDirection="column">
       <box height={1} flexShrink={0} flexDirection="row">
         <text fg={props.api.theme.current.primary}>CONTROL</text>
         <box flexGrow={1} />
-        <text fg={statusColor(props.api, props.view)}>{statusLabel(props.view)}</text>
+        <text fg={statusColor(props.api, props.view, props.providerOperation)}>
+          {statusLabel(props.view, props.providerOperation)}
+        </text>
       </box>
+      <Show when={props.providerOperation}>
+        {(operation) => (
+          <ProviderOperationRail
+            api={props.api}
+            operation={operation()}
+            workStateUnavailable={props.view.status !== "available"}
+          />
+        )}
+      </Show>
       <Show
         when={props.view.status === "available" ? props.view.projection : undefined}
         fallback={
-          <box marginTop={1} flexDirection="column">
-            <text fg={props.api.theme.current.error}>STATE UNAVAILABLE</text>
-            <text fg={props.api.theme.current.textMuted}>PARENT STREAM LOST</text>
-            <text fg={props.api.theme.current.textMuted}>Control state is hidden until a fresh validated snapshot arrives.</text>
-          </box>
+          <Show when={!props.providerOperation}>
+            <box marginTop={1} flexDirection="column">
+              <text fg={props.api.theme.current.error}>STATE UNAVAILABLE</text>
+              <text fg={props.api.theme.current.textMuted}>PARENT STREAM LOST</text>
+              <text fg={props.api.theme.current.textMuted}>Control state is hidden until a fresh validated snapshot arrives.</text>
+            </box>
+          </Show>
         }
       >
         {(projection) => <AvailableRail api={props.api} projection={projection()} candidateAvailable={props.candidateAvailable} />}
       </Show>
     </box>
   )
+}
+
+function ProviderOperationRail(props: {
+  api: TuiPluginApi
+  operation: AstraProviderOperationView
+  workStateUnavailable: boolean
+}) {
+  return (
+    <Section
+      title="PROVIDER OPERATION"
+      api={props.api}
+      tone={
+        props.operation.state === "reconciliation_required"
+          ? "error"
+          : props.operation.state === "response_observed_not_verified"
+            ? undefined
+            : "warning"
+      }
+    >
+      <Show when={props.workStateUnavailable}>
+        <RailRow label="WORK STATE" value="STATE UNAVAILABLE · PARENT STREAM LOST" api={props.api} />
+      </Show>
+      <RailRow label="STATE" value={props.operation.statusLabel} api={props.api} />
+      <Show when={props.operation.decisionRequired}>
+        <text fg={props.api.theme.current.warning}>A APPROVE · D REJECT</text>
+      </Show>
+      <RailRow label="OPERATION" value={props.operation.operationID} api={props.api} />
+      <RailRow
+        label="PROVIDER"
+        value={`${props.operation.providerName} / ${props.operation.modelID}`}
+        api={props.api}
+      />
+      <RailRow label="PROFILE" value={props.operation.credentialProfile} api={props.api} />
+      <RailRow label="TO" value={props.operation.destination} api={props.api} />
+      <RailRow label="PAYLOAD" value={`${props.operation.payloadBytes} bytes leave host`} api={props.api} />
+      <RailRow
+        label="HISTORY"
+        value={`${props.operation.priorTurns} prior turns · ${props.operation.historyBytes} bytes`}
+        api={props.api}
+      />
+      <RailRow label="RETENTION" value={props.operation.retention} api={props.api} />
+      <RailRow label="HOST" value={props.operation.hostBoundary} api={props.api} />
+      <RailRow label="NETWORK" value={props.operation.networkBoundary} api={props.api} />
+      <RailRow label="CAPABILITY" value={shortFingerprint(props.operation.capabilityDigest)} api={props.api} />
+      <RailRow label="HEADERS" value={props.operation.headerNames.join(", ")} api={props.api} />
+      <RailRow label="ACCOUNT" value={shortFingerprint(props.operation.accountFingerprint)} api={props.api} />
+      <RailRow label="ASSURANCE" value={props.operation.assurance} api={props.api} />
+    </Section>
+  )
+}
+
+function shortFingerprint(value: string) {
+  return value.length > 24 ? `${value.slice(0, 23)}…` : value
 }
 
 function AvailableRail(props: {
@@ -133,7 +201,7 @@ function Section(props: { title: string; api: TuiPluginApi; tone?: "warning" | "
 function RailRow(props: { label: string; value: string; api: TuiPluginApi }) {
   return (
     <box flexDirection="row" flexShrink={0}>
-      <text width={9} fg={props.api.theme.current.textMuted}>{props.label}</text>
+      <text width={11} fg={props.api.theme.current.textMuted}>{props.label}</text>
       <text fg={props.api.theme.current.text}>{props.value}</text>
     </box>
   )
@@ -143,12 +211,17 @@ function RailValue(props: { value: string; api: TuiPluginApi; prefix?: string })
   return <text fg={props.api.theme.current.text}>{`${props.prefix ?? ""}${props.value}`}</text>
 }
 
-function statusLabel(view: AstraWorkSessionView) {
+function statusLabel(view: AstraWorkSessionView, operation?: AstraProviderOperationView) {
+  if (operation) return operation.state.replaceAll("_", " ").toUpperCase()
   if (view.status !== "available") return "UNAVAILABLE"
   return view.projection.phase.replaceAll("-", " ").toUpperCase()
 }
 
-function statusColor(api: TuiPluginApi, view: AstraWorkSessionView) {
+function statusColor(api: TuiPluginApi, view: AstraWorkSessionView, operation?: AstraProviderOperationView) {
+  if (operation?.state === "reconciliation_required") return api.theme.current.error
+  if (operation?.state === "awaiting_decision" || operation?.state === "rejecting" || operation?.state === "approving") {
+    return api.theme.current.warning
+  }
   if (view.status !== "available" || view.projection.phase === "blocked") return api.theme.current.error
   if (view.projection.reconciliationPending || view.projection.phase === "uncertain") return api.theme.current.warning
   return api.theme.current.primary

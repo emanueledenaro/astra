@@ -13,6 +13,7 @@ import type { TuiPluginApi, TuiRouteCurrent } from "@opencode-ai/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createEffect, createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 import { createAstraProviderClient, type AstraProviderClient } from "../../astra/provider-client"
+import type { AstraProviderOperationView } from "../../astra/provider-operation-view"
 import { useBindings } from "../../keymap"
 import { Locale } from "../../util/locale"
 
@@ -66,12 +67,13 @@ type ChatState =
   | (Readonly<{
       status: "completed"
       userText: string
+      preview: ProviderTurnPreview
       result: Extract<ProviderTurnDecisionResult, { status: "response_observed_not_verified" }>
     }> &
       ChatContext)
-  | (Readonly<{ status: "denied"; userText: string }> & ChatContext)
+  | (Readonly<{ status: "denied"; userText: string; preview: ProviderTurnPreview }> & ChatContext)
   | Readonly<{ status: "blocked"; reason: string; context?: ChatContext }>
-  | Readonly<{ status: "reconciliation"; operationID: string }>
+  | Readonly<{ status: "reconciliation"; operationID: string; preview: ProviderTurnPreview }>
 
 export type AstraChatActivity = Readonly<{
   status: ChatState["status"]
@@ -83,6 +85,7 @@ export type AstraChatActivity = Readonly<{
   operationID?: string
   destination?: string
   payloadBytes?: number
+  providerOperation?: AstraProviderOperationView
   decisionRequired: boolean
 }>
 
@@ -280,6 +283,7 @@ export function AstraChatView(props: {
             catalog: current.catalog,
             selection: current.selection,
             userText: current.userText,
+            preview: current.preview,
             result,
           })
           return
@@ -291,6 +295,7 @@ export function AstraChatView(props: {
             catalog: current.catalog,
             selection: current.selection,
             userText: current.userText,
+            preview: current.preview,
           })
           return
         }
@@ -298,6 +303,7 @@ export function AstraChatView(props: {
           setState({
             status: "reconciliation",
             operationID: current.preview.operationID,
+            preview: current.preview,
           })
           return
         }
@@ -308,6 +314,7 @@ export function AstraChatView(props: {
           setState({
             status: "reconciliation",
             operationID: current.preview.operationID,
+            preview: current.preview,
           })
         }
       })
@@ -679,6 +686,13 @@ function previewOf(state: ChatState) {
     : undefined
 }
 
+function operationPreviewOf(state: ChatState) {
+  return previewOf(state) ??
+    (state.status === "completed" || state.status === "denied" || state.status === "reconciliation"
+      ? state.preview
+      : undefined)
+}
+
 function userTextOf(state: ChatState) {
   if (state.status === "completed") return undefined
   return "userText" in state ? state.userText : undefined
@@ -710,7 +724,7 @@ function stateLabel(state: ChatState) {
 }
 
 function chatActivity(state: ChatState): AstraChatActivity {
-  const preview = previewOf(state)
+  const preview = operationPreviewOf(state)
   const selection = selectionOf(state)
   const modelID = modelOf(state)
   return {
@@ -731,8 +745,53 @@ function chatActivity(state: ChatState): AstraChatActivity {
         }
       : {}),
     ...(preview ? { payloadBytes: preview.logicalPayload.bytes } : {}),
+    ...(preview ? { providerOperation: providerOperationView(state, preview) } : {}),
     decisionRequired: state.status === "prepared",
   }
+}
+
+function providerOperationView(state: ChatState, preview: ProviderTurnPreview): AstraProviderOperationView {
+  return {
+    state: providerOperationState(state),
+    statusLabel: providerOperationStatusLabel(state),
+    operationID: preview.operationID,
+    providerID: preview.providerID,
+    providerName: selectedProviderName(state),
+    modelID: preview.modelID,
+    credentialProfile: preview.credential.profile,
+    destination: `${preview.destination.origin}${preview.destination.path}`,
+    payloadBytes: preview.logicalPayload.bytes,
+    priorTurns: preview.conversation.priorTurns,
+    historyBytes: preview.conversation.historyBytes,
+    retention: preview.conversation.retention,
+    hostBoundary: preview.hostBoundaryLabel,
+    networkBoundary: preview.networkBoundaryLabel,
+    capabilityDigest: preview.providerCapabilityDigest,
+    headerNames: preview.headerNames,
+    accountFingerprint: preview.credential.accountFingerprint,
+    assurance: "NOT VERIFIED",
+    decisionRequired: state.status === "prepared",
+  }
+}
+
+function providerOperationState(state: ChatState): AstraProviderOperationView["state"] {
+  if (state.status === "prepared") return "awaiting_decision"
+  if (state.status === "deciding") return state.decision === "approve" ? "approving" : "rejecting"
+  if (state.status === "denied") return "denied_without_effect"
+  if (state.status === "completed") return "response_observed_not_verified"
+  if (state.status === "reconciliation") return "reconciliation_required"
+  return "in_progress"
+}
+
+function providerOperationStatusLabel(state: ChatState) {
+  if (state.status === "prepared") return "AWAITING DECISION · NO NETWORK"
+  if (state.status === "deciding") {
+    return state.decision === "approve" ? "APPROVAL RECORDED · NOT VERIFIED" : "REJECTION RECORDING · NO EFFECT CLAIM"
+  }
+  if (state.status === "progress") return state.phase.replaceAll("_", " ").toUpperCase()
+  if (state.status === "denied") return "DENIED WITHOUT EFFECT / NOT SENT"
+  if (state.status === "completed") return "RESPONSE OBSERVED — NOT VERIFIED"
+  return "RECONCILIATION REQUIRED · EFFECT UNKNOWN"
 }
 
 function catalogOf(state: ChatState) {
