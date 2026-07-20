@@ -30,6 +30,7 @@
     "./mcp-activation": "./src/mcp-activation.ts",
     "./mcp-activation-control": "./src/mcp-activation-control.ts",
     "./provider-control": "./src/provider-control.ts",
+    "./project-creation-control": "./src/project-creation-control.ts",
     "./session-authority": "./src/session-authority.ts",
     "./tui-handoff": "./src/tui-handoff.ts",
     "./workspace-trust": "./src/workspace-trust.ts"

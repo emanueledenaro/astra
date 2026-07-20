@@ -19,6 +19,7 @@ export * as GitControlInspection from "./git-control-inspection"
 export * as GitControlMutation from "./git-control-mutation"
 export * as GitRepositoryBaseline from "./git-repository-baseline"
 export * as Launchpad from "./launchpad"
+export * as ProjectCreationControl from "./project-creation-control"
 export * as SessionAuthority from "./session-authority"
 
 export {
@@ -39,6 +40,26 @@ export {
 export * as WorkspaceTrust from "./workspace-trust"
 
 export type { AstraSessionAuthority, AstraSessionAuthorityParseResult } from "./session-authority"
+
+export {
+  computeProjectParentObservationDigest,
+  makeProjectCreationWorkspaceBaseline,
+  parseProjectCreationDraft,
+  parseProjectCreationTargetName,
+  parseProjectParentAuthority,
+  projectCreationLimits,
+  sealProjectParentAuthority,
+} from "./project-creation-control"
+
+export type {
+  ProjectCreationControlReason,
+  ProjectCreationControlResult,
+  ProjectCreationDraft,
+  ProjectCreationLimits,
+  ProjectCreationTextFile,
+  ProjectParentAuthority,
+  ProjectParentAuthorityInput,
+} from "./project-creation-control"
 export { astraProviderConnectExitCode } from "./tui-handoff"
 
 export { parseAstraLaunchpadDecision, parseAstraLaunchpadSnapshot } from "./launchpad"

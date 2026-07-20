@@ -29,7 +29,8 @@
     "./provider-turn-coordinator": "./src/provider-turn-coordinator.ts",
     "./provider-turn-network-policy": "./src/provider-turn-network-policy.ts",
     "./provider-turn-operation-facts": "./src/provider-turn-operation-facts.ts",
-    "./provider-turn-transport": "./src/provider-turn-transport.ts"
+    "./provider-turn-transport": "./src/provider-turn-transport.ts",
+    "./project-parent-authority": "./src/project-parent-authority.ts"
   },
   "scripts": {
     "test": "bun test",
