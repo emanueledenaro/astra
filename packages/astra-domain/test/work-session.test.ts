@@ -5,6 +5,7 @@ import {
   parseAstraWorkSessionEvent,
   parseAstraWorkSessionProjection,
   projectAstraWorkSessionEvent,
+  providerConversationGenesisDigest,
   workSessionPhases,
   type AstraWorkSessionActor,
   type AstraWorkSessionEventDraft,
@@ -62,6 +63,60 @@ describe("Astra work-session domain", () => {
     expect(Object.isFrozen(first.value)).toBe(true)
     expect(Object.isFrozen(first.value.intent)).toBe(true)
     expect(Object.isFrozen(first.value.agents)).toBe(true)
+    expect("conversation" in first.value).toBe(false)
+  })
+
+  test("upgrades v1 exactly once and binds durable provider turns to the prior history digest", () => {
+    const legacy = initialProjection()
+    const first = advance(legacy, providerTurn("turn-1", providerConversationGenesisDigest, "Hello", "Hi"))
+
+    expect(first.schemaVersion).toBe(2)
+    if (first.schemaVersion !== 2) throw new Error("provider turn must upgrade the projection")
+    expect(first.conversation.turns).toHaveLength(1)
+    expect(first.conversation.turns[0]).toMatchObject({
+      turnID: "turn-1",
+      providerID: "anthropic",
+      modelID: "claude-sonnet-4-6",
+      userText: "Hello",
+      assistantText: "Hi",
+      assurance: "observed_not_verified",
+    })
+    expect(first.conversation.historyDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+
+    expect(makeEvent(first, providerTurn("turn-stale", providerConversationGenesisDigest, "Again", "No")).ok).toBe(false)
+    const second = advance(first, providerTurn("turn-2", first.conversation.historyDigest, "Again", "Welcome back"))
+    if (second.schemaVersion !== 2) throw new Error("provider conversation must stay v2")
+    expect(second.conversation.turns.map((turn) => turn.turnID)).toEqual(["turn-1", "turn-2"])
+    expect(second.conversation.historyDigest).not.toBe(first.conversation.historyDigest)
+    expect(Object.isFrozen(second.conversation.turns)).toBe(true)
+  })
+
+  test("rejects duplicate, mutated, unsafe, and oversized durable provider turns", () => {
+    const first = advance(
+      initialProjection(),
+      providerTurn("turn-1", providerConversationGenesisDigest, "Hello", "Hi"),
+    )
+    if (first.schemaVersion !== 2) throw new Error("provider turn must upgrade the projection")
+
+    expect(makeEvent(first, providerTurn("turn-1", first.conversation.historyDigest, "Again", "No")).ok).toBe(false)
+    expect(
+      makeEvent(first, {
+        ...providerTurn("turn-2", first.conversation.historyDigest, "Again", "No"),
+        payload: {
+          ...providerTurn("turn-2", first.conversation.historyDigest, "Again", "No").payload,
+          turn: {
+            ...providerTurn("turn-2", first.conversation.historyDigest, "Again", "No").payload.turn,
+            assistantTextDigest: `sha256:${"f".repeat(64)}`,
+          },
+        },
+      }).ok,
+    ).toBe(false)
+    expect(
+      makeEvent(first, providerTurn("turn-2", first.conversation.historyDigest, "unsafe\u001b[2J", "No")).ok,
+    ).toBe(false)
+    expect(
+      makeEvent(first, providerTurn("turn-2", first.conversation.historyDigest, "x".repeat(65_537), "No")).ok,
+    ).toBe(false)
   })
 
   test("allowlists ordinary phase transitions and rejects every illegal pair", () => {
@@ -521,4 +576,44 @@ function agent(
     state,
     effectAuthority,
   } as const
+}
+
+function providerTurn(
+  turnID: string,
+  priorHistoryDigest: `sha256:${string}`,
+  userText: string,
+  assistantText: string,
+): Extract<AstraWorkSessionEventDraft, { type: "provider.turn-recorded" }> {
+  return {
+    type: "provider.turn-recorded",
+    payload: {
+      priorHistoryDigest,
+      turn: {
+        turnID,
+        operationID: "0196e4cb-5d80-7b1d-8fb2-263b81670431",
+        receiptID: "0196e4cb-5d80-7b1d-8fb2-263b81670432",
+        providerID: "anthropic",
+        modelID: "claude-sonnet-4-6",
+        adapterDigest: `sha256:${"1".repeat(64)}`,
+        credentialProfile: "anthropic-api-key",
+        accountFingerprint: `sha256:${"2".repeat(64)}`,
+        destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
+        contextDigest: `sha256:${"3".repeat(64)}`,
+        requestBodyDigest: `sha256:${"4".repeat(64)}`,
+        requestBytes: Buffer.byteLength(userText),
+        workspaceBaselineDigest: `sha256:${"5".repeat(64)}`,
+        gitBaselineDigest: `sha256:${"6".repeat(64)}`,
+        userText,
+        assistantText,
+        assistantTextDigest: digest(assistantText),
+        assistantTextBytes: Buffer.byteLength(assistantText),
+        finishReason: "stop",
+        assurance: "observed_not_verified",
+      },
+    },
+  }
+}
+
+function digest(value: string): `sha256:${string}` {
+  return `sha256:${Bun.CryptoHasher.hash("sha256", value, "hex")}`
 }

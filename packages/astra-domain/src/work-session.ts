@@ -27,6 +27,7 @@ export const workSessionPhases = [
 export type AstraWorkPhase = (typeof workSessionPhases)[number]
 
 export const workSessionGenesisDigest = `sha256:${"0".repeat(64)}` as const
+export const providerConversationGenesisDigest = `sha256:${"0".repeat(64)}` as const
 
 export type AstraWorkSessionActor = Readonly<{
   kind: "user" | "system" | "agent"
@@ -60,8 +61,36 @@ export type AstraWorkSessionEvidence = Readonly<{
   assurance: string
 }>
 
-export type AstraWorkSessionProjection = Readonly<{
-  schemaVersion: 1
+export type AstraProviderConversationTurn = Readonly<{
+  turnID: string
+  operationID: string
+  receiptID: string
+  providerID: string
+  modelID: string
+  adapterDigest: `sha256:${string}`
+  credentialProfile: string
+  accountFingerprint: `sha256:${string}`
+  destination: Readonly<{ method: "POST"; origin: string; path: string }>
+  contextDigest: `sha256:${string}`
+  requestBodyDigest: `sha256:${string}`
+  requestBytes: number
+  workspaceBaselineDigest: `sha256:${string}`
+  gitBaselineDigest: `sha256:${string}` | null
+  userText: string
+  assistantText: string
+  assistantTextDigest: `sha256:${string}`
+  assistantTextBytes: number
+  finishReason: "stop" | "length" | "content_filter"
+  assurance: "observed_not_verified"
+}>
+
+export type AstraProviderConversation = Readonly<{
+  turns: ReadonlyArray<AstraProviderConversationTurn>
+  historyDigest: `sha256:${string}`
+  totalBytes: number
+}>
+
+type AstraWorkSessionProjectionAuthority = Readonly<{
   sessionID: string
   workspaceRoot: string
   workspaceIdentity: WorkspaceIdentity
@@ -78,6 +107,16 @@ export type AstraWorkSessionProjection = Readonly<{
   reconciliationPending: boolean
   updatedAt: string
 }>
+
+export type AstraWorkSessionProjection =
+  | (AstraWorkSessionProjectionAuthority & Readonly<{ schemaVersion: 1 }>)
+  | (AstraWorkSessionProjectionAuthority & Readonly<{ schemaVersion: 2; conversation: AstraProviderConversation }>)
+
+type AstraWorkSessionProjectionWithoutDigest = AstraWorkSessionProjection extends infer Projection
+  ? Projection extends AstraWorkSessionProjection
+    ? Omit<Projection, "projectionDigest">
+    : never
+  : never
 
 export type AstraWorkSessionEventDraft =
   | Readonly<{
@@ -121,6 +160,13 @@ export type AstraWorkSessionEventDraft =
     }>
   | Readonly<{ type: "commit-ready.recorded"; payload: Readonly<{ evidence: AstraWorkSessionEvidence }> }>
   | Readonly<{ type: "session.completed"; payload: Readonly<{ evidence: AstraWorkSessionEvidence }> }>
+  | Readonly<{
+      type: "provider.turn-recorded"
+      payload: Readonly<{
+        priorHistoryDigest: `sha256:${string}`
+        turn: AstraProviderConversationTurn
+      }>
+    }>
   | Readonly<{
       type: "effect.ambiguous"
       payload: Readonly<{ operationID: string; summary: string }>
@@ -253,6 +299,28 @@ const maximumCandidatePatchID = 256
 const maximumDecisions = 64
 const maximumEvidence = 128
 const maximumEvidenceLabel = maximumCandidatePatchID + candidatePatchEvidencePrefix.length
+const maximumProviderConversationTurns = 64
+const maximumProviderConversationBytes = 65_536
+const maximumProviderTextBytes = 65_536
+const projectionV1Fields = [
+  "schemaVersion",
+  "sessionID",
+  "workspaceRoot",
+  "workspaceIdentity",
+  "sequence",
+  "lastEventDigest",
+  "projectionDigest",
+  "objective",
+  "phase",
+  "intent",
+  "agents",
+  "decisions",
+  "evidence",
+  "candidatePatchID",
+  "reconciliationPending",
+  "updatedAt",
+] as const
+const projectionV2Fields = [...projectionV1Fields, "conversation"] as const
 
 /** Stable parent-owned binding between a candidate ID and its content digest evidence. */
 export function candidatePatchEvidenceLabel(candidatePatchID: string) {
@@ -399,25 +467,13 @@ export function parseAstraWorkSessionEvent(input: unknown): AstraWorkSessionPars
 export function parseAstraWorkSessionProjection(
   input: unknown,
 ): AstraWorkSessionParseResult<AstraWorkSessionProjection> {
-  const record = exact(input, [
-    "schemaVersion",
-    "sessionID",
-    "workspaceRoot",
-    "workspaceIdentity",
-    "sequence",
-    "lastEventDigest",
-    "projectionDigest",
-    "objective",
-    "phase",
-    "intent",
-    "agents",
-    "decisions",
-    "evidence",
-    "candidatePatchID",
-    "reconciliationPending",
-    "updatedAt",
-  ])
-  if (!record || record.schemaVersion !== 1) return rejected("invalid_projection")
+  const probe = parseExactRecord(input, projectionV2Fields)
+  if (!probe.ok || (probe.value.schemaVersion !== 1 && probe.value.schemaVersion !== 2)) {
+    return rejected("invalid_projection")
+  }
+  const schemaVersion = probe.value.schemaVersion
+  const record = exact(input, schemaVersion === 1 ? projectionV1Fields : projectionV2Fields)
+  if (!record) return rejected("invalid_projection")
   const sessionID = safeID(record.sessionID, 256)
   const workspaceRoot = absolutePath(record.workspaceRoot)
   const workspaceIdentity = parseIdentity(record.workspaceIdentity)
@@ -433,6 +489,7 @@ export function parseAstraWorkSessionProjection(
   const candidatePatchID = nullableID(record.candidatePatchID, maximumCandidatePatchID)
   const reconciliationPending = typeof record.reconciliationPending === "boolean" ? record.reconciliationPending : null
   const updatedAt = canonicalTimestamp(record.updatedAt)
+  const conversation = schemaVersion === 2 ? parseProviderConversation(record.conversation) : null
   if (
     !sessionID ||
     !workspaceRoot ||
@@ -449,7 +506,8 @@ export function parseAstraWorkSessionProjection(
     !evidence ||
     candidatePatchID === undefined ||
     reconciliationPending === null ||
-    !updatedAt
+    !updatedAt ||
+    (schemaVersion === 2 && !conversation)
   ) {
     return rejected("invalid_projection")
   }
@@ -460,8 +518,7 @@ export function parseAstraWorkSessionProjection(
       return rejected("invalid_projection")
     }
   }
-  const authority = {
-    schemaVersion: 1,
+  const common = {
     sessionID,
     workspaceRoot,
     workspaceIdentity,
@@ -477,6 +534,9 @@ export function parseAstraWorkSessionProjection(
     reconciliationPending,
     updatedAt,
   } as const
+  const authority: AstraWorkSessionProjectionWithoutDigest = schemaVersion === 1
+    ? { ...common, schemaVersion: 1 }
+    : { ...common, schemaVersion: 2, conversation: conversation! }
   if (projectionDigest !== computeAstraWorkSessionProjectionDigest(authority)) {
     return rejected("invalid_projection")
   }
@@ -497,8 +557,8 @@ export function projectAstraWorkSessionEvent(
   return applyEvent(previous.value, event.value)
 }
 
-function computeAstraWorkSessionProjectionDigest(
-  projection: Omit<AstraWorkSessionProjection, "projectionDigest">,
+export function computeAstraWorkSessionProjectionDigest(
+  projection: AstraWorkSessionProjectionWithoutDigest,
 ): `sha256:${string}` {
   return digest(`astra.work-session.projection.v1\0${canonicalJson(projection)}`)
 }
@@ -648,6 +708,30 @@ function applyEvent(
       evidence: [...previous.evidence, event.payload.evidence],
     })
   }
+  if (event.type === "provider.turn-recorded") {
+    const previousConversation = previous.schemaVersion === 2 ? previous.conversation : null
+    const expectedHistoryDigest = previousConversation?.historyDigest ?? providerConversationGenesisDigest
+    const previousTurns = previousConversation?.turns ?? []
+    const turnBytes = providerTurnTextBytes(event.payload.turn)
+    const totalBytes = (previousConversation?.totalBytes ?? 0) + turnBytes
+    if (
+      event.payload.priorHistoryDigest !== expectedHistoryDigest ||
+      previousTurns.length >= maximumProviderConversationTurns ||
+      totalBytes > maximumProviderConversationBytes ||
+      previousTurns.some((turn) => turn.turnID === event.payload.turn.turnID)
+    ) {
+      return rejected("illegal_transition")
+    }
+    return finalizeProjection({
+      ...base,
+      schemaVersion: 2,
+      conversation: {
+        turns: [...previousTurns, event.payload.turn],
+        historyDigest: providerConversationHistoryDigest(expectedHistoryDigest, event.payload.turn),
+        totalBytes,
+      },
+    })
+  }
   if (event.type === "effect.ambiguous") {
     return finalizeProjection({
       ...base,
@@ -675,7 +759,7 @@ function applyEvent(
 }
 
 function withEvidence(
-  base: Omit<AstraWorkSessionProjection, "projectionDigest">,
+  base: AstraWorkSessionProjectionWithoutDigest,
   previous: AstraWorkSessionProjection,
   evidence: AstraWorkSessionEvidence,
 ) {
@@ -711,7 +795,7 @@ function makeBoundEvent(
 }
 
 function finalizeProjection(
-  authority: Omit<AstraWorkSessionProjection, "projectionDigest">,
+  authority: AstraWorkSessionProjectionWithoutDigest,
 ): AstraWorkSessionParseResult<AstraWorkSessionProjection> {
   return parseAstraWorkSessionProjection({
     ...authority,
@@ -777,6 +861,14 @@ function parseDraft(input: unknown): AstraWorkSessionEventDraft | null {
     const evidence = payload ? parseEvidence(payload.evidence) : null
     return candidatePatchID && evidence && isCandidatePatchEvidence(candidatePatchID, evidence)
       ? { type: broad.type, payload: { candidatePatchID, evidence } }
+      : null
+  }
+  if (broad.type === "provider.turn-recorded") {
+    const payload = exact(broad.payload, ["priorHistoryDigest", "turn"])
+    const priorHistoryDigest = payload ? digestValue(payload.priorHistoryDigest) : null
+    const turn = payload ? parseProviderConversationTurn(payload.turn) : null
+    return priorHistoryDigest && turn
+      ? { type: broad.type, payload: { priorHistoryDigest, turn } }
       : null
   }
   if (broad.type === "effect.ambiguous") {
@@ -941,6 +1033,163 @@ function parseIntent(input: unknown) {
   return summary && next ? { summary, next } : null
 }
 
+function parseProviderConversation(input: unknown): AstraProviderConversation | null {
+  const record = exact(input, ["turns", "historyDigest", "totalBytes"])
+  const turns = record ? normalizedArray(record.turns, maximumProviderConversationTurns) : null
+  const historyDigest = record ? digestValue(record.historyDigest) : null
+  const totalBytes = record ? nonNegativeInteger(record.totalBytes) : null
+  if (!turns || !historyDigest || totalBytes === null) return null
+  const parsedTurns = turns.map(parseProviderConversationTurn)
+  if (parsedTurns.some((turn) => turn === null)) return null
+  const values = parsedTurns as Array<AstraProviderConversationTurn>
+  if (
+    new Set(values.map((turn) => turn.turnID)).size !== values.length ||
+    values.reduce((bytes, turn) => bytes + providerTurnTextBytes(turn), 0) !== totalBytes ||
+    totalBytes > maximumProviderConversationBytes ||
+    values.reduce(
+      (current, turn) => providerConversationHistoryDigest(current, turn),
+      providerConversationGenesisDigest as `sha256:${string}`,
+    ) !== historyDigest
+  ) {
+    return null
+  }
+  return { turns: values, historyDigest, totalBytes }
+}
+
+function parseProviderConversationTurn(input: unknown): AstraProviderConversationTurn | null {
+  const record = exact(input, [
+    "turnID",
+    "operationID",
+    "receiptID",
+    "providerID",
+    "modelID",
+    "adapterDigest",
+    "credentialProfile",
+    "accountFingerprint",
+    "destination",
+    "contextDigest",
+    "requestBodyDigest",
+    "requestBytes",
+    "workspaceBaselineDigest",
+    "gitBaselineDigest",
+    "userText",
+    "assistantText",
+    "assistantTextDigest",
+    "assistantTextBytes",
+    "finishReason",
+    "assurance",
+  ])
+  if (!record) return null
+  const turnID = safeID(record.turnID, 128)
+  const operationID = uuid(record.operationID)
+  const receiptID = uuid(record.receiptID)
+  const providerID = safeID(record.providerID, 128)
+  const modelID = safeID(record.modelID, 128)
+  const adapterDigest = digestValue(record.adapterDigest)
+  const credentialProfile = safeID(record.credentialProfile, 128)
+  const accountFingerprint = digestValue(record.accountFingerprint)
+  const destination = parseProviderDestination(record.destination)
+  const contextDigest = digestValue(record.contextDigest)
+  const requestBodyDigest = digestValue(record.requestBodyDigest)
+  const requestBytes = positiveInteger(record.requestBytes, 1_048_576)
+  const workspaceBaselineDigest = digestValue(record.workspaceBaselineDigest)
+  const gitBaselineDigest = record.gitBaselineDigest === null ? null : digestValue(record.gitBaselineDigest)
+  const userText = providerText(record.userText)
+  const assistantText = providerText(record.assistantText)
+  const assistantTextDigest = digestValue(record.assistantTextDigest)
+  const assistantTextBytes = positiveInteger(record.assistantTextBytes, maximumProviderTextBytes)
+  const finishReason =
+    record.finishReason === "stop" || record.finishReason === "length" || record.finishReason === "content_filter"
+      ? record.finishReason
+      : null
+  if (
+    !turnID ||
+    !operationID ||
+    !receiptID ||
+    !providerID ||
+    !modelID ||
+    !adapterDigest ||
+    !credentialProfile ||
+    !accountFingerprint ||
+    !destination ||
+    !contextDigest ||
+    !requestBodyDigest ||
+    requestBytes === null ||
+    !workspaceBaselineDigest ||
+    gitBaselineDigest === undefined ||
+    !userText ||
+    !assistantText ||
+    !assistantTextDigest ||
+    assistantTextBytes === null ||
+    !finishReason ||
+    record.assurance !== "observed_not_verified" ||
+    assistantTextDigest !== digest(assistantText) ||
+    assistantTextBytes !== Buffer.byteLength(assistantText, "utf8")
+  ) {
+    return null
+  }
+  return {
+    turnID,
+    operationID,
+    receiptID,
+    providerID,
+    modelID,
+    adapterDigest,
+    credentialProfile,
+    accountFingerprint,
+    destination,
+    contextDigest,
+    requestBodyDigest,
+    requestBytes,
+    workspaceBaselineDigest,
+    gitBaselineDigest,
+    userText,
+    assistantText,
+    assistantTextDigest,
+    assistantTextBytes,
+    finishReason,
+    assurance: "observed_not_verified",
+  }
+}
+
+function parseProviderDestination(input: unknown) {
+  const record = exact(input, ["method", "origin", "path"])
+  const origin = record ? safeText(record.origin, 2_048) : null
+  const path = record ? safeText(record.path, 2_048) : null
+  if (!record || record.method !== "POST" || !origin || !path || !path.startsWith("/")) return null
+  try {
+    const parsed = new URL(origin)
+    if (parsed.protocol !== "https:" || parsed.origin !== origin || parsed.username || parsed.password) return null
+  } catch {
+    return null
+  }
+  return { method: "POST" as const, origin, path }
+}
+
+function providerConversationHistoryDigest(
+  previousDigest: `sha256:${string}`,
+  turn: AstraProviderConversationTurn,
+): `sha256:${string}` {
+  return digest(`astra.provider-conversation.v1\0${canonicalJson({ previousDigest, turn })}`)
+}
+
+function providerTurnTextBytes(turn: AstraProviderConversationTurn) {
+  return Buffer.byteLength(turn.userText, "utf8") + Buffer.byteLength(turn.assistantText, "utf8")
+}
+
+function providerText(input: unknown) {
+  const value = safeText(input, maximumProviderTextBytes)
+  return value && Buffer.byteLength(value, "utf8") <= maximumProviderTextBytes ? value : null
+}
+
+function uuid(input: unknown) {
+  return typeof input === "string" && uuidPattern.test(input) ? input : null
+}
+
+function positiveInteger(input: unknown, maximum: number) {
+  return typeof input === "number" && Number.isSafeInteger(input) && input > 0 && input <= maximum ? input : null
+}
+
 function parseActor(input: unknown): AstraWorkSessionActor | null {
   const record = exact(input, ["kind", "actorID"])
   const actorID = record ? safeID(record.actorID, 128) : null
@@ -1028,7 +1277,7 @@ function canonicalJson(input: unknown): string {
     .join(",")}}`
 }
 
-function withoutProjectionDigest(projection: AstraWorkSessionProjection): Omit<AstraWorkSessionProjection, "projectionDigest"> {
+function withoutProjectionDigest(projection: AstraWorkSessionProjection): AstraWorkSessionProjectionWithoutDigest {
   const { projectionDigest: _projectionDigest, ...authority } = projection
   return authority
 }

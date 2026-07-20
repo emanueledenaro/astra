@@ -12,6 +12,7 @@ import {
   type AppendWorkSessionInput,
   type DeleteWorkSessionInput,
 } from "../src/work-session-store-internal"
+import { providerConversationGenesisDigest, type AstraWorkSessionEventDraft } from "@astra/domain/work-session"
 
 const roots: Array<string> = []
 const actor = { kind: "system", actorID: "astra-parent" } as const
@@ -91,6 +92,62 @@ describe("durable Astra work-session store", () => {
     const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
     expect(databasePath.startsWith(fixture.workspace)).toBe(false)
     expect((await lstat(databasePath)).mode & 0o077).toBe(0)
+  })
+
+  test("atomically upgrades v1 to a durable v2 conversation and reloads two turns after restart", async () => {
+    const fixture = await makeFixture("provider-conversation-restart")
+    const created = await fixture.store.create(fixture.createInput)
+    expect(created.projection.schemaVersion).toBe(1)
+    expect("conversation" in created.projection).toBe(false)
+
+    const first = await fixture.store.append({
+      sessionID: fixture.sessionID,
+      expectedSequence: 1,
+      observedAt: later(1),
+      actor,
+      draft: providerTurn("turn-1", providerConversationGenesisDigest, "First question", "First answer"),
+    })
+    if (first.projection.schemaVersion !== 2) throw new Error("provider turn must upgrade the projection")
+    const second = await fixture.store.append({
+      sessionID: fixture.sessionID,
+      expectedSequence: 2,
+      observedAt: later(2),
+      actor,
+      draft: providerTurn("turn-2", first.projection.conversation.historyDigest, "Second question", "Second answer"),
+    })
+
+    const loaded = await createWorkSessionStoreInternal({ stateRoot: fixture.stateRoot }).load(fixture.sessionID)
+    expect(loaded).toEqual(second)
+    expect(loaded.projection.schemaVersion).toBe(2)
+    if (loaded.projection.schemaVersion !== 2) throw new Error("provider conversation must reload as v2")
+    expect(loaded.projection.conversation.turns.map((turn) => [turn.userText, turn.assistantText])).toEqual([
+      ["First question", "First answer"],
+      ["Second question", "Second answer"],
+    ])
+  })
+
+  test("rolls back a provider turn and keeps v1 when durable append fails", async () => {
+    const fixture = await makeFixture("provider-conversation-rollback")
+    await fixture.store.create(fixture.createInput)
+    const interrupted = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      afterEventInsert: () => {
+        throw new Error("injected provider transcript interruption")
+      },
+    })
+
+    await expect(
+      interrupted.append({
+        sessionID: fixture.sessionID,
+        expectedSequence: 1,
+        observedAt: later(1),
+        actor,
+        draft: providerTurn("turn-1", providerConversationGenesisDigest, "First question", "First answer"),
+      }),
+    ).rejects.toMatchObject({ code: "state_unavailable" })
+    const loaded = await fixture.store.load(fixture.sessionID)
+    expect(loaded.projection.schemaVersion).toBe(1)
+    expect(loaded.events).toHaveLength(1)
   })
 
   test("rejects stale optimistic writers without a partial event", async () => {
@@ -1057,6 +1114,42 @@ async function temporaryDirectory(prefix: string) {
 
 function later(offset: number) {
   return new Date(Date.parse(startedAt) + offset * 1_000).toISOString()
+}
+
+function providerTurn(
+  turnID: string,
+  priorHistoryDigest: `sha256:${string}`,
+  userText: string,
+  assistantText: string,
+): Extract<AstraWorkSessionEventDraft, { type: "provider.turn-recorded" }> {
+  return {
+    type: "provider.turn-recorded",
+    payload: {
+      priorHistoryDigest,
+      turn: {
+        turnID,
+        operationID: "0196e4cb-5d80-7b1d-8fb2-263b81670431",
+        receiptID: "0196e4cb-5d80-7b1d-8fb2-263b81670432",
+        providerID: "anthropic",
+        modelID: "claude-sonnet-4-6",
+        adapterDigest: `sha256:${"1".repeat(64)}`,
+        credentialProfile: "anthropic-api-key",
+        accountFingerprint: `sha256:${"2".repeat(64)}`,
+        destination: { method: "POST", origin: "https://api.anthropic.com", path: "/v1/messages" },
+        contextDigest: `sha256:${"3".repeat(64)}`,
+        requestBodyDigest: `sha256:${"4".repeat(64)}`,
+        requestBytes: Buffer.byteLength(userText),
+        workspaceBaselineDigest: `sha256:${"5".repeat(64)}`,
+        gitBaselineDigest: `sha256:${"6".repeat(64)}`,
+        userText,
+        assistantText,
+        assistantTextDigest: `sha256:${Bun.CryptoHasher.hash("sha256", assistantText, "hex")}`,
+        assistantTextBytes: Buffer.byteLength(assistantText),
+        finishReason: "stop",
+        assurance: "observed_not_verified",
+      },
+    },
+  }
 }
 
 async function exists(path: string) {
