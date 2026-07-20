@@ -459,6 +459,88 @@ describe("durable Astra work-session store", () => {
     await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "state_unavailable" })
   })
 
+  test.each([
+    [
+      "missing STRICT and singleton CHECK",
+      `alter table work_session rename to old_work_session;
+       create table work_session (
+         singleton integer primary key,
+         session_id text not null unique,
+         current_sequence integer not null,
+         last_event_digest text not null,
+         projection_digest text not null,
+         projection_json text not null
+       );
+       insert into work_session select * from old_work_session;
+       drop table old_work_session`,
+    ],
+    [
+      "changed UNIQUE target",
+      `alter table work_session rename to old_work_session;
+       create table work_session (
+         singleton integer primary key check (singleton = 1),
+         session_id text not null,
+         current_sequence integer not null,
+         last_event_digest text not null,
+         projection_digest text not null unique,
+         projection_json text not null
+       ) strict;
+       insert into work_session select * from old_work_session;
+       drop table old_work_session`,
+    ],
+  ] as const)("rejects canonical schema with %s despite matching names and columns", async (_label, mutation) => {
+    const fixture = await makeFixture(`schema-contract-${_label.replaceAll(" ", "-")}`)
+    await fixture.store.create(fixture.createInput)
+    const database = new Database(workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID))
+    database.exec(mutation)
+    database.close()
+
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "state_unavailable" })
+  })
+
+  test("never initializes a replacement inserted after exclusive file creation but before pinning", async () => {
+    const fixture = await makeFixture("create-wx-swap")
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    const displaced = `${databasePath}.created-inode`
+    const replacement = "replacement-must-stay-inert"
+    let swapped = false
+    const creating = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      afterCreateFileBeforePin: () => {
+        swapped = true
+        renameSync(databasePath, displaced)
+        writeFileSync(databasePath, replacement, { mode: 0o600 })
+      },
+    })
+
+    await expect(creating.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(swapped).toBe(true)
+    expect(await readFile(databasePath, "utf8")).toBe(replacement)
+    expect((await lstat(displaced)).size).toBe(0)
+  })
+
+  test("never initializes a replacement inserted after the final create identity check", async () => {
+    const fixture = await makeFixture("create-final-swap")
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    const displaced = `${databasePath}.created-inode`
+    const replacement = "replacement-after-final-create-check"
+    let swapped = false
+    const creating = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      afterFinalCreateIdentityCheck: () => {
+        swapped = true
+        renameSync(databasePath, displaced)
+        writeFileSync(databasePath, replacement, { mode: 0o600 })
+      },
+    })
+
+    await expect(creating.create(fixture.createInput)).rejects.toMatchObject({ code: "state_unavailable" })
+    expect(swapped).toBe(true)
+    expect(await readFile(databasePath, "utf8")).toBe(replacement)
+    expect((await lstat(displaced)).size).toBe(0)
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "not_found" })
+  })
+
   test("does not delete a replacement SQLite family during failed-create cleanup", async () => {
     const fixture = await makeFixture("cleanup-swap")
     const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
@@ -531,6 +613,86 @@ describe("durable Astra work-session store", () => {
     expect(swapped).toBe(true)
     expect(await readFile(databasePath, "utf8")).toBe(replacement)
   })
+
+  test("a replacement after the final delete identity check is never unlinked", async () => {
+    const fixture = await makeFixture("delete-final-swap")
+    const record = await fixture.store.create(fixture.createInput)
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    const directory = dirname(databasePath)
+    const displaced = `${directory}.displaced`
+    const replacement = "replacement-after-final-check"
+    let swapped = false
+    const deleting = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      beforeDeleteTombstoneWrite: () => {
+        swapped = true
+        renameSync(directory, displaced)
+        mkdirSync(directory, { mode: 0o700 })
+        writeFileSync(databasePath, replacement, { mode: 0o600 })
+      },
+    })
+
+    await deleting.delete({
+      sessionID: fixture.sessionID,
+      expectedSequence: record.projection.sequence,
+      expectedProjectionDigest: record.projection.projectionDigest,
+    })
+    expect(swapped).toBe(true)
+    expect(await readFile(databasePath, "utf8")).toBe(replacement)
+    expect((await lstat(join(displaced, "work-session.sqlite"))).size).toBe(0)
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "not_found" })
+  })
+
+  test("scrubs every pinned SQLite family inode before exposing a delete tombstone", async () => {
+    const fixture = await makeFixture("delete-privacy")
+    const secret = "ASTRA_DELETE_CANARY_must_not_remain"
+    const record = await fixture.store.create({ ...fixture.createInput, objective: secret })
+    const databasePath = workSessionDatabasePathInternal(fixture.stateRoot, fixture.sessionID)
+    const deleting = createWorkSessionStoreInternal({
+      stateRoot: fixture.stateRoot,
+      beforeDeleteUnlink: () => {
+        for (const suffix of ["-journal", "-shm", "-wal"] as const) {
+          writeFileSync(`${databasePath}${suffix}`, `${secret}:${suffix}`, { mode: 0o600 })
+        }
+      },
+    })
+
+    await deleting.delete({
+      sessionID: fixture.sessionID,
+      expectedSequence: record.projection.sequence,
+      expectedProjectionDigest: record.projection.projectionDigest,
+    })
+
+    for (const name of await readdir(dirname(databasePath))) {
+      const bytes = await readFile(join(dirname(databasePath), name))
+      expect(bytes.byteLength, name).toBe(0)
+      expect(bytes.toString("utf8"), name).not.toContain(secret)
+    }
+    await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "not_found" })
+    expect(await fixture.store.list()).toEqual([])
+  })
+
+  test.each(["scrub", "tombstone", "tombstone-fsync"] as const)(
+    "never reports delete success when the %s boundary fails",
+    async (nativeFailure) => {
+      const fixture = await makeFixture(`delete-failure-${nativeFailure}`)
+      const record = await fixture.store.create(fixture.createInput)
+      const failing = createWorkSessionStoreInternal({ stateRoot: fixture.stateRoot, nativeFailure })
+
+      await expect(
+        failing.delete({
+          sessionID: fixture.sessionID,
+          expectedSequence: record.projection.sequence,
+          expectedProjectionDigest: record.projection.projectionDigest,
+        }),
+      ).rejects.toMatchObject({ code: "state_unavailable" })
+      if (nativeFailure === "scrub") {
+        expect(await fixture.store.load(fixture.sessionID)).toEqual(record)
+      } else {
+        await expect(fixture.store.load(fixture.sessionID)).rejects.toMatchObject({ code: "state_unavailable" })
+      }
+    },
+  )
 
   test("reloads ambiguous effects as reconciliation-required and never invokes an effect adapter", async () => {
     const fixture = await makeFixture("ambiguous-effect")

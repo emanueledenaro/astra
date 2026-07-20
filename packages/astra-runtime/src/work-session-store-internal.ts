@@ -8,7 +8,7 @@ import {
   realpath,
 } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path"
-import { dlopen, ptr } from "bun:ffi"
+import { dlopen, ptr, toArrayBuffer } from "bun:ffi"
 import { Database } from "bun:sqlite"
 import {
   createAstraWorkSessionEvent,
@@ -85,18 +85,26 @@ type WorkSessionStoreInternalOptions = Readonly<{
   stateRoot: string
   expectedUID?: number
   afterEventInsert?: () => void
+  afterCreateFileBeforePin?: () => void
+  afterFinalCreateIdentityCheck?: () => void
   afterProjectionRead?: () => void
   beforeDatabaseOpen?: () => void
   beforeDeleteUnlink?: () => void
+  beforeDeleteTombstoneWrite?: () => void
+  nativeFailure?: "scrub" | "tombstone" | "tombstone-fsync"
 }>
 
 type RequiredWorkSessionStoreInternalOptions = Readonly<{
   stateRoot: string
   expectedUID: number
   afterEventInsert?: () => void
+  afterCreateFileBeforePin?: () => void
+  afterFinalCreateIdentityCheck?: () => void
   afterProjectionRead?: () => void
   beforeDatabaseOpen?: () => void
   beforeDeleteUnlink?: () => void
+  beforeDeleteTombstoneWrite?: () => void
+  nativeFailure?: "scrub" | "tombstone" | "tombstone-fsync"
 }>
 
 type SessionRow = Readonly<{
@@ -122,6 +130,19 @@ type PinnedSessionPath = Readonly<{
   library: ReturnType<typeof openSessionLibrary>
 }>
 
+type PinnedDatabaseFamily = Readonly<{
+  entries: ReadonlyArray<Readonly<{ suffix: (typeof sqliteSuffixes)[number]; fd: number; identity: PathIdentity }>>
+  library: ReturnType<typeof openSessionLibrary>
+}>
+
+type WorkSessionTombstone = Readonly<{
+  schemaVersion: 1
+  sessionID: string
+  status: "deleted" | "create-failed"
+  sequence: number
+  projectionDigest: `sha256:${string}` | null
+}>
+
 type EventRow = Readonly<{
   sequence: number
   event_digest: string
@@ -135,7 +156,22 @@ const sessionDirectoryPattern = /^[0-9a-f]{64}$/u
 const sqliteSuffixes = ["", "-journal", "-shm", "-wal"] as const
 const workSessionApplicationID = 0x41535452
 const workSessionSchemaVersion = 1
-const removeDirectory = 0x80
+const xattrCreate = 0x0002
+const maximumTombstoneBytes = 1_024
+const workSessionTableSQL = `create table work_session (
+  singleton integer primary key check (singleton = 1),
+  session_id text not null unique,
+  current_sequence integer not null,
+  last_event_digest text not null,
+  projection_digest text not null,
+  projection_json text not null
+) strict`
+const workSessionEventTableSQL = `create table work_session_event (
+  sequence integer primary key,
+  event_digest text not null unique,
+  previous_digest text not null,
+  event_json text not null
+) strict`
 
 export function workSessionStateRootInternal() {
   return join(macOSAccountHomeInternal(), "Library", "Application Support", "Astra", "Sessions")
@@ -180,8 +216,10 @@ async function createSession(
     event.value.workspaceIdentity,
     expectedUID,
   )
-  const createdDirectory = await createPrivateSessionDirectory(directory, expectedUID)
+  await assertSessionIDNotTombstonedAtStateRoot(stateRoot, expectedUID, event.value.sessionID)
+  await createPrivateSessionDirectory(directory, expectedUID)
   let createdFile = false
+  let createdHandle: Awaited<ReturnType<typeof open>> | null = null
   let binding: PinnedSessionPath | null = null
   try {
     const handle = await open(filename, "wx", 0o600).catch((cause) => {
@@ -190,24 +228,19 @@ async function createSession(
       }
       throw cause
     })
+    createdHandle = handle
     createdFile = true
-    await handle.close()
+    const createdIdentity = identityOf(await handle.stat())
+    options.afterCreateFileBeforePin?.()
+    await assertHandleMatchesPath(handle, filename, expectedUID, false)
+    const bytes = buildInitialDatabaseBytes(event.value, projected.value, options.afterEventInsert)
+    options.afterFinalCreateIdentityCheck?.()
+    await handle.writeFile(bytes)
+    await handle.sync()
+    await assertHandleMatchesPath(handle, filename, expectedUID, false)
     await assertSafeDatabaseFamily(filename, expectedUID)
-    binding = await pinSessionPath(stateRoot, directory, filename, expectedUID)
+    binding = await pinSessionPath(stateRoot, directory, filename, expectedUID, createdIdentity)
     options.beforeDatabaseOpen?.()
-    await assertPinnedSessionPath(binding, expectedUID)
-    const database = openDatabase(filename, false)
-    try {
-      await assertPinnedSessionPath(binding, expectedUID)
-      initializeSchema(database)
-      transaction(database, () => {
-        insertEvent(database, event.value)
-        options.afterEventInsert?.()
-        insertProjection(database, projected.value)
-      })
-    } finally {
-      database.close()
-    }
     await assertPinnedSessionPath(binding, expectedUID)
     await assertSafeSessionState(
       stateRoot,
@@ -217,13 +250,29 @@ async function createSession(
       filename,
       expectedUID,
     )
+    await assertPinnedSessionPath(binding, expectedUID)
     return freezeRecord({ projection: projected.value, events: [event.value] })
   } catch (cause) {
-    if (createdFile && binding) await removeNewSessionState(binding, createdDirectory, expectedUID)
+    if (createdFile && createdHandle) {
+      try {
+        await scrubCreatedHandle(createdHandle)
+        await recordDeletionTombstoneAtStateRoot(stateRoot, expectedUID, event.value.sessionID, {
+          status: "create-failed",
+          sequence: 0,
+          projectionDigest: null,
+        })
+      } catch (cleanupCause) {
+        throw new WorkSessionStoreError("state_unavailable", "The failed create could not be scrubbed and tombstoned", cleanupCause)
+      }
+    }
     if (cause instanceof WorkSessionStoreError) throw cause
     throw new WorkSessionStoreError("state_unavailable", "The work session could not be created atomically", cause)
   } finally {
-    if (binding) closePinnedSessionPath(binding)
+    try {
+      if (binding) await closePinnedSessionPath(binding)
+    } finally {
+      await createdHandle?.close().catch(() => undefined)
+    }
   }
 }
 
@@ -242,6 +291,7 @@ async function appendSession(
   const binding = await pinSessionPath(stateRoot, directory, filename, expectedUID)
   let database: Database | null = null
   try {
+    await assertSessionNotDeleted(binding, parsed.sessionID)
     options.beforeDatabaseOpen?.()
     await assertPinnedSessionPath(binding, expectedUID)
     const openedDatabase = openDatabase(filename, false)
@@ -281,8 +331,11 @@ async function appendSession(
     if (cause instanceof WorkSessionStoreError) throw cause
     throw new WorkSessionStoreError("state_unavailable", "The work-session append failed atomically", cause)
   } finally {
-    database?.close()
-    closePinnedSessionPath(binding)
+    try {
+      database?.close()
+    } finally {
+      await closePinnedSessionPath(binding)
+    }
   }
 }
 
@@ -303,6 +356,7 @@ async function loadSession(
   const binding = await pinSessionPath(stateRoot, directory, filename, expectedUID)
   let database: Database | null = null
   try {
+    await assertSessionNotDeleted(binding, sessionID)
     options.beforeDatabaseOpen?.()
     await assertPinnedSessionPath(binding, expectedUID)
     const openedDatabase = openDatabase(filename, true)
@@ -323,8 +377,11 @@ async function loadSession(
     if (cause instanceof WorkSessionStoreError) throw cause
     throw new WorkSessionStoreError("state_unavailable", "The work-session state is unavailable", cause)
   } finally {
-    database?.close()
-    closePinnedSessionPath(binding)
+    try {
+      database?.close()
+    } finally {
+      await closePinnedSessionPath(binding)
+    }
   }
 }
 
@@ -346,6 +403,7 @@ async function listSessions(
     if (!entry.isDirectory() || entry.isSymbolicLink() || !sessionDirectoryPattern.test(entry.name)) {
       throw new WorkSessionStoreError("unsafe_state_path", "The work-session state root contains an unsafe entry")
     }
+    if (await isDirectoryTombstonedAtStateRoot(stateRoot, expectedUID, entry.name)) continue
     const record = await loadSessionDirectory(stateRoot, join(stateRoot, entry.name), expectedUID, options)
     summaries.push({
       sessionID: record.projection.sessionID,
@@ -391,8 +449,11 @@ async function loadSessionDirectory(
     if (cause instanceof WorkSessionStoreError) throw cause
     throw new WorkSessionStoreError("state_unavailable", "A listed work session is unavailable", cause)
   } finally {
-    database?.close()
-    closePinnedSessionPath(binding)
+    try {
+      database?.close()
+    } finally {
+      await closePinnedSessionPath(binding)
+    }
   }
 }
 
@@ -469,60 +530,68 @@ async function deleteSession(
   await assertDeletableSessionDirectory(directory, filename, expectedUID)
   const binding = await pinSessionPath(stateRoot, directory, filename, expectedUID)
   let database: Database | null = null
+  let family: PinnedDatabaseFamily | null = null
   let deletionStarted = false
   let deletionFailure: unknown = null
   try {
-    options.beforeDatabaseOpen?.()
-    await assertPinnedSessionPath(binding, expectedUID)
-    database = openDatabase(filename, false)
-    database.exec("PRAGMA locking_mode = EXCLUSIVE")
-    database.exec("BEGIN EXCLUSIVE")
-    const loaded = loadDatabase(database)
-    assertSessionPathBinding(loaded, sessionID, stateRoot, directory)
-    assertNoWorkspaceStateOverlapExisting(
-      loaded.projection.workspaceRoot,
-      loaded.projection.workspaceIdentity,
-      stateRoot,
-      directory,
-      filename,
-    )
-    if (
-      loaded.projection.sequence !== expectedSequence ||
-      loaded.projection.projectionDigest !== expectedProjectionDigest
-    ) {
-      throw new WorkSessionStoreError("sequence_conflict", "The work-session delete binding is stale")
-    }
-    options.beforeDeleteUnlink?.()
-    await assertPinnedSessionPath(binding, expectedUID)
-    await assertDeletableSessionDirectory(directory, filename, expectedUID)
-    await assertPinnedSessionPath(binding, expectedUID)
-    deletionStarted = true
-    await unlinkPinnedDatabaseFamily(binding, expectedUID)
-  } catch (cause) {
-    if (!deletionStarted) {
+    try {
+      await assertSessionNotDeleted(binding, sessionID)
+      options.beforeDatabaseOpen?.()
+      await assertPinnedSessionPath(binding, expectedUID)
+      database = openDatabase(filename, false)
+      database.exec("PRAGMA locking_mode = EXCLUSIVE")
+      database.exec("BEGIN EXCLUSIVE")
+      const loaded = loadDatabase(database)
+      assertSessionPathBinding(loaded, sessionID, stateRoot, directory)
+      assertNoWorkspaceStateOverlapExisting(
+        loaded.projection.workspaceRoot,
+        loaded.projection.workspaceIdentity,
+        stateRoot,
+        directory,
+        filename,
+      )
+      if (
+        loaded.projection.sequence !== expectedSequence ||
+        loaded.projection.projectionDigest !== expectedProjectionDigest
+      ) {
+        throw new WorkSessionStoreError("sequence_conflict", "The work-session delete binding is stale")
+      }
+      await assertSessionNotDeleted(binding, sessionID)
+      options.beforeDeleteUnlink?.()
+      await assertPinnedSessionPath(binding, expectedUID)
+      await assertDeletableSessionDirectory(directory, filename, expectedUID)
+      await assertPinnedSessionPath(binding, expectedUID)
+      family = await pinDatabaseFamilyForScrub(binding, expectedUID)
+      options.beforeDeleteTombstoneWrite?.()
+      deletionStarted = true
+      await scrubPinnedDatabaseFamily(family, options.nativeFailure)
+      writeDeletionTombstone(binding, sessionID, {
+        status: "deleted",
+        sequence: loaded.projection.sequence,
+        projectionDigest: loaded.projection.projectionDigest,
+      }, options.nativeFailure)
+    } catch (cause) {
+      if (!deletionStarted) {
+        try {
+          database?.exec("ROLLBACK")
+        } catch {
+          // The connection may not have acquired the exclusive transaction.
+        }
+      }
+      deletionFailure = cause instanceof WorkSessionStoreError
+        ? cause
+        : new WorkSessionStoreError("state_unavailable", "The bound work-session state could not be deleted", cause)
+    } finally {
       try {
-        database?.exec("ROLLBACK")
-      } catch {
-        // The connection may not have acquired the exclusive transaction.
+        database?.close()
+      } finally {
+        if (family) closePinnedDatabaseFamily(family)
       }
     }
-    deletionFailure = cause instanceof WorkSessionStoreError
-      ? cause
-      : new WorkSessionStoreError("state_unavailable", "The bound work-session state could not be deleted", cause)
   } finally {
-    database?.close()
+    await closePinnedSessionPath(binding)
   }
-  if (deletionFailure) {
-    closePinnedSessionPath(binding)
-    throw deletionFailure
-  }
-  try {
-    await removePinnedSessionDirectory(binding)
-  } catch (cause) {
-    throw new WorkSessionStoreError("state_unavailable", "The bound work-session directory could not be deleted", cause)
-  } finally {
-    closePinnedSessionPath(binding)
-  }
+  if (deletionFailure) throw deletionFailure
 }
 
 function loadDatabase(database: Database, afterProjectionRead?: () => void): AstraDurableWorkSession {
@@ -579,7 +648,7 @@ function loadDatabase(database: Database, afterProjectionRead?: () => void): Ast
   return freezeRecord({ projection, events })
 }
 
-function initializeSchema(database: Database) {
+function initializeSchema(database: Database, validate = true) {
   database.exec("PRAGMA trusted_schema = OFF")
   database.exec("PRAGMA journal_mode = DELETE")
   database.exec("PRAGMA synchronous = FULL")
@@ -587,23 +656,27 @@ function initializeSchema(database: Database) {
   database.exec("PRAGMA busy_timeout = 5000")
   database.exec(`PRAGMA application_id = ${workSessionApplicationID}`)
   database.exec(`PRAGMA user_version = ${workSessionSchemaVersion}`)
-  database.exec(`
-    create table work_session (
-      singleton integer primary key check (singleton = 1),
-      session_id text not null unique,
-      current_sequence integer not null,
-      last_event_digest text not null,
-      projection_digest text not null,
-      projection_json text not null
-    ) strict;
-    create table work_session_event (
-      sequence integer primary key,
-      event_digest text not null unique,
-      previous_digest text not null,
-      event_json text not null
-    ) strict;
-  `)
-  validateDatabaseContract(database)
+  database.exec(`${workSessionTableSQL};${workSessionEventTableSQL};`)
+  if (validate) validateDatabaseContract(database)
+}
+
+function buildInitialDatabaseBytes(
+  event: AstraWorkSessionEvent,
+  projection: AstraWorkSessionProjection,
+  afterEventInsert?: () => void,
+) {
+  const database = new Database(":memory:", { create: true, strict: true })
+  try {
+    initializeSchema(database, false)
+    transaction(database, () => {
+      insertEvent(database, event)
+      afterEventInsert?.()
+      insertProjection(database, projection)
+    })
+    return database.serialize()
+  } finally {
+    database.close()
+  }
 }
 
 function validateDatabaseContract(database: Database) {
@@ -625,15 +698,26 @@ function validateDatabaseContract(database: Database) {
   }
 
   const schemaObjects = database
-    .query<{ type: string; name: string; tbl_name: string }, []>(
-      "select type, name, tbl_name from sqlite_schema where name not like 'sqlite_%' order by type, name",
+    .query<{ type: string; name: string; tbl_name: string; sql: string | null }, []>(
+      "select type, name, tbl_name, sql from sqlite_schema where name not like 'sqlite_%' order by type, name",
     )
     .all()
+    .map((entry) => ({ ...entry, sql: entry.sql === null ? null : normalizeSchemaSQL(entry.sql) }))
   if (
     canonicalJson(schemaObjects) !==
     canonicalJson([
-      { type: "table", name: "work_session", tbl_name: "work_session" },
-      { type: "table", name: "work_session_event", tbl_name: "work_session_event" },
+      {
+        type: "table",
+        name: "work_session",
+        tbl_name: "work_session",
+        sql: normalizeSchemaSQL(workSessionTableSQL),
+      },
+      {
+        type: "table",
+        name: "work_session_event",
+        tbl_name: "work_session_event",
+        sql: normalizeSchemaSQL(workSessionEventTableSQL),
+      },
     ])
   ) {
     throw new WorkSessionStoreError("state_unavailable", "The work-session SQLite schema contains unexpected objects")
@@ -653,8 +737,12 @@ function validateDatabaseContract(database: Database) {
     ["previous_digest", "TEXT", 1, 0],
     ["event_json", "TEXT", 1, 0],
   ])
-  assertExactIndexes(database, "work_session", ["sqlite_autoindex_work_session_1"])
-  assertExactIndexes(database, "work_session_event", ["sqlite_autoindex_work_session_event_1"])
+  assertExactIndexes(database, "work_session", [
+    { name: "sqlite_autoindex_work_session_1", unique: 1, origin: "u", partial: 0, columns: ["session_id"] },
+  ])
+  assertExactIndexes(database, "work_session_event", [
+    { name: "sqlite_autoindex_work_session_event_1", unique: 1, origin: "u", partial: 0, columns: ["event_digest"] },
+  ])
 }
 
 function assertExactTableColumns(
@@ -671,15 +759,43 @@ function assertExactTableColumns(
   }
 }
 
-function assertExactIndexes(database: Database, table: string, expectedNames: ReadonlyArray<string>) {
+function assertExactIndexes(
+  database: Database,
+  table: string,
+  expected: ReadonlyArray<Readonly<{
+    name: string
+    unique: number
+    origin: string
+    partial: number
+    columns: ReadonlyArray<string>
+  }>>,
+) {
   const indexes = database
-    .query<{ name: string }, []>(`PRAGMA index_list(${table})`)
+    .query<{ name: string; unique: number; origin: string; partial: number }, []>(`PRAGMA index_list(${table})`)
     .all()
-    .map((index) => index.name)
-    .toSorted()
-  if (canonicalJson(indexes) !== canonicalJson([...expectedNames].toSorted())) {
+    .map((index) => ({
+      name: index.name,
+      unique: index.unique,
+      origin: index.origin,
+      partial: index.partial,
+      columns: database
+        .query<{ seqno: number; name: string }, []>(`PRAGMA index_info(${index.name})`)
+        .all()
+        .toSorted((left, right) => left.seqno - right.seqno)
+        .map((column) => column.name),
+    }))
+    .toSorted((left, right) => left.name.localeCompare(right.name))
+  if (canonicalJson(indexes) !== canonicalJson([...expected].toSorted((left, right) => left.name.localeCompare(right.name)))) {
     throw new WorkSessionStoreError("state_unavailable", `The ${table} index contract is invalid`)
   }
+}
+
+function normalizeSchemaSQL(input: string) {
+  return input
+    .trim()
+    .replace(/\s+/gu, " ")
+    .replace(/\s*([(),=])\s*/gu, "$1")
+    .toLowerCase()
 }
 
 function insertEvent(database: Database, event: AstraWorkSessionEvent) {
@@ -1015,24 +1131,50 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     "stateRoot",
     "expectedUID",
     "afterEventInsert",
+    "afterCreateFileBeforePin",
+    "afterFinalCreateIdentityCheck",
     "afterProjectionRead",
     "beforeDatabaseOpen",
     "beforeDeleteUnlink",
+    "beforeDeleteTombstoneWrite",
+    "nativeFailure",
   ])
   if (!record) throw new WorkSessionStoreError("invalid_input", "The internal work-session options are invalid")
   const expectedUID = Object.hasOwn(record, "expectedUID") ? record.expectedUID : effectiveUID()
   if (!Number.isSafeInteger(expectedUID) || (expectedUID as number) < 0) {
     throw new WorkSessionStoreError("invalid_input", "The expected work-session account identity is invalid")
   }
-  for (const key of ["afterEventInsert", "afterProjectionRead", "beforeDatabaseOpen", "beforeDeleteUnlink"] as const) {
+  for (const key of [
+    "afterEventInsert",
+    "afterCreateFileBeforePin",
+    "afterFinalCreateIdentityCheck",
+    "afterProjectionRead",
+    "beforeDatabaseOpen",
+    "beforeDeleteUnlink",
+    "beforeDeleteTombstoneWrite",
+  ] as const) {
     if (Object.hasOwn(record, key) && typeof record[key] !== "function") {
       throw new WorkSessionStoreError("invalid_input", "An internal work-session test seam is invalid")
     }
+  }
+  if (
+    Object.hasOwn(record, "nativeFailure") &&
+    record.nativeFailure !== "scrub" &&
+    record.nativeFailure !== "tombstone" &&
+    record.nativeFailure !== "tombstone-fsync"
+  ) {
+    throw new WorkSessionStoreError("invalid_input", "The internal native failure seam is invalid")
   }
   return Object.freeze({
     stateRoot: requireCanonicalStateRoot(record.stateRoot),
     expectedUID: expectedUID as number,
     ...(typeof record.afterEventInsert === "function" ? { afterEventInsert: record.afterEventInsert as () => void } : {}),
+    ...(typeof record.afterCreateFileBeforePin === "function"
+      ? { afterCreateFileBeforePin: record.afterCreateFileBeforePin as () => void }
+      : {}),
+    ...(typeof record.afterFinalCreateIdentityCheck === "function"
+      ? { afterFinalCreateIdentityCheck: record.afterFinalCreateIdentityCheck as () => void }
+      : {}),
     ...(typeof record.afterProjectionRead === "function"
       ? { afterProjectionRead: record.afterProjectionRead as () => void }
       : {}),
@@ -1042,6 +1184,14 @@ function parseInternalOptions(input: WorkSessionStoreInternalOptions): RequiredW
     ...(typeof record.beforeDeleteUnlink === "function"
       ? { beforeDeleteUnlink: record.beforeDeleteUnlink as () => void }
       : {}),
+    ...(typeof record.beforeDeleteTombstoneWrite === "function"
+      ? { beforeDeleteTombstoneWrite: record.beforeDeleteTombstoneWrite as () => void }
+      : {}),
+    ...(record.nativeFailure === "scrub" ||
+    record.nativeFailure === "tombstone" ||
+    record.nativeFailure === "tombstone-fsync"
+      ? { nativeFailure: record.nativeFailure }
+      : {}),
   })
 }
 
@@ -1050,17 +1200,17 @@ async function pinSessionPath(
   directory: string,
   filename: string,
   expectedUID: number,
+  expectedDatabaseIdentity?: PathIdentity,
 ): Promise<PinnedSessionPath> {
   const library = openSessionLibrary()
-  const rootHandle = await open(
-    stateRoot,
-    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-  ).catch((cause) => {
-    throw new WorkSessionStoreError("state_unavailable", "The work-session state root could not be pinned", cause)
-  })
+  let rootHandle: Awaited<ReturnType<typeof open>> | null = null
   let directoryFD = -1
   let databaseFD = -1
   try {
+    rootHandle = await open(
+      stateRoot,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    )
     await assertHandleMatchesPath(rootHandle, stateRoot, expectedUID, true)
     directoryFD = library.symbols.openat(
       rootHandle.fd,
@@ -1080,6 +1230,9 @@ async function pinSessionPath(
     if (databaseFD < 0) throw new WorkSessionStoreError("state_unavailable", "The session database could not be pinned")
     const databaseFacts = await Bun.file(databaseFD).stat()
     assertSafePinnedFacts(databaseFacts, expectedUID, false)
+    if (expectedDatabaseIdentity && !sameIdentityValue(expectedDatabaseIdentity, databaseFacts)) {
+      throw new WorkSessionStoreError("state_unavailable", "The exclusively created database inode was replaced")
+    }
     const binding = {
       stateRoot,
       directory,
@@ -1096,7 +1249,8 @@ async function pinSessionPath(
   } catch (cause) {
     if (databaseFD >= 0) library.symbols.close(databaseFD)
     if (directoryFD >= 0) library.symbols.close(directoryFD)
-    await rootHandle.close().catch(() => undefined)
+    await rootHandle?.close().catch(() => undefined)
+    library.close()
     if (cause instanceof WorkSessionStoreError) throw cause
     throw new WorkSessionStoreError("state_unavailable", "The work-session state could not be pinned", cause)
   }
@@ -1197,89 +1351,234 @@ function assertSafePinnedFacts(
   }
 }
 
-async function removeNewSessionState(
-  binding: PinnedSessionPath,
-  createdDirectory: boolean,
-  expectedUID: number,
-) {
+async function pinDatabaseFamilyForScrub(binding: PinnedSessionPath, expectedUID: number) {
+  const entries: Array<{ suffix: (typeof sqliteSuffixes)[number]; fd: number; identity: PathIdentity }> = []
   try {
-    await assertPinnedSessionPath(binding, expectedUID)
-    await unlinkPinnedDatabaseFamily(binding, expectedUID)
-    if (createdDirectory) await removePinnedSessionDirectory(binding)
-    return true
-  } catch {
-    return false
-  }
-}
-
-async function unlinkPinnedDatabaseFamily(binding: PinnedSessionPath, expectedUID: number) {
-  for (const suffix of ["-journal", "-shm", "-wal", ""] as const) {
-    const name = `${basename(binding.filename)}${suffix}`
-    const descriptor = binding.library.symbols.openat(
-      binding.directoryFD,
-      cString(name),
-      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-      0,
-    )
-    if (descriptor < 0) {
-      if (suffix === "") throw new WorkSessionStoreError("state_unavailable", "The pinned database disappeared")
-      continue
-    }
-    try {
+    for (const suffix of sqliteSuffixes) {
+      const descriptor = binding.library.symbols.openat(
+        binding.directoryFD,
+        cString(`${basename(binding.filename)}${suffix}`),
+        constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        0,
+      )
+      if (descriptor < 0) {
+        if (suffix === "" || lastErrno(binding.library) !== 2) {
+          throw new WorkSessionStoreError("state_unavailable", "A SQLite family inode could not be pinned for scrubbing")
+        }
+        continue
+      }
       const facts = await Bun.file(descriptor).stat()
       assertSafePinnedFacts(facts, expectedUID, false)
       if (suffix === "" && !sameIdentityValue(binding.databaseIdentity, facts)) {
-        throw new WorkSessionStoreError("state_unavailable", "The pinned database identity changed before deletion")
+        throw new WorkSessionStoreError("state_unavailable", "The database inode changed before scrubbing")
       }
-      const finalDescriptor = binding.library.symbols.openat(
-        binding.directoryFD,
-        cString(name),
-        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
-        0,
-      )
-      if (finalDescriptor < 0) throw new WorkSessionStoreError("state_unavailable", "A database file changed before deletion")
-      try {
-        const finalFacts = await Bun.file(finalDescriptor).stat()
-        if (!sameIdentity(facts, finalFacts)) {
-          throw new WorkSessionStoreError("state_unavailable", "A database file was replaced before deletion")
-        }
-      } finally {
-        binding.library.symbols.close(finalDescriptor)
-      }
-      if (binding.library.symbols.unlinkat(binding.directoryFD, cString(name), 0) !== 0) {
-        throw new WorkSessionStoreError("state_unavailable", "A pinned database file could not be deleted")
-      }
-    } finally {
-      binding.library.symbols.close(descriptor)
+      entries.push({ suffix, fd: descriptor, identity: identityOf(facts) })
+    }
+    return Object.freeze({ entries: Object.freeze(entries), library: binding.library })
+  } catch (cause) {
+    for (const entry of entries) binding.library.symbols.close(entry.fd)
+    if (cause instanceof WorkSessionStoreError) throw cause
+    throw new WorkSessionStoreError("state_unavailable", "The SQLite family could not be pinned for scrubbing", cause)
+  }
+}
+
+async function scrubPinnedDatabaseFamily(
+  family: PinnedDatabaseFamily,
+  nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
+) {
+  if (nativeFailure === "scrub") {
+    throw new WorkSessionStoreError("state_unavailable", "Injected pinned SQLite scrub failure")
+  }
+  for (const entry of [...family.entries].sort((left, right) => (left.suffix === "" ? 1 : right.suffix === "" ? -1 : 0))) {
+    const before = await Bun.file(entry.fd).stat()
+    if (!sameIdentityValue(entry.identity, before)) {
+      throw new WorkSessionStoreError("state_unavailable", "A pinned SQLite inode changed before scrubbing")
+    }
+    if (family.library.symbols.ftruncate(entry.fd, 0) !== 0 || family.library.symbols.fsync(entry.fd) !== 0) {
+      throw new WorkSessionStoreError("state_unavailable", "A pinned SQLite inode could not be durably scrubbed")
+    }
+    const after = await Bun.file(entry.fd).stat()
+    if (!sameIdentityValue(entry.identity, after) || after.size !== 0) {
+      throw new WorkSessionStoreError("state_unavailable", "A pinned SQLite inode did not verify as scrubbed")
     }
   }
 }
 
-async function removePinnedSessionDirectory(binding: PinnedSessionPath) {
-  const reboundFD = binding.library.symbols.openat(
-    binding.rootHandle.fd,
-    cString(basename(binding.directory)),
-    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-    0,
-  )
-  if (reboundFD < 0) throw new WorkSessionStoreError("state_unavailable", "The session directory disappeared")
+function closePinnedDatabaseFamily(family: PinnedDatabaseFamily) {
+  for (const entry of family.entries) family.library.symbols.close(entry.fd)
+}
+
+async function scrubCreatedHandle(handle: Awaited<ReturnType<typeof open>>) {
   try {
-    const facts = await Bun.file(reboundFD).stat()
-    if (!sameIdentityValue(binding.directoryIdentity, facts)) {
-      throw new WorkSessionStoreError("state_unavailable", "The session directory was replaced before deletion")
-    }
-  } finally {
-    binding.library.symbols.close(reboundFD)
-  }
-  if (binding.library.symbols.unlinkat(binding.rootHandle.fd, cString(basename(binding.directory)), removeDirectory) !== 0) {
-    throw new WorkSessionStoreError("state_unavailable", "The pinned session directory could not be deleted")
+    await handle.truncate(0)
+    await handle.sync()
+    if ((await handle.stat()).size !== 0) throw new Error("created inode retained bytes")
+  } catch (cause) {
+    throw new WorkSessionStoreError("state_unavailable", "The failed-create inode could not be scrubbed", cause)
   }
 }
 
-function closePinnedSessionPath(binding: PinnedSessionPath) {
+async function assertSessionIDNotTombstonedAtStateRoot(
+  stateRoot: string,
+  expectedUID: number,
+  sessionID: string,
+) {
+  const tombstone = await readTombstoneAtStateRoot(stateRoot, expectedUID, sessionDirectoryName(sessionID))
+  if (tombstone) throw new WorkSessionStoreError("already_exists", "The work session has a durable tombstone")
+}
+
+async function isDirectoryTombstonedAtStateRoot(stateRoot: string, expectedUID: number, directoryName: string) {
+  return (await readTombstoneAtStateRoot(stateRoot, expectedUID, directoryName)) !== null
+}
+
+async function assertSessionNotDeleted(binding: PinnedSessionPath, sessionID: string) {
+  const tombstone = readTombstone(binding.rootHandle.fd, sessionDirectoryName(sessionID), binding.library)
+  if (tombstone) throw new WorkSessionStoreError("not_found", "The work session was explicitly deleted")
+}
+
+async function readTombstoneAtStateRoot(stateRoot: string, expectedUID: number, directoryName: string) {
+  const library = openSessionLibrary()
+  let handle: Awaited<ReturnType<typeof open>> | null = null
+  try {
+    handle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    await assertHandleMatchesPath(handle, stateRoot, expectedUID, true)
+    return readTombstone(handle.fd, directoryName, library)
+  } catch (cause) {
+    if (cause instanceof WorkSessionStoreError) throw cause
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone registry is unavailable", cause)
+  } finally {
+    await handle?.close().catch(() => undefined)
+    library.close()
+  }
+}
+
+async function recordDeletionTombstoneAtStateRoot(
+  stateRoot: string,
+  expectedUID: number,
+  sessionID: string,
+  details: Pick<WorkSessionTombstone, "status" | "sequence" | "projectionDigest">,
+) {
+  const library = openSessionLibrary()
+  let handle: Awaited<ReturnType<typeof open>> | null = null
+  try {
+    handle = await open(stateRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW)
+    await assertHandleMatchesPath(handle, stateRoot, expectedUID, true)
+    writeTombstone(handle.fd, sessionID, details, library)
+  } catch (cause) {
+    if (cause instanceof WorkSessionStoreError) throw cause
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone could not be recorded", cause)
+  } finally {
+    await handle?.close().catch(() => undefined)
+    library.close()
+  }
+}
+
+function writeDeletionTombstone(
+  binding: PinnedSessionPath,
+  sessionID: string,
+  details: Pick<WorkSessionTombstone, "status" | "sequence" | "projectionDigest">,
+  nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
+) {
+  writeTombstone(binding.rootHandle.fd, sessionID, details, binding.library, nativeFailure)
+}
+
+function writeTombstone(
+  rootFD: number,
+  sessionID: string,
+  details: Pick<WorkSessionTombstone, "status" | "sequence" | "projectionDigest">,
+  library: ReturnType<typeof openSessionLibrary>,
+  nativeFailure?: RequiredWorkSessionStoreInternalOptions["nativeFailure"],
+) {
+  const tombstone: WorkSessionTombstone = {
+    schemaVersion: 1,
+    sessionID: requireSessionID(sessionID),
+    status: details.status,
+    sequence: details.sequence,
+    projectionDigest: details.projectionDigest,
+  }
+  const value = Buffer.from(canonicalJson(tombstone), "utf8")
+  if (value.length > maximumTombstoneBytes) {
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone exceeds its fixed bound")
+  }
+  if (nativeFailure === "tombstone") {
+    throw new WorkSessionStoreError("state_unavailable", "Injected tombstone write failure")
+  }
+  const name = tombstoneName(sessionDirectoryName(sessionID))
+  if (
+    library.symbols.fsetxattr(
+      rootFD,
+      cString(name),
+      ptr(value),
+      value.length,
+      0,
+      xattrCreate,
+    ) !== 0
+  ) {
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone could not be durably recorded")
+  }
+  if (nativeFailure === "tombstone-fsync" || library.symbols.fsync(rootFD) !== 0) {
+    library.symbols.fremovexattr(rootFD, cString(name), 0)
+    library.symbols.fsync(rootFD)
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone could not be durably synced")
+  }
+  const persisted = readTombstone(rootFD, sessionDirectoryName(sessionID), library)
+  if (!persisted || canonicalJson(persisted) !== canonicalJson(tombstone)) {
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone could not be verified")
+  }
+}
+
+function readTombstone(
+  rootFD: number,
+  directoryName: string,
+  library: ReturnType<typeof openSessionLibrary>,
+): WorkSessionTombstone | null {
+  const bytes = Buffer.alloc(maximumTombstoneBytes)
+  const length = Number(
+    library.symbols.fgetxattr(rootFD, cString(tombstoneName(directoryName)), ptr(bytes), bytes.length, 0, 0),
+  )
+  if (length < 0) {
+    if (lastErrno(library) === 93) return null
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone could not be read")
+  }
+  if (length < 1 || length > bytes.length) {
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone length is invalid")
+  }
+  const parsed = parseStoredJson(bytes.subarray(0, length).toString("utf8"))
+  const record = exactRecord(parsed, ["schemaVersion", "sessionID", "status", "sequence", "projectionDigest"])
+  const sessionID = record ? requireSessionID(record.sessionID) : null
+  const status = record?.status === "deleted" || record?.status === "create-failed" ? record.status : null
+  const sequence = record && Number.isSafeInteger(record.sequence) && (record.sequence as number) >= 0
+    ? (record.sequence as number)
+    : null
+  const projectionDigest = record?.projectionDigest === null ||
+      (typeof record?.projectionDigest === "string" && digestPattern.test(record.projectionDigest))
+    ? (record.projectionDigest as `sha256:${string}` | null)
+    : undefined
+  if (
+    record?.schemaVersion !== 1 ||
+    !sessionID ||
+    !status ||
+    sequence === null ||
+    projectionDigest === undefined ||
+    sessionDirectoryName(sessionID) !== directoryName
+  ) {
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone is invalid")
+  }
+  return Object.freeze({ schemaVersion: 1, sessionID, status, sequence, projectionDigest })
+}
+
+function tombstoneName(directoryName: string) {
+  if (!sessionDirectoryPattern.test(directoryName)) {
+    throw new WorkSessionStoreError("state_unavailable", "The work-session tombstone name is invalid")
+  }
+  return `com.astra.work-session.tombstone.${directoryName}`
+}
+
+async function closePinnedSessionPath(binding: PinnedSessionPath) {
   binding.library.symbols.close(binding.databaseFD)
   binding.library.symbols.close(binding.directoryFD)
-  void binding.rootHandle.close().catch(() => undefined)
+  await binding.rootHandle.close().catch(() => undefined)
+  binding.library.close()
 }
 
 function identityOf(facts: Readonly<{ dev: number | bigint; ino: number | bigint }>): PathIdentity {
@@ -1302,10 +1601,21 @@ function openSessionLibrary() {
     throw new WorkSessionStoreError("state_unavailable", "Descriptor-relative session state requires macOS")
   }
   return dlopen("/usr/lib/libSystem.B.dylib", {
+    __error: { args: [], returns: "ptr" },
     close: { args: ["i32"], returns: "i32" },
+    fgetxattr: { args: ["i32", "ptr", "ptr", "usize", "u32", "i32"], returns: "i64" },
+    fremovexattr: { args: ["i32", "ptr", "i32"], returns: "i32" },
+    fsetxattr: { args: ["i32", "ptr", "ptr", "usize", "u32", "i32"], returns: "i32" },
+    fsync: { args: ["i32"], returns: "i32" },
+    ftruncate: { args: ["i32", "i64"], returns: "i32" },
     openat: { args: ["i32", "ptr", "i32", "i32"], returns: "i32" },
-    unlinkat: { args: ["i32", "ptr", "i32"], returns: "i32" },
   })
+}
+
+function lastErrno(library: ReturnType<typeof openSessionLibrary>) {
+  const address = library.symbols.__error()
+  if (!address) return -1
+  return Buffer.from(new Uint8Array(toArrayBuffer(address, 0, 4))).readInt32LE(0)
 }
 
 function cString(input: string) {
