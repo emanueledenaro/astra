@@ -29,6 +29,10 @@ import {
   type UntrustedProviderTurnAdapterRequest,
 } from "./provider-turn-operation-facts"
 import {
+  providerTransportFailureCode,
+  type ProviderTransportFailureCode,
+} from "./provider-turn-transport-failure"
+import {
   prepareOperationStateFiles,
   runWithCoordinatorLedger,
   runWithCoordinatorReceiptSpool,
@@ -325,8 +329,12 @@ export async function executeProviderTurn(
         const event: unknown = await dependencies.untrustedAdapter.execute(facts.adapterRequest, executionAuthority)
         observation = normalizeAdapterEvent(event, facts.adapterRequest)
       }
-    } catch {
-      observation = unknownAdapterObservation("adapter_failed_or_malformed")
+    } catch (cause) {
+      const failureCode = providerTransportFailureCode(cause)
+      observation = unknownAdapterObservation(
+        failureCode ? `provider_transport_${failureCode}` : "adapter_failed_or_malformed",
+        failureCode,
+      )
     }
     const endedAt = new Date(now()).toISOString()
 
@@ -509,7 +517,9 @@ function makeReceipt(
               http: observation.httpEvidence,
               providerFinish: observation.finishReason,
             })}`
-          : "EFFECT UNKNOWN — PROVIDER TURN REQUIRES RECONCILIATION",
+          : observation.reasonCode
+            ? `EFFECT UNKNOWN — PROVIDER TURN REQUIRES RECONCILIATION · ${observation.reasonCode.toUpperCase()}`
+            : "EFFECT UNKNOWN — PROVIDER TURN REQUIRES RECONCILIATION",
     },
   })
 }
@@ -767,7 +777,11 @@ type AdapterObservation =
       responseDigest: ContentDigest
       responseBytes: number
     }>
-  | Readonly<{ kind: "unknown"; reasonDigest: ContentDigest }>
+  | Readonly<{
+      kind: "unknown"
+      reasonCode: ProviderTransportFailureCode | null
+      reasonDigest: ContentDigest
+    }>
 
 function normalizeTrustedAdapterEvent(
   input: unknown,
@@ -966,8 +980,11 @@ function validateProviderTurnHttpResponseEvidence(input: unknown): ProviderTurnH
   }) as ProviderTurnHttpResponseEvidence
 }
 
-function unknownAdapterObservation(reason: string): AdapterObservation {
-  return { kind: "unknown", reasonDigest: digest(`astra-provider-turn:${reason}:v1`) }
+function unknownAdapterObservation(
+  reason: string,
+  reasonCode: ProviderTransportFailureCode | null = null,
+): AdapterObservation {
+  return { kind: "unknown", reasonCode, reasonDigest: digest(`astra-provider-turn:${reason}:v1`) }
 }
 
 function observedResponse(observation: AdapterObservation): ObservedProviderTurnResponse | null {

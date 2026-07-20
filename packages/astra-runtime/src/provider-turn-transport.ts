@@ -25,6 +25,11 @@ import {
   type ProviderTurnResolvedAddress,
 } from "./provider-turn-network-policy"
 import {
+  asProviderTransportFailure,
+  ProviderTransportFailure,
+  type ProviderTransportFailureCode,
+} from "./provider-turn-transport-failure"
+import {
   providerTurnMaximumRequestBytes,
   type ProviderTurnPreview,
   type UntrustedProviderTurnAdapterRequest,
@@ -204,27 +209,43 @@ function trustedObservedTransportAdapter(
     descriptor: trustedObservedProviderTurnAdapterDescriptor,
     async execute(adapterRequest, authority) {
       validateExecutionAuthority(adapterRequest, authority, now())
-      const wire = snapshotWireValues(source, await resolveWireValues())
+      const wire = await resolveWireValues()
+        .then((values) => snapshotWireValues(source, values))
+        .catch((cause) => {
+          throw asProviderTransportFailure(cause, "credential_material_rejected")
+        })
       assertRequestBinding(adapterRequest, wire)
-      const evidence =
-        adapterRequest.provider.transportPolicy === "https_only"
-          ? await resolveProviderNetwork(
-              adapterRequest.networkPolicy,
-              now,
-              resolver,
-              Date.parse(authority.transportDeadlineAt),
-            )
-          : loopbackEvidence(adapterRequest.networkPolicy, now())
+      const evidence = await Promise.resolve()
+        .then(() =>
+          adapterRequest.provider.transportPolicy === "https_only"
+            ? resolveProviderNetwork(
+                adapterRequest.networkPolicy,
+                now,
+                resolver,
+                Date.parse(authority.transportDeadlineAt),
+              )
+            : loopbackEvidence(adapterRequest.networkPolicy, now()),
+        )
+        .catch((cause) => {
+          throw asProviderTransportFailure(cause, "dns_resolution_failed")
+        })
       assertBeforeDeadline(authority, now())
-      const response =
-        adapterRequest.provider.transportPolicy === "https_only"
-          ? await executePinnedHttps(adapterRequest, wire, evidence, authority, now, testHooks)
-          : await executeLiteralLoopbackHttp(adapterRequest, wire, evidence, authority, now, testHooks)
-      const completion = parseResponse({
-        statusCode: response.evidence.statusCode,
-        headers: response.evidence.contentType ? [["content-type", response.evidence.contentType]] : [],
-        body: Uint8Array.from(response.body),
+      const response = await (adapterRequest.provider.transportPolicy === "https_only"
+        ? executePinnedHttps(adapterRequest, wire, evidence, authority, now, testHooks)
+        : executeLiteralLoopbackHttp(adapterRequest, wire, evidence, authority, now, testHooks)
+      ).catch((cause) => {
+        throw asProviderTransportFailure(cause, "tls_or_connection_failed")
       })
+      let completion: TrustedObservedProviderCompletion
+      try {
+        completion = parseResponse({
+          statusCode: response.evidence.statusCode,
+          headers: response.evidence.contentType ? [["content-type", response.evidence.contentType]] : [],
+          body: Uint8Array.from(response.body),
+        })
+      } catch (cause) {
+        throw asProviderTransportFailure(cause, "provider_response_rejected")
+      }
       return observedFinishEvent(adapterRequest, response, evidence, completion)
     },
   }
@@ -302,25 +323,25 @@ function executeRawHttpRequest(
     const chunks: Array<Buffer> = []
     let total = 0
     const maximumWireBytes = adapterRequest.wireRequest.maximumResponseBytes * 2 + maximumResponseHeaderBytes
-    const timeout = setTimeout(() => fail(), remainingDeadlineMilliseconds(authority, now()))
+    const timeout = setTimeout(() => fail("response_timeout"), remainingDeadlineMilliseconds(authority, now()))
     timeout.unref?.()
 
     const cleanup = () => {
       clearTimeout(timeout)
       socket?.destroy()
     }
-    const fail = () => {
+    const fail = (code: ProviderTransportFailureCode) => {
       if (settled) return
       settled = true
       cleanup()
-      reject(new Error("Provider transport request failed"))
+      reject(new ProviderTransportFailure(code))
     }
     const succeed = (response: TrustedProviderHttpResponse) => {
       if (settled) return
       try {
         assertBeforeDeadline(authority, now())
       } catch {
-        return fail()
+        return fail("response_timeout")
       }
       settled = true
       cleanup()
@@ -342,14 +363,14 @@ function executeRawHttpRequest(
           connected.setNoDelay(true)
           connected.write(makeRawRequest(adapterRequest, wire))
         } catch {
-          fail()
+          fail("authority_or_request_rejected")
         }
       })
       socket.on("data", (chunk: Buffer) => {
         if (settled) return
         try {
           assertBeforeDeadline(authority, now())
-          if (chunk.byteLength > maximumWireBytes - total) return fail()
+          if (chunk.byteLength > maximumWireBytes - total) return fail("response_limit_exceeded")
           chunks.push(Buffer.from(chunk))
           total += chunk.byteLength
           const response = tryParseCompleteRawResponse(
@@ -358,23 +379,23 @@ function executeRawHttpRequest(
           )
           if (response) succeed(response)
         } catch {
-          fail()
+          fail("response_framing_rejected")
         }
       })
-      socket.once("error", fail)
+      socket.once("error", () => fail("tls_or_connection_failed"))
       socket.once("end", () => {
         try {
           assertBeforeDeadline(authority, now())
           succeed(parseRawResponse(Buffer.concat(chunks, total), adapterRequest.wireRequest.maximumResponseBytes))
         } catch {
-          fail()
+          fail("connection_closed_before_complete_response")
         }
       })
       socket.once("close", () => {
-        if (!settled) fail()
+        if (!settled) fail("connection_closed_before_complete_response")
       })
     } catch {
-      fail()
+      fail("tls_or_connection_failed")
     }
   })
 }

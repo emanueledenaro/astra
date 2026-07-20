@@ -324,6 +324,7 @@ describe("trusted provider turn transport boundary", () => {
       }),
     ).toMatchObject({ state: "reconciliation_required", status: "effect_unknown" })
     expect(timeoutCalls).toBe(1)
+    expect(JSON.stringify(await durableEvents(timed))).toContain("RESPONSE_TIMEOUT")
   })
 
   test("rejects response events processed after the logical deadline", async () => {
