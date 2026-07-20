@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 Discord Community
-    url: https://discord.gg/opencode
-    about: For support, troubleshooting, how-to questions, and real-time discussion.
+  - name: Product questions and ideas
+    url: https://github.com/emanueledenaro/astra/discussions
+    about: Ask questions or discuss an idea before opening an implementation proposal.
+  - name: Private security report
+    url: https://github.com/emanueledenaro/astra/security/advisories/new
+    about: Report suspected vulnerabilities privately. Do not open a public issue.

@@ -1,19 +1,62 @@
-name: 🚀 Feature Request
-description: Suggest an idea, feature, or enhancement
-title: "[FEATURE]:"
-
+name: Feature request
+description: Propose a scoped Astra product improvement
+title: "[FEATURE]: "
+labels:
+  - enhancement
 body:
-  - type: checkboxes
-    id: verified
-    attributes:
-      label: Feature hasn't been suggested before.
-      options:
-        - label: I have verified this feature I'm about to request hasn't been suggested before.
-          required: true
-
   - type: textarea
+    id: problem
     attributes:
-      label: Describe the enhancement you want to request
-      description: What do you want to change or add? What are the benefits of implementing this? Try to be detailed so we can understand your request better :)
+      label: Problem
+      description: What developer problem or risk should Astra solve?
     validations:
       required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the user-visible result without prescribing unnecessary implementation details.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Product area
+      options:
+        - Workspace trust
+        - Operation state and evidence
+        - Git Control Plane
+        - Providers
+        - Skills, plugins, or MCP
+        - Terminal user experience
+        - No Workspace or System Mode
+        - Packaging or platform support
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: effects
+    attributes:
+      label: Effects and authority
+      description: Identify any file, process, network, credential, Git, persistence, or external-service effects.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Acceptance evidence
+      description: What observable evidence would prove that the feature works without overstating guarantees?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I searched existing Issues and Discussions for this proposal.
+          required: true
