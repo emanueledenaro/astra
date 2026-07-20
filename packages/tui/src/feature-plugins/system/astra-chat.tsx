@@ -856,19 +856,21 @@ function selectionsForProvider(
     ]
   }
   if (provider.providerID === "openai") {
+    const model = provider.models.find((candidate) => candidate.id === "gpt-5.4") ?? provider.models[0]
+    if (!model) return []
     const selections: ProviderTurnSelection[] = []
     if (provider.credentialProfiles.includes("openai-api-key")) {
       selections.push({
         providerID: "openai",
         credentialProfile: "openai-api-key",
-        modelID: provider.models[0].id,
+        modelID: model.id,
       })
     }
     if (provider.credentialProfiles.includes("openai-codex-oauth")) {
       selections.push({
         providerID: "openai",
         credentialProfile: "openai-codex-oauth",
-        modelID: provider.models[0].id,
+        modelID: model.id,
       })
     }
     return selections

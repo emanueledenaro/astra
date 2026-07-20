@@ -24,7 +24,28 @@ import { createTuiPluginApi } from "../../fixture/tui-plugin"
 import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
 
 test("offers explicit certified OpenAI API-key and Codex OAuth credential choices", () => {
-  const choices = providerSelectionChoices(catalogResult.catalog)
+  const choices = providerSelectionChoices({
+    ...catalogResult.catalog,
+    providers: catalogResult.catalog.providers.map((provider) =>
+      provider.providerID === "openai"
+        ? {
+            ...provider,
+            models: [
+              {
+                id: "gpt-5.3-codex-spark",
+                name: "GPT-5.3 Codex Spark",
+                limits: { context: 128_000, output: 32_000 },
+              },
+              {
+                id: "gpt-5.4",
+                name: "GPT-5.4",
+                limits: { context: 1_050_000, output: 128_000 },
+              },
+            ],
+          }
+        : provider,
+    ),
+  })
 
   expect(choices.map((choice) => choice.title)).toEqual([
     "Anthropic · API key",
@@ -40,12 +61,12 @@ test("offers explicit certified OpenAI API-key and Codex OAuth credential choice
     {
       providerID: "openai",
       credentialProfile: "openai-api-key",
-      modelID: "gpt-5.2-codex",
+      modelID: "gpt-5.4",
     },
     {
       providerID: "openai",
       credentialProfile: "openai-codex-oauth",
-      modelID: "gpt-5.2-codex",
+      modelID: "gpt-5.4",
     },
   ])
   expect(choices.map((choice) => choice.value)).toEqual([

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto"
 import { describe, expect, test } from "bun:test"
+import { parseProviderCatalogResult } from "@astra/domain/provider-control"
 import type { ProviderCatalogResult } from "../src/provider-catalog"
 import { OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA } from "../src/provider-catalog-embedded"
 import { readAstraProviderCatalog } from "../src/provider-catalog"
@@ -70,11 +71,34 @@ describe("Astra provider catalog", () => {
     if (!result.ok) return
     const provider = result.catalog.providers.find((candidate) => candidate.providerID === "openai")
     expect(provider?.models.map((model) => model.id)).toEqual([
+      "gpt-5.3-codex-spark",
       "gpt-5.4",
       "gpt-5.4-mini",
-      "gpt-5.3-codex-spark",
       "gpt-5.5",
     ])
+    expect(
+      parseProviderCatalogResult({
+        schemaVersion: 1,
+        requestId: "4b531a1e-91d9-48ef-a6ed-5b9077f05b2b",
+        status: "available",
+        catalog: {
+          providers: result.catalog.providers.map((candidate) => ({
+            providerID: candidate.providerID,
+            providerName: candidate.providerName,
+            assurance: candidate.assurance,
+            dispatchable: candidate.dispatchable,
+            credentialProfiles: candidate.credentialProfiles,
+            models: candidate.models,
+          })),
+        },
+        transcript: {
+          turns: [],
+          historyDigest: `sha256:${"0".repeat(64)}`,
+          totalBytes: 0,
+          retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
+        },
+      })?.status,
+    ).toBe("available")
   })
 
   test("fails closed when a build has no embedded snapshot or metadata", async () => {
