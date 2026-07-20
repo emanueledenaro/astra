@@ -299,6 +299,7 @@ test("keeps every project creation renderer import graph inert", async () => {
     "solid-js",
     "@astra/domain/project-creation-ui",
     "../component/lynx-model",
+    "./cli-renderer",
   ])
   expect(source).not.toMatch(/process\.|Bun\.|node:|@astra\/runtime|ledger|fetch\(|spawn\(|cwd\(|env\b/)
   expect(source).not.toContain("withAstraProjectCreationProgress")

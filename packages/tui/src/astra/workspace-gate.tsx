@@ -1,8 +1,9 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes, createCliRenderer } from "@opentui/core"
+import { TextAttributes } from "@opentui/core"
 import { render, useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createMemo } from "solid-js"
 import { lynxFrame } from "../component/lynx-model"
+import { createAstraCliRenderer } from "./cli-renderer"
 import type { AstraWorkspaceGateView, AstraWorkspaceMode } from "./workspace-gate-contract"
 
 export type { AstraWorkspaceGateView, AstraWorkspaceMode } from "./workspace-gate-contract"
@@ -55,7 +56,7 @@ export async function withAstraWorkspaceProgress<T>(
 }
 
 function createWorkspaceGateRenderer() {
-  return createCliRenderer({
+  return createAstraCliRenderer({
     targetFps: 30,
     exitOnCtrlC: false,
     useMouse: false,

@@ -95,7 +95,13 @@ test("keeps the System Mode import graph inert", async () => {
   const source = await readFile(new URL("../../src/astra/system-mode.tsx", import.meta.url), "utf8")
   const imports = [...source.matchAll(/from\s+["']([^"']+)["']/g)].map((match) => match[1])
 
-  expect(imports).toEqual(["@opentui/core", "@opentui/solid", "solid-js", "@astra/domain/system-control"])
+  expect(imports).toEqual([
+    "@opentui/core",
+    "@opentui/solid",
+    "solid-js",
+    "@astra/domain/system-control",
+    "./cli-renderer",
+  ])
   expect(source).not.toMatch(/process\.|Bun\.|node:|\.\/workspace|fetch\(|spawn\(|cwd\(|env\b/)
 })
 

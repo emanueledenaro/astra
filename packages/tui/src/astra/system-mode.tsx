@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes, createCliRenderer, type KeyEvent } from "@opentui/core"
+import { TextAttributes, type KeyEvent } from "@opentui/core"
 import { render, useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createMemo, type JSX } from "solid-js"
 import {
@@ -7,6 +7,7 @@ import {
   type AstraSystemDecision,
   type AstraSystemSnapshot,
 } from "@astra/domain/system-control"
+import { createAstraCliRenderer } from "./cli-renderer"
 
 const palette = {
   background: "#07100f",
@@ -46,7 +47,7 @@ export function createAstraSystemModeEntry(snapshot: unknown): AstraSystemModeEn
 export async function runAstraSystemMode(snapshot: unknown = emptySnapshot): Promise<AstraSystemDecision> {
   const entry = createAstraSystemModeEntry(snapshot)
   if (!entry.ok) return { kind: "exit" }
-  const renderer = await createCliRenderer({
+  const renderer = await createAstraCliRenderer({
     targetFps: 30,
     exitOnCtrlC: false,
     useMouse: false,

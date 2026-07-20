@@ -109,9 +109,13 @@ if (!parsed.ok) {
   process.exitCode = parsed.help ? 0 : 1
 } else {
   if (parsed.arguments.experience === "no-workspace") {
-    process.exitCode = await runNoWorkspaceMode()
+    process.exitCode =
+      process.env.ASTRA_BROWSER_RUNTIME === "1" ? await runNoWorkspaceMode() : await relaunchProductWithBrowserRuntime([])
   } else if (parsed.arguments.experience === "system") {
-    process.exitCode = await runSystemMode()
+    process.exitCode =
+      process.env.ASTRA_BROWSER_RUNTIME === "1"
+        ? await runSystemMode()
+        : await relaunchProductWithBrowserRuntime(["system"])
   } else if (parsed.arguments.experience === "product") {
     process.exitCode =
       process.env.ASTRA_BROWSER_RUNTIME === "1"
@@ -211,6 +215,9 @@ async function relaunchProductWithBrowserRuntime(arguments_: ReadonlyArray<strin
   const child = Bun.spawn(
     [
       process.execPath,
+      "--config=/dev/null",
+      "--no-env-file",
+      "--no-install",
       "--conditions=browser",
       fileURLToPath(import.meta.url),
       ...arguments_.filter((value) => value !== "--"),

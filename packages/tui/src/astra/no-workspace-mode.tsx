@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes, createCliRenderer } from "@opentui/core"
+import { TextAttributes } from "@opentui/core"
 import { render, useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createMemo, createSignal } from "solid-js"
 import {
@@ -8,6 +8,7 @@ import {
   type AstraLaunchpadSnapshot,
 } from "@astra/domain/launchpad"
 import { lynxFrame } from "../component/lynx-model"
+import { createAstraCliRenderer } from "./cli-renderer"
 
 const palette = {
   background: "#07100f",
@@ -38,7 +39,7 @@ export function createAstraNoWorkspaceModeEntry(snapshot: unknown): AstraNoWorks
 export async function runAstraNoWorkspaceMode(snapshot: unknown = emptySnapshot): Promise<AstraLaunchpadDecision> {
   const entry = createAstraNoWorkspaceModeEntry(snapshot)
   if (!entry.ok) return { kind: "exit" }
-  const renderer = await createCliRenderer({
+  const renderer = await createAstraCliRenderer({
     targetFps: 30,
     exitOnCtrlC: false,
     useMouse: false,

@@ -1,5 +1,5 @@
 /** @jsxImportSource @opentui/solid */
-import { TextAttributes, createCliRenderer } from "@opentui/core"
+import { TextAttributes } from "@opentui/core"
 import { render, useKeyboard, useTerminalDimensions } from "@opentui/solid"
 import { For, Show, createMemo, createSignal, type JSX } from "solid-js"
 import {
@@ -17,6 +17,7 @@ import {
   type AstraProjectCreationReviewDecision,
 } from "@astra/domain/project-creation-ui"
 import { lynxFrame } from "../component/lynx-model"
+import { createAstraCliRenderer } from "./cli-renderer"
 
 const palette = {
   background: "#07100f",
@@ -348,7 +349,7 @@ async function runDecisionMode<Value>(
 }
 
 function createProjectCreationRenderer() {
-  return createCliRenderer({
+  return createAstraCliRenderer({
     targetFps: 30,
     exitOnCtrlC: false,
     useMouse: false,

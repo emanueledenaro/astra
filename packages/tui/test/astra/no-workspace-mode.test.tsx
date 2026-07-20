@@ -139,6 +139,7 @@ test("keeps the Launchpad import graph inert", async () => {
     "solid-js",
     "@astra/domain/launchpad",
     "../component/lynx-model",
+    "./cli-renderer",
   ])
   expect(source).not.toMatch(/process\.|Bun\.|node:|\.\/workspace|fetch\(|spawn\(|cwd\(|env\b/)
 })

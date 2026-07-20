@@ -11,6 +11,7 @@ import { ExitProvider, useExit } from "./context/exit"
 import { EpilogueProvider } from "./context/epilogue"
 import * as Selection from "./util/selection"
 import { createCliRenderer, MouseButton } from "@opentui/core"
+import { prepareAstraTerminalRenderer } from "./astra/cli-renderer"
 import { RouteProvider, useRoute } from "./context/route"
 import {
   Switch,
@@ -204,8 +205,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
     Effect.gen(function* () {
       const renderer = yield* Effect.acquireRelease(
         Effect.tryPromise({
-          try: () =>
-            createCliRenderer({
+          try: async () => {
+            const renderer = await createCliRenderer({
               externalOutputMode: "passthrough",
               targetFps: 60,
               gatherStats: false,
@@ -217,7 +218,9 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
               consoleOptions: {
                 keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
               },
-            }),
+            })
+            return astraAuthority ? prepareAstraTerminalRenderer(renderer) : renderer
+          },
           catch: (error) => (error instanceof Error ? error : new Error(String(error))),
         }),
         (renderer) =>
