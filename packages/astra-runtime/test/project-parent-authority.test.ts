@@ -6,6 +6,10 @@ import {
   captureProjectParentAuthority,
   revalidateProjectParentAuthority,
 } from "../src/project-parent-authority"
+import {
+  captureProjectParentAuthorityInternal,
+  revalidateProjectParentAuthorityInternal,
+} from "../src/project-parent-authority-internal"
 
 const cleanup: Array<() => Promise<void>> = []
 
@@ -14,6 +18,11 @@ afterAll(async () => {
 })
 
 describe("project-parent authority capture", () => {
+  test("keeps filesystem callbacks outside the public API", () => {
+    expect(captureProjectParentAuthority.length).toBe(2)
+    expect(revalidateProjectParentAuthority.length).toBe(1)
+  })
+
   test("captures a canonical existing parent and absent direct child without effects", async () => {
     const parent = await temporaryDirectory("astra-project-parent-")
     const before = await lstatNames(parent)
@@ -86,7 +95,12 @@ describe("project-parent authority capture", () => {
     const replacement = replacementAfterFinalTargetObservation(parent, "alpha")
 
     expect(
-      await captureProjectParentAuthority(parent, "alpha", "2026-07-20T10:15:30.000Z", replacement.filesystem),
+      await captureProjectParentAuthorityInternal(
+        parent,
+        "alpha",
+        "2026-07-20T10:15:30.000Z",
+        replacement.filesystem,
+      ),
     ).toEqual({
       status: "blocked",
       reason: "parent_identity_changed",
@@ -112,7 +126,7 @@ describe("project-parent authority capture", () => {
     if (result.status !== "complete") throw new Error("Expected complete capture")
     const replacement = replacementAfterFinalTargetObservation(parent, "alpha")
 
-    expect(await revalidateProjectParentAuthority(result.authority, replacement.filesystem)).toEqual({
+    expect(await revalidateProjectParentAuthorityInternal(result.authority, replacement.filesystem)).toEqual({
       status: "blocked",
       reason: "parent_identity_changed",
     })
@@ -175,4 +189,12 @@ function errorCode(input: unknown) {
   if (typeof input !== "object" || input === null) return null
   const descriptor = Object.getOwnPropertyDescriptor(input, "code")
   return descriptor && "value" in descriptor ? descriptor.value : null
+}
+
+if (false) {
+  const inaccessibleFilesystem = { lstat, realpath }
+  // @ts-expect-error The public capture API never accepts filesystem callbacks.
+  void captureProjectParentAuthority("/private/tmp", "alpha", "2026-07-20T10:15:30.000Z", inaccessibleFilesystem)
+  // @ts-expect-error The public revalidation API never accepts filesystem callbacks.
+  void revalidateProjectParentAuthority(null, inaccessibleFilesystem)
 }
