@@ -292,6 +292,7 @@ test("keeps the consented conversation transcript across turns and across a cata
       (frame) => frame.includes("First observed answer") && frame.includes("Second observed answer"),
     )
     expect(completed).toContain("COMPLETED — RESPONSE OBSERVED — NOT VERIFIED")
+    expect(occurrences(completed, "ASTRA · STOP · IN CONVERSATION · NOT VERIFIED")).toBe(2)
     expect(completed).not.toContain("a approve d reject")
     expect(app.hasCommand("astra.chat.approve")).toBeFalse()
     expect(app.hasCommand("astra.chat.reject")).toBeFalse()
@@ -300,6 +301,7 @@ test("keeps the consented conversation transcript across turns and across a cata
     const reloaded = await app.render.waitForFrame((frame) => frame.includes("READY · NO REQUEST · NO EFFECT"))
     expect(reloaded).toContain("First observed answer")
     expect(reloaded).toContain("Second observed answer")
+    expect(occurrences(reloaded, "ASTRA · STOP · IN CONVERSATION · NOT VERIFIED")).toBe(2)
   } finally {
     app.render.renderer.destroy()
   }
@@ -375,6 +377,7 @@ test("restores the durable transcript and keeps compatible unverified providers 
     )
     expect(frame).toContain("What did we decide?")
     expect(frame).toContain("PARENT-OWNED DURABLE HISTORY · VERIFIED ON LOAD")
+    expect(lineWith(frame, "ASTRA · STOP · IN CONVERSATION")).toContain("NOT VERIFIED")
     expect(prepareCalls).toBe(0)
   } finally {
     app.render.renderer.destroy()
@@ -494,6 +497,14 @@ async function waitUntil(condition: () => boolean) {
     await Bun.sleep(5)
   }
   throw new Error("Timed out waiting for TUI state")
+}
+
+function lineWith(frame: string, value: string) {
+  return frame.split("\n").find((line) => line.includes(value)) ?? ""
+}
+
+function occurrences(value: string, expected: string) {
+  return value.split(expected).length - 1
 }
 
 const requestId = "10000000-0000-4000-8000-000000000001"

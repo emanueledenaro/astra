@@ -278,6 +278,91 @@ test("keeps the provider preview mounted in the compact control alternate", asyn
   }
 })
 
+test("registers compact provider decisions only while the complete preview is visible", async () => {
+  const providerClient = {
+    catalog: () => Promise.resolve(catalogResult),
+    prepare: () =>
+      Promise.resolve({
+        schemaVersion: 1,
+        requestId: "10000000-0000-4000-8000-000000000001",
+        status: "prepared",
+        preview: providerPreview,
+      } as const),
+    decide: () => Promise.reject(new Error("No provider decision expected")),
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderCockpit({
+    width: 80,
+    height: 24,
+    projection: workingProjection(),
+    providerClient,
+    prompt: "Show all provider authority before consent",
+  })
+  try {
+    await app.render.waitForFrame((value) => value.includes("CONVERSATION"))
+    app.dispatch("astra.chat.compose")
+    const decisionFrame = await app.render.waitForFrame(
+      () => app.activeBindingCount("astra.chat.approve") === 1,
+    )
+    expect(decisionFrame).toContain("PROVIDER OPERATION")
+    expect(decisionFrame).not.toContain("CONVERSATION")
+    expect(decisionFrame).toContain("https://api.anthropic.com/v1/messages")
+    expect(decisionFrame).toContain("256 bytes leave host")
+    expect(decisionFrame).toContain("2 prior turns · 128 bytes")
+    expect(decisionFrame).toContain("A APPROVE · D REJECT")
+
+    app.dispatch("astra.control.toggle")
+    await app.render.renderOnce()
+    const stillVisible = app.render.captureCharFrame()
+    expect(stillVisible).toContain("PROVIDER OPERATION")
+    expect(stillVisible).toContain("https://api.anthropic.com/v1/messages")
+    expect(app.activeBindingCount("astra.chat.approve")).toBe(1)
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
+test("keeps restored provider assurance visible inside the embedded cockpit", async () => {
+  const restoredText = "Restored provider response"
+  const providerClient = {
+    catalog: () =>
+      Promise.resolve({
+        ...catalogResult,
+        transcript: {
+          turns: [
+            {
+              providerID: "anthropic",
+              credentialProfile: "anthropic-api-key",
+              modelID: "claude-sonnet",
+              userText: "What changed?",
+              assistantText: restoredText,
+              finishReason: "stop",
+              assurance: "observed_not_verified",
+            },
+          ],
+          historyDigest: digest,
+          totalBytes: Buffer.byteLength("What changed?") + Buffer.byteLength(restoredText),
+          retention: "PARENT-OWNED DURABLE — VERIFIED ON LOAD",
+        },
+      } as const),
+    prepare: () => Promise.reject(new Error("No provider turn expected")),
+    decide: () => Promise.reject(new Error("No provider decision expected")),
+    dispose() {},
+  } satisfies AstraProviderClient
+  const app = await renderCockpit({
+    width: 140,
+    height: 34,
+    projection: workingProjection(),
+    providerClient,
+  })
+  try {
+    const restored = await app.render.waitForFrame((value) => value.includes(restoredText))
+    expect(lineWith(restored, "ASTRA · STOP · IN CONVERSATION")).toContain("NOT VERIFIED")
+  } finally {
+    app.render.renderer.destroy()
+  }
+})
+
 test("shows reconciliation and exact failed/lost worker state without a success claim", async () => {
   const app = await renderCockpit({
     width: 140,

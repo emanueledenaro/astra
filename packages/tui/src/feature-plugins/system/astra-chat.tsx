@@ -26,6 +26,7 @@ type ChatTurn = Readonly<{
   userText: string
   assistantText: string
   finishReason: string
+  assurance: "observed_not_verified"
 }>
 
 type ChatContext = Readonly<{
@@ -97,6 +98,7 @@ export function AstraChatView(props: {
   embedded?: boolean
   bindingsSuspended?: boolean
   workDecisionHasFocus?: boolean
+  providerDecisionPreviewVisible?: boolean
   onActivity?: (activity: AstraChatActivity) => void
 }) {
   const dimensions = useTerminalDimensions()
@@ -276,6 +278,7 @@ export function AstraChatView(props: {
                 userText: current.userText,
                 assistantText: result.response.assistantText,
                 finishReason: result.response.finishReason,
+                assurance: "observed_not_verified" as const,
               },
             ].slice(-maximumVisibleHistoryTurns),
           )
@@ -567,7 +570,7 @@ export function AstraChatView(props: {
             <text fg={props.api.theme.current.text}>{turn.userText}</text>
             <text
               fg={props.api.theme.current.textMuted}
-            >{`ASTRA · ${turn.finishReason.toUpperCase()} · IN CONVERSATION`}</text>
+            >{`ASTRA · ${turn.finishReason.toUpperCase()} · IN CONVERSATION · ${turn.assurance.replace("observed_", "").replaceAll("_", " ").toUpperCase()}`}</text>
             <text fg={props.api.theme.current.text}>{turn.assistantText}</text>
           </box>
         )}
@@ -690,9 +693,18 @@ function decisionInFlight(state: ChatState) {
 
 function providerDecisionEligible(
   state: ChatState,
-  props: Readonly<{ bindingsSuspended?: boolean; workDecisionHasFocus?: boolean }>,
+  props: Readonly<{
+    bindingsSuspended?: boolean
+    workDecisionHasFocus?: boolean
+    providerDecisionPreviewVisible?: boolean
+  }>,
 ) {
-  return state.status === "prepared" && props.bindingsSuspended !== true && props.workDecisionHasFocus !== true
+  return (
+    state.status === "prepared" &&
+    props.bindingsSuspended !== true &&
+    props.workDecisionHasFocus !== true &&
+    props.providerDecisionPreviewVisible !== false
+  )
 }
 
 function modelOf(state: ChatState) {
@@ -926,6 +938,7 @@ function transcriptTurns(transcript: ProviderConversationTranscript): ReadonlyAr
     userText: turn.userText,
     assistantText: turn.assistantText,
     finishReason: turn.finishReason,
+    assurance: turn.assurance,
   }))
 }
 

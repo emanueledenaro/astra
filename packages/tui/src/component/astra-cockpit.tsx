@@ -3,7 +3,7 @@
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { useTerminalDimensions } from "@opentui/solid"
-import { createMemo, createSignal, onCleanup, onMount, Show } from "solid-js"
+import { createEffect, createMemo, createSignal, onCleanup, onMount, Show } from "solid-js"
 import { createAstraProviderClient, type AstraProviderClient } from "../astra/provider-client"
 import {
   createAstraWorkSessionClient,
@@ -46,6 +46,7 @@ export function AstraCockpit(props: {
     reason: "transport_failed",
   })
   const [compactControl, setCompactControl] = createSignal(false)
+  const [presentedProviderOperationID, setPresentedProviderOperationID] = createSignal<string>()
   const [reviewOpen, setReviewOpen] = createSignal(false)
   const sideBySide = createMemo(
     () =>
@@ -82,6 +83,30 @@ export function AstraCockpit(props: {
     setReviewOpen(true)
   }
 
+  createEffect(() => {
+    const current = activity()
+    if (!current.decisionRequired || !current.operationID) {
+      setPresentedProviderOperationID(undefined)
+      return
+    }
+    if (!sideBySide() && !compactControl()) {
+      setCompactControl(true)
+      setPresentedProviderOperationID(undefined)
+      return
+    }
+    const operationID = current.operationID
+    const timer = setTimeout(() => {
+      if (
+        activity().decisionRequired &&
+        activity().operationID === operationID &&
+        (sideBySide() || compactControl())
+      ) {
+        setPresentedProviderOperationID(operationID)
+      }
+    }, 0)
+    onCleanup(() => clearTimeout(timer))
+  })
+
   onMount(() => {
     let active = true
     void workSessionClient
@@ -113,7 +138,9 @@ export function AstraCockpit(props: {
         title: "Toggle Astra Control Rail",
         category: "Astra",
         run: () => {
-          if (!sideBySide() && !reviewOpen()) setCompactControl((value) => !value)
+          if (!sideBySide() && !reviewOpen() && !activity().decisionRequired) {
+            setCompactControl((value) => !value)
+          }
         },
       },
       ...(pending().length > 0
@@ -166,6 +193,11 @@ export function AstraCockpit(props: {
               client={providerClient}
               bindingsSuspended={reviewOpen()}
               workDecisionHasFocus={pending().length > 0}
+              providerDecisionPreviewVisible={
+                (sideBySide() || compactControl()) &&
+                activity().operationID !== undefined &&
+                presentedProviderOperationID() === activity().operationID
+              }
               onActivity={setActivity}
             />
           </box>
