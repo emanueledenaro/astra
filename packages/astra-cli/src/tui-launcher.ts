@@ -32,6 +32,7 @@ import {
 import { createAstraMcpActivationControl } from "./mcp-activation-control"
 import { createAstraMcpActivationAdapter } from "./mcp-activation-adapter"
 import { connectParentAnthropicCredential } from "./provider-connect"
+import { createAstraWorkSessionControl } from "./work-session-control"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -137,6 +138,22 @@ export function astraChildEnvironment(
 
 export async function launchAstraTui(session: OpenedWorkspace) {
   const authority = await createAstraSessionAuthorityFile(session)
+  const durableSessionID = randomUUID()
+  try {
+    const { createDurableWorkSession } = await import("@astra/runtime/work-session-store")
+    await createDurableWorkSession({
+      sessionID: durableSessionID,
+      workspaceRoot: authority.authority.workspace.root,
+      workspaceIdentity: authority.authority.workspace.identity,
+      objective: null,
+      intent: { summary: "Workspace opened", next: "Awaiting an objective" },
+      observedAt: new Date().toISOString(),
+      actor: { kind: "system", actorID: "astra-parent" },
+    })
+  } catch (error) {
+    await rm(authority.directory, { recursive: true, force: true })
+    throw error
+  }
   const gitAuthority = createAstraGitSessionAuthority(session)
   let control: AstraTuiControlServer | undefined
   let provider: AstraProviderControlServer | undefined
@@ -203,6 +220,7 @@ export async function launchAstraTui(session: OpenedWorkspace) {
         gitAuthority,
       ),
       operationViewControl: createAstraOperationViewControl({ ledgerFilename: operationLedgerPath() }),
+      workSessionControl: createAstraWorkSessionControl(durableSessionID),
       gitUnstageControl: createAstraGitUnstageControl(
         session,
         {

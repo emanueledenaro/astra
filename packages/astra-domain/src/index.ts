@@ -23,6 +23,7 @@ export * as ProjectCreationControl from "./project-creation-control"
 export * as ProjectCreationUi from "./project-creation-ui"
 export * as SessionAuthority from "./session-authority"
 export * as WorkSession from "./work-session"
+export * as WorkSessionControl from "./work-session-control"
 
 export {
   createAstraWorkSessionEvent,

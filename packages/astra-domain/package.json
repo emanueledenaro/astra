@@ -24,6 +24,7 @@
     "./launchpad": "./src/launchpad.ts",
     "./system-control": "./src/system-control.ts",
     "./work-session": "./src/work-session.ts",
+    "./work-session-control": "./src/work-session-control.ts",
     "./governed-workspace-search": "./src/governed-workspace-search.ts",
     "./governed-workspace-search-control": "./src/governed-workspace-search-control.ts",
     "./host-command-control": "./src/host-command-control.ts",

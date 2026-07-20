@@ -85,6 +85,13 @@ import {
 import type { AstraOperationViewControl } from "./operation-view-control"
 import { createAstraOperationViewControlHandler } from "./operation-view-control-handler"
 import { serveAstraOperationViewControlRequest } from "./operation-view-control-server-hook"
+import {
+  parseAstraWorkSessionControlRequest,
+  type AstraWorkSessionControlRequest,
+} from "@astra/domain/work-session-control"
+import type { AstraWorkSessionControl } from "./work-session-control"
+import { createAstraWorkSessionControlHandler } from "./work-session-control-handler"
+import { serveAstraWorkSessionControlRequest } from "./work-session-control-server-hook"
 
 const requestLimitBytes = 32 * 1_024
 const maximumRequestsPerSession = 1_024
@@ -120,6 +127,7 @@ type ControlRequest =
   | ExtensionInventoryControlRequest
   | McpActivationControlRequest
   | OperationViewControlRequest
+  | AstraWorkSessionControlRequest
 
 export type AstraTuiControlServer = Readonly<{
   socketPath: string
@@ -142,6 +150,7 @@ export type AstraTuiControlServerInput = Readonly<{
   extensionInventoryControl?: AstraExtensionInventoryControl
   mcpActivationControl?: AstraMcpActivationControl
   operationViewControl?: AstraOperationViewControl
+  workSessionControl?: AstraWorkSessionControl
 }>
 
 export type AstraTuiControlServerDependencies = Readonly<{
@@ -225,6 +234,13 @@ export async function startAstraTuiControlServer(
         token,
         control: input.operationViewControl,
         timeoutMs: dependencies.operationViewTimeoutMs ?? defaultOperationViewTimeoutMs,
+      })
+    : undefined
+  const workSessionHandler = input.workSessionControl
+    ? createAstraWorkSessionControlHandler({
+        sessionID: input.sessionID,
+        token,
+        control: input.workSessionControl,
       })
     : undefined
   let activeRequestID: string | undefined
@@ -313,6 +329,15 @@ export async function startAstraTuiControlServer(
           }
           socket.setTimeout(0)
           await serveAstraOperationViewControlRequest(socket, request, operationViewHandler)
+          return
+        }
+        if (isWorkSessionRequest(request)) {
+          if (!workSessionHandler) {
+            socket.end()
+            return
+          }
+          socket.setTimeout(0)
+          await serveAstraWorkSessionControlRequest(socket, request, workSessionHandler)
           return
         }
         if (!authorized(request, input.sessionID, token)) {
@@ -465,6 +490,8 @@ function parseRequest(input: string): ControlRequest | null {
     if (mcpActivation.ok) return mcpActivation.value
     const operationView = parseOperationViewControlRequest(value)
     if (operationView.ok) return operationView.value
+    const workSession = parseAstraWorkSessionControlRequest(value)
+    if (workSession.ok) return workSession.value
     const gitUnstage = parseGitUnstageControlRequest(value)
     if (gitUnstage.ok) return gitUnstage.value
     const prepare = parseControlledWritePrepareRequest(value)
@@ -545,6 +572,10 @@ function isOperationViewRequest(request: ControlRequest): request is OperationVi
     request.method === "operation-view.detail" ||
     request.method === "operation-view.recovery"
   )
+}
+
+function isWorkSessionRequest(request: ControlRequest): request is AstraWorkSessionControlRequest {
+  return request.method.startsWith("work-session.")
 }
 
 function isSkillRequest(request: ControlRequest): request is SkillControlRequest {
@@ -1104,6 +1135,9 @@ function encodeBlockedTerminal(request: ControlRequest, reason: string) {
   }
   if (isOperationViewRequest(request)) {
     throw new Error("Operation view requests are owned by their dedicated handler")
+  }
+  if (isWorkSessionRequest(request)) {
+    throw new Error("Work-session requests are owned by their dedicated handler")
   }
   if (request.method === "git.inspect") return encodeTerminal(request.requestId, blocked(mapControlBlockReason(reason)))
   if (isSkillRequest(request)) return encodeSkillTerminal(request.requestId, blockedSkillResult(request, reason))
