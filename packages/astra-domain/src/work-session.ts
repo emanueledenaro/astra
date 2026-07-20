@@ -248,8 +248,16 @@ const agentTransitions = new Set([
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const digestPattern = /^sha256:[0-9a-f]{64}$/u
 const maximumAgents = 64
+const candidatePatchEvidencePrefix = "candidate-patch:"
+const maximumCandidatePatchID = 256
 const maximumDecisions = 64
 const maximumEvidence = 128
+const maximumEvidenceLabel = maximumCandidatePatchID + candidatePatchEvidencePrefix.length
+
+/** Stable parent-owned binding between a candidate ID and its content digest evidence. */
+export function candidatePatchEvidenceLabel(candidatePatchID: string) {
+  return `${candidatePatchEvidencePrefix}${candidatePatchID}`
+}
 
 export function createAstraWorkSessionEvent(input: Readonly<{
   sessionID: string
@@ -422,7 +430,7 @@ export function parseAstraWorkSessionProjection(
   const agents = parseAgents(record.agents)
   const decisions = parseDecisions(record.decisions)
   const evidence = parseEvidenceArray(record.evidence)
-  const candidatePatchID = nullableID(record.candidatePatchID, 256)
+  const candidatePatchID = nullableID(record.candidatePatchID, maximumCandidatePatchID)
   const reconciliationPending = typeof record.reconciliationPending === "boolean" ? record.reconciliationPending : null
   const updatedAt = canonicalTimestamp(record.updatedAt)
   if (
@@ -444,6 +452,13 @@ export function parseAstraWorkSessionProjection(
     !updatedAt
   ) {
     return rejected("invalid_projection")
+  }
+  if (candidatePatchID) {
+    const candidateEvidence = candidateEvidenceFor(evidence, candidatePatchID)
+    const boundEvidence = candidateEvidence[0]
+    if (candidateEvidence.length !== 1 || !boundEvidence || !isCandidatePatchEvidence(candidatePatchID, boundEvidence)) {
+      return rejected("invalid_projection")
+    }
   }
   const authority = {
     schemaVersion: 1,
@@ -596,6 +611,7 @@ function applyEvent(
     if (
       previous.reconciliationPending ||
       (previous.phase !== "working" && previous.phase !== "checking") ||
+      !isCandidatePatchEvidence(event.payload.candidatePatchID, event.payload.evidence) ||
       hasEvidence(previous, event.payload.evidence)
     ) {
       return rejected("illegal_transition")
@@ -757,9 +773,11 @@ function parseDraft(input: unknown): AstraWorkSessionEventDraft | null {
   }
   if (broad.type === "candidate-patch.recorded") {
     const payload = exact(broad.payload, ["candidatePatchID", "evidence"])
-    const candidatePatchID = payload ? safeID(payload.candidatePatchID, 256) : null
+    const candidatePatchID = payload ? safeID(payload.candidatePatchID, maximumCandidatePatchID) : null
     const evidence = payload ? parseEvidence(payload.evidence) : null
-    return candidatePatchID && evidence ? { type: broad.type, payload: { candidatePatchID, evidence } } : null
+    return candidatePatchID && evidence && isCandidatePatchEvidence(candidatePatchID, evidence)
+      ? { type: broad.type, payload: { candidatePatchID, evidence } }
+      : null
   }
   if (broad.type === "effect.ambiguous") {
     const payload = exact(broad.payload, ["operationID", "summary"])
@@ -887,7 +905,7 @@ function parseEvidenceArray(input: unknown) {
 function parseEvidence(input: unknown): AstraWorkSessionEvidence | null {
   const record = exact(input, ["evidenceID", "kind", "label", "value", "assurance"])
   const evidenceID = record ? safeID(record.evidenceID, 128) : null
-  const label = record ? safeText(record.label, 256) : null
+  const label = record ? safeText(record.label, maximumEvidenceLabel) : null
   const value = record ? safeText(record.value, 4_096) : null
   const assurance = record ? safeText(record.assurance, 512) : null
   if (
@@ -901,6 +919,19 @@ function parseEvidence(input: unknown): AstraWorkSessionEvidence | null {
     return null
   }
   return { evidenceID, kind: record.kind, label, value, assurance }
+}
+
+function candidateEvidenceFor(evidence: ReadonlyArray<AstraWorkSessionEvidence>, candidatePatchID: string) {
+  const label = candidatePatchEvidenceLabel(candidatePatchID)
+  return evidence.filter((item) => item.kind === "receipt" && item.label === label)
+}
+
+function isCandidatePatchEvidence(candidatePatchID: string, evidence: AstraWorkSessionEvidence) {
+  return (
+    evidence.kind === "receipt" &&
+    evidence.label === candidatePatchEvidenceLabel(candidatePatchID) &&
+    digestValue(evidence.value) !== null
+  )
 }
 
 function parseIntent(input: unknown) {

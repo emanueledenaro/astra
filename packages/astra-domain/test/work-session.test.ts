@@ -140,7 +140,7 @@ describe("Astra work-session domain", () => {
       type: "candidate-patch.recorded",
       payload: {
         candidatePatchID: "patch-01",
-        evidence: evidence("evidence-patch", "receipt"),
+        evidence: candidateEvidence("patch-01", "evidence-patch"),
       },
     })
     const checking = advance(reviewReady, { type: "phase.changed", payload: { phase: "checking" } })
@@ -161,6 +161,59 @@ describe("Astra work-session domain", () => {
       "evidence-git",
       "evidence-complete",
     ])
+  })
+
+  test("binds candidate patch review evidence to its exact ID and digest", () => {
+    const analyzing = advance(initialProjection(), { type: "phase.changed", payload: { phase: "analyzing" } })
+    const working = advance(analyzing, { type: "phase.changed", payload: { phase: "working" } })
+    const candidatePatchID = "patch-bound"
+    const candidateDigest = `sha256:${"c".repeat(64)}`
+
+    expect(
+      makeEvent(working, {
+        type: "candidate-patch.recorded",
+        payload: {
+          candidatePatchID,
+          evidence: {
+            evidenceID: "candidate-wrong-label",
+            kind: "receipt",
+            label: "Observed evidence",
+            value: candidateDigest,
+            assurance: "observed",
+          },
+        },
+      }).ok,
+    ).toBe(false)
+    expect(
+      makeEvent(working, {
+        type: "candidate-patch.recorded",
+        payload: {
+          candidatePatchID,
+          evidence: {
+            evidenceID: "candidate-wrong-kind",
+            kind: "test",
+            label: `candidate-patch:${candidatePatchID}`,
+            value: candidateDigest,
+            assurance: "observed",
+          },
+        },
+      }).ok,
+    ).toBe(false)
+    expect(
+      makeEvent(working, {
+        type: "candidate-patch.recorded",
+        payload: {
+          candidatePatchID,
+          evidence: {
+            evidenceID: "candidate-invalid-digest",
+            kind: "receipt",
+            label: `candidate-patch:${candidatePatchID}`,
+            value: "not-a-digest",
+            assurance: "observed",
+          },
+        },
+      }).ok,
+    ).toBe(false)
   })
 
   test("requires typed reconciliation evidence before leaving uncertainty for work", () => {
@@ -399,7 +452,7 @@ function projectionAt(phase: (typeof workSessionPhases)[number]) {
   if (phase === "working") return working
   const reviewReady = advance(working, {
     type: "candidate-patch.recorded",
-    payload: { candidatePatchID: "patch-phase", evidence: evidence("evidence-phase-patch") },
+    payload: { candidatePatchID: "patch-phase", evidence: candidateEvidence("patch-phase", "evidence-phase-patch") },
   })
   if (phase === "review-ready") return reviewReady
   if (phase === "applying") return advance(reviewReady, { type: "phase.changed", payload: { phase: "applying" } })
@@ -441,6 +494,16 @@ function later(sequence: number) {
 
 function evidence(evidenceID: string, kind: "git" | "test" | "receipt" = "receipt") {
   return { evidenceID, kind, label: "Observed evidence", value: `sha256:${"a".repeat(64)}`, assurance: "observed" } as const
+}
+
+function candidateEvidence(candidatePatchID: string, evidenceID: string) {
+  return {
+    evidenceID,
+    kind: "receipt",
+    label: `candidate-patch:${candidatePatchID}`,
+    value: `sha256:${"a".repeat(64)}`,
+    assurance: "observed",
+  } as const
 }
 
 function agent(

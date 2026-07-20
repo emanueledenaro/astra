@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 
 import type { AstraSessionAuthority } from "@astra/domain/session-authority"
-import type { AstraWorkSessionProjection } from "@astra/domain/work-session"
+import { candidatePatchEvidenceLabel, type AstraWorkSessionProjection } from "@astra/domain/work-session"
 import type { TuiPluginApi } from "@opencode-ai/plugin/tui"
 import { For } from "solid-js"
 
@@ -46,10 +46,11 @@ export function validateAstraCandidatePatchDetails(
   authority: AstraSessionAuthority,
 ): AstraCandidatePatchDetails | undefined {
   if (!projection || projection.phase !== "review-ready" || !projection.candidatePatchID) return
+  const candidatePatchID = projection.candidatePatchID
   if (!plainRecord(input, ["schemaVersion", "candidatePatchID", "candidateDigest", "projectionDigest", "baselineDigest", "summary", "files"])) return
   if (
     input.schemaVersion !== 1 ||
-    input.candidatePatchID !== projection.candidatePatchID ||
+    input.candidatePatchID !== candidatePatchID ||
     input.projectionDigest !== projection.projectionDigest ||
     input.baselineDigest !== authority.repositoryBaseline?.snapshotDigest ||
     !safeID(input.candidatePatchID) ||
@@ -61,6 +62,10 @@ export function validateAstraCandidatePatchDetails(
     input.files.length === 0 ||
     input.files.length > 512
   ) return
+  const candidateEvidence = projection.evidence.filter(
+    (evidence) => evidence.kind === "receipt" && evidence.label === candidatePatchEvidenceLabel(candidatePatchID),
+  )
+  if (candidateEvidence.length !== 1 || candidateEvidence[0]?.value !== input.candidateDigest) return
   const files = input.files.flatMap((value) => {
     if (!plainRecord(value, ["path", "change"])) return []
     if (!safeRelativePath(value.path) || (value.change !== "add" && value.change !== "modify" && value.change !== "delete")) return []
@@ -95,7 +100,7 @@ function plainRecord(input: unknown, keys: ReadonlyArray<string>): input is Reco
 }
 
 function safeID(input: unknown): input is string {
-  return typeof input === "string" && input.length > 0 && input.length <= 256 && !/\p{C}/u.test(input)
+  return typeof input === "string" && input.length > 0 && Buffer.byteLength(input) <= 256 && !/\p{C}/u.test(input)
 }
 
 function safeText(input: unknown, maximum: number): input is string {

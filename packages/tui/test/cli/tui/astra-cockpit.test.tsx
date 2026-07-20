@@ -19,6 +19,7 @@ import { createSignal, ErrorBoundary, type JSX } from "solid-js"
 import type { AstraProviderClient } from "../../../src/astra/provider-client"
 import type { AstraWorkSessionClient, AstraWorkSessionView } from "../../../src/astra/work-session-client"
 import { AstraCockpit, type AstraCandidatePatchDetails } from "../../../src/component/astra-cockpit"
+import { validateAstraCandidatePatchDetails } from "../../../src/component/astra-review-mode"
 import { TuiConfigProvider } from "../../../src/config"
 import { KVProvider } from "../../../src/context/kv"
 import { ThemeProvider } from "../../../src/context/theme"
@@ -143,8 +144,8 @@ test("never opens review automatically and refuses incomplete or mismatched cand
     projection,
     candidatePatchDetails: {
       schemaVersion: 1,
-      candidatePatchID: "wrong-patch",
-      candidateDigest,
+      candidatePatchID: "candidate-01",
+      candidateDigest: `sha256:${"d".repeat(64)}`,
       projectionDigest: projection.projectionDigest,
       baselineDigest,
       summary: "Candidate patch",
@@ -164,6 +165,33 @@ test("never opens review automatically and refuses incomplete or mismatched cand
   } finally {
     app.render.renderer.destroy()
   }
+})
+
+test("refuses old or ambiguous parent candidate evidence", () => {
+  const projection = reviewProjection()
+  const details = {
+    schemaVersion: 1,
+    candidatePatchID: "candidate-01",
+    candidateDigest,
+    projectionDigest: projection.projectionDigest,
+    baselineDigest,
+    summary: "Candidate patch",
+    files: [{ path: "src/index.ts", change: "modify" }],
+  } as const satisfies AstraCandidatePatchDetails
+  const oldEvidence = {
+    ...projection,
+    evidence: projection.evidence.map((evidence) => ({ ...evidence, label: "candidate-patch:candidate-old" })),
+  }
+  const ambiguousEvidence = {
+    ...projection,
+    evidence: [
+      ...projection.evidence,
+      { ...projection.evidence.at(-1)!, evidenceID: "candidate-evidence-duplicate" },
+    ],
+  }
+
+  expect(validateAstraCandidatePatchDetails(details, oldEvidence, authority)).toBeUndefined()
+  expect(validateAstraCandidatePatchDetails(details, ambiguousEvidence, authority)).toBeUndefined()
 })
 
 test("opens only validated parent candidate metadata, keeps chat mounted, and Escape returns", async () => {
@@ -431,7 +459,7 @@ function reviewProjection() {
       evidence: {
         evidenceID: "candidate-evidence",
         kind: "receipt",
-        label: "candidate",
+        label: "candidate-patch:candidate-01",
         value: candidateDigest,
         assurance: "CANDIDATE OBSERVED · NOT APPLIED",
       },
