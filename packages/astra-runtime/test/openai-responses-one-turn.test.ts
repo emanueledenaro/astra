@@ -11,23 +11,32 @@ const codexAdapter = requiredAdapter("openai-codex-oauth")
 
 describe("Astra OpenAI Responses one-turn protocol", () => {
   test("builds tool-free API-key and Codex OAuth requests for their exact destinations", () => {
-    for (const adapter of [apiKeyAdapter, codexAdapter]) {
-      const request = buildOpenAIResponsesOneTurnRequest({
+    const build = (adapter: CertifiedProviderAdapter) =>
+      buildOpenAIResponsesOneTurnRequest({
         adapter,
-        modelID: "gpt-5.2-codex",
+        modelID: "gpt-5.4",
         userText: "Explain the operation state.",
         maxOutputTokens: 1_024,
+        sessionID: "019f6c64-25e9-7ce2-8817-45becb7e02fe",
+        userAgent: "astra/local (darwin; arm64)",
         conversationTurns: [{ userText: "What is Astra?", assistantText: "A governed coding agent." }],
       })
-      const body = JSON.parse(new TextDecoder().decode(request.privateWireBody))
+    const apiKeyRequest = build(apiKeyAdapter)
+    const codexRequest = build(codexAdapter)
 
-      expect(request.destination).toEqual(adapter.destination)
+    for (const [request, adapter] of [
+      [apiKeyRequest, apiKeyAdapter],
+      [codexRequest, codexAdapter],
+    ] as const) {
       expect(request.headers).toEqual([
         ["accept", "text/event-stream"],
         ["content-type", "application/json"],
+        ["originator", "opencode"],
+        ["session-id", "019f6c64-25e9-7ce2-8817-45becb7e02fe"],
+        ["user-agent", "astra/local (darwin; arm64)"],
       ])
-      expect(body).toEqual({
-        model: "gpt-5.2-codex",
+      expect(JSON.parse(new TextDecoder().decode(request.privateWireBody))).toMatchObject({
+        model: "gpt-5.4",
         instructions:
           "You are Astra, a professional coding assistant. Answer clearly and truthfully. This turn has no tools, files, shell, Git, skills, plugins, MCP, memory, or external-system access. Never claim that you used them.",
         input: [
@@ -39,11 +48,17 @@ describe("Astra OpenAI Responses one-turn protocol", () => {
         tool_choice: "none",
         store: false,
         stream: true,
-        max_output_tokens: 1_024,
       })
       expect(request.evidence.adapterDigest).toBe(adapter.adapterDigest)
       expect(JSON.stringify(request.evidence)).not.toContain("Explain the operation state.")
     }
+
+    expect(apiKeyRequest.destination).toEqual(apiKeyAdapter.destination)
+    expect(codexRequest.destination).toEqual(codexAdapter.destination)
+    expect(JSON.parse(new TextDecoder().decode(apiKeyRequest.privateWireBody))).toMatchObject({
+      max_output_tokens: 1_024,
+    })
+    expect(JSON.parse(new TextDecoder().decode(codexRequest.privateWireBody))).not.toHaveProperty("max_output_tokens")
   })
 
   test("observes a bounded terminal text response without claiming verification", () => {
@@ -60,6 +75,24 @@ describe("Astra OpenAI Responses one-turn protocol", () => {
       assistantText: "Hello from Astra.",
       finishReason: "stop",
       evidence: { eventCount: 5, assistantTextBytes: 17 },
+    })
+  })
+
+  test("accepts the inherited Codex SSE terminal event without an artificial DONE sentinel", () => {
+    const response = parseOpenAIResponsesOneTurnResponse(
+      rawResponse(
+        [
+          { type: "response.output_text.delta", item_id: "msg_1", delta: "ASTRA-ONE" },
+          { type: "response.completed", response: { id: "resp_1", status: "completed" } },
+        ],
+        false,
+      ),
+    )
+
+    expect(response).toMatchObject({
+      status: "observed_not_verified",
+      assistantText: "ASTRA-ONE",
+      finishReason: "stop",
     })
   })
 
@@ -94,6 +127,8 @@ describe("Astra OpenAI Responses one-turn protocol", () => {
         modelID: "gpt-5.2-codex",
         userText: "Do not send this.",
         maxOutputTokens: 1_024,
+        sessionID: "019f6c64-25e9-7ce2-8817-45becb7e02fe",
+        userAgent: "astra/local (darwin; arm64)",
       }),
     ).toThrow(new OpenAIResponsesOneTurnError("adapter_rejected"))
   })
@@ -105,10 +140,12 @@ function requiredAdapter(profile: "openai-api-key" | "openai-codex-oauth") {
   return adapter
 }
 
-function rawResponse(events: ReadonlyArray<Readonly<Record<string, unknown>>>) {
+function rawResponse(events: ReadonlyArray<Readonly<Record<string, unknown>>>, done = true) {
   return {
     statusCode: 200,
     headers: [["content-type", "text/event-stream; charset=utf-8"]] as const,
-    body: new TextEncoder().encode(`${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`),
+    body: new TextEncoder().encode(
+      `${events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("")}${done ? "data: [DONE]\n\n" : ""}`,
+    ),
   }
 }

@@ -211,9 +211,16 @@ export function createAstraProviderControl(
       return blockedPrepare("skill_context_unavailable")
     }
     if (skillBundle && providerID !== "anthropic") return blockedPrepare("skill_context_unavailable")
-    const preparedRequest = buildRequest(adapter, catalogAuthority, result, modelID, userText, skillBundle, [
-      ...conversation,
-    ])
+    const preparedRequest = buildRequest(
+      adapter,
+      catalogAuthority,
+      result,
+      modelID,
+      userText,
+      skillBundle,
+      [...conversation],
+      sessionID,
+    )
     if (!preparedRequest) return blockedPrepare("input_rejected")
     const credential = await dependencies.credentialBroker.issueForSession(sessionID, { providerID, credentialProfile })
     if (!credential.ok) return blockedPrepare("credential_unavailable")
@@ -515,6 +522,7 @@ function buildRequest(
   userText: string,
   skillBundle: TrustedPromptSkillBundle | null,
   conversationTurns: ReadonlyArray<AnthropicConversationTurn>,
+  sessionID: string,
 ) {
   try {
     if (adapter.providerID === "anthropic") {
@@ -553,6 +561,8 @@ function buildRequest(
       modelID,
       userText,
       maxOutputTokens: maxTokens,
+      sessionID,
+      userAgent: `astra/local (${process.platform}; ${process.arch})`,
       conversationTurns,
     })
     return {

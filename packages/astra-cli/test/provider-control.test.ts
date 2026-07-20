@@ -158,7 +158,12 @@ describe("parent provider control", () => {
         })
         expect(await dependencies.requestApproval(runtimePreview)).toBe("approve")
         const wire = await resolveWire()
-        expect(new TextDecoder().decode(wire.body)).toContain(privatePrompt)
+        const body = JSON.parse(new TextDecoder().decode(wire.body))
+        expect(body.input).toContainEqual({ role: "user", content: [{ type: "input_text", text: privatePrompt }] })
+        expect(body).not.toHaveProperty("max_output_tokens")
+        expect(wire.headers).toContainEqual(["originator", "opencode"])
+        expect(wire.headers).toContainEqual(["session-id", fixture.sessionID])
+        expect(wire.headers.some(([name, value]) => name === "user-agent" && value.startsWith("astra/"))).toBe(true)
         expect(wire.headers).toContainEqual(["chatgpt-account-id", "account-parent-only"])
         expect(wire.credential.value).toBe("Bearer oauth-parent-only")
         dependencies.onNetworkDispatch?.()
@@ -216,7 +221,7 @@ describe("parent provider control", () => {
       adapter: { adapterID: "openai.responses.api-key.v1", assurance: "CERTIFIED" },
       destination: { origin: "https://api.openai.com", path: "/v1/responses" },
       credential: { profile: "openai-api-key", headerName: "authorization" },
-      headerNames: ["accept", "authorization", "content-type"],
+      headerNames: ["accept", "authorization", "content-type", "originator", "session-id", "user-agent"],
     })
   })
 

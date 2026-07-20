@@ -243,6 +243,47 @@ describe("provider control skill preview", () => {
     ).toBeNull()
   })
 
+  test("accepts the exact OpenCode metadata header set for both certified OpenAI credential routes", () => {
+    const base = prepared()
+    for (const credentialProfile of ["openai-api-key", "openai-codex-oauth"] as const) {
+      const codex = credentialProfile === "openai-codex-oauth"
+      const result = parseProviderTurnPrepareResult({
+        ...base,
+        preview: {
+          ...base.preview,
+          providerID: "openai",
+          modelID: "gpt-5.4",
+          adapter: {
+            ...base.preview.adapter,
+            adapterID: codex ? "openai.responses.codex-oauth.v1" : "openai.responses.api-key.v1",
+          },
+          destination: {
+            method: "POST",
+            origin: codex ? "https://chatgpt.com" : "https://api.openai.com",
+            path: codex ? "/backend-api/codex/responses" : "/v1/responses",
+          },
+          logicalPayload: { ...base.preview.logicalPayload, contextBindingDigest: null },
+          skillContext: null,
+          headerNames: [
+            "accept",
+            "authorization",
+            ...(codex ? ["chatgpt-account-id"] : []),
+            "content-type",
+            "originator",
+            "session-id",
+            "user-agent",
+          ],
+          credential: {
+            ...base.preview.credential,
+            profile: credentialProfile,
+            headerName: "authorization",
+          },
+        },
+      })
+      expect(result?.status).toBe("prepared")
+    }
+  })
+
   test("accepts canonical v7/v8 skill operation IDs", () => {
     for (const activationOperationID of [
       "018f4f95-19c8-7b18-8f37-2f905adf2f35",

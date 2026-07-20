@@ -66,6 +66,8 @@ export function buildOpenAIResponsesOneTurnRequest(input: Readonly<{
   modelID: string
   userText: string
   maxOutputTokens: number
+  sessionID: string
+  userAgent: string
   conversationTurns?: ReadonlyArray<OpenAIResponsesConversationTurn>
 }>): OpenAIResponsesOneTurnRequest {
   const adapter = requireOpenAIAdapter(input.adapter)
@@ -79,6 +81,8 @@ export function buildOpenAIResponsesOneTurnRequest(input: Readonly<{
     fail("max_output_tokens_rejected")
   }
   const conversationTurns = requireConversation(input.conversationTurns ?? [])
+  const sessionID = requireHeaderValue(input.sessionID, "session_id_rejected")
+  const userAgent = requireHeaderValue(input.userAgent, "user_agent_rejected")
   const conversationBytes = conversationTurns.reduce(
     (total, turn) => total + Buffer.byteLength(turn.userText, "utf8") + Buffer.byteLength(turn.assistantText, "utf8"),
     0,
@@ -97,7 +101,7 @@ export function buildOpenAIResponsesOneTurnRequest(input: Readonly<{
     tool_choice: "none",
     store: false,
     stream: true,
-    max_output_tokens: input.maxOutputTokens,
+    ...(adapter.credentialProfile === "openai-codex-oauth" ? {} : { max_output_tokens: input.maxOutputTokens }),
   }
   const privateWireBody = new TextEncoder().encode(JSON.stringify(body))
   if (privateWireBody.byteLength > openAIResponsesOneTurnMaximumRequestBytes) fail("request_too_large")
@@ -106,6 +110,9 @@ export function buildOpenAIResponsesOneTurnRequest(input: Readonly<{
     headers: [
       ["accept", "text/event-stream"],
       ["content-type", "application/json"],
+      ["originator", "opencode"],
+      ["session-id", sessionID],
+      ["user-agent", userAgent],
     ],
     privateWireBody,
     evidence: {
@@ -170,7 +177,7 @@ export function parseOpenAIResponsesOneTurnResponse(
     }
     if (!safeNonTerminalEvents.has(eventType)) fail("event_invalid")
   }
-  if (!terminal || !done || finishReason === null) fail("stream_truncated")
+  if (!terminal || finishReason === null) fail("stream_truncated")
   if (assistantTextBytes === 0) fail("assistant_text_empty")
   const assistantText = chunks.join("")
   return {
@@ -240,6 +247,18 @@ function requireIdentifier(input: unknown, code: string) {
 
 function requireText(input: unknown, maximumBytes: number, code: string) {
   if (typeof input !== "string" || input.trim().length === 0 || Buffer.byteLength(input, "utf8") > maximumBytes) {
+    fail(code)
+  }
+  return input
+}
+
+function requireHeaderValue(input: unknown, code: string) {
+  if (
+    typeof input !== "string" ||
+    input.length === 0 ||
+    Buffer.byteLength(input, "utf8") > 512 ||
+    /[^\t\u0020-\u007e]/u.test(input)
+  ) {
     fail(code)
   }
   return input

@@ -377,7 +377,14 @@ function openAIPrepareResult(requestId: string) {
         origin: "https://chatgpt.com",
         path: "/backend-api/codex/responses",
       },
-      headerNames: ["accept", "authorization", "content-type"],
+      headerNames: [
+        "accept",
+        "authorization",
+        "content-type",
+        "originator",
+        "session-id",
+        "user-agent",
+      ],
       credential: {
         profile: "openai-codex-oauth",
         accountFingerprint: `sha256:${"3".repeat(64)}`,

@@ -668,7 +668,7 @@ function providerPreviewBinding(providerID: unknown, profile: unknown) {
       origin: "https://api.openai.com",
       path: "/v1/responses",
       headerName: "authorization",
-      headerNames: [["accept", "authorization", "content-type"]],
+      headerNames: [["accept", "authorization", "content-type", "originator", "session-id", "user-agent"]],
     } as const
   }
   if (providerID === "openai" && profile === "openai-codex-oauth") {
@@ -678,8 +678,16 @@ function providerPreviewBinding(providerID: unknown, profile: unknown) {
       path: "/backend-api/codex/responses",
       headerName: "authorization",
       headerNames: [
-        ["accept", "authorization", "content-type"],
-        ["accept", "authorization", "chatgpt-account-id", "content-type"],
+        ["accept", "authorization", "content-type", "originator", "session-id", "user-agent"],
+        [
+          "accept",
+          "authorization",
+          "chatgpt-account-id",
+          "content-type",
+          "originator",
+          "session-id",
+          "user-agent",
+        ],
       ],
     } as const
   }

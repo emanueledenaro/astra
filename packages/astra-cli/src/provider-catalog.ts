@@ -12,25 +12,31 @@ const OFFLINE_SOURCE = "packages/opencode/test/tool/fixtures/models-api.json" as
 const MAX_MODELS = 256
 const MODALITIES = ["text", "audio", "image", "video", "pdf"] as const
 const OPENAI_PROVIDER_CONTENT_DIGEST =
-  "sha256:e44b0888b4cc4ec47f6f521623d68b1ee290a90000f4d94bff1197d1e80ea933" as const
+  "sha256:d449adaf08485008e8a37593d17fe5661ec53da2c0fa0b7e73a00b95ed6a6439" as const
 const OPENAI_CERTIFIED_MODELS = {
-  "gpt-5": {
-    id: "gpt-5",
-    name: "GPT-5",
-    modalities: { input: ["text", "image"], output: ["text"] },
-    limit: { context: 400_000, input: 272_000, output: 128_000 },
-  },
-  "gpt-5.1-codex": {
-    id: "gpt-5.1-codex",
-    name: "GPT-5.1 Codex",
-    modalities: { input: ["text", "image"], output: ["text"] },
-    limit: { context: 400_000, input: 272_000, output: 128_000 },
-  },
-  "gpt-5.2-codex": {
-    id: "gpt-5.2-codex",
-    name: "GPT-5.2 Codex",
+  "gpt-5.4": {
+    id: "gpt-5.4",
+    name: "GPT-5.4",
     modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    limit: { context: 1_050_000, input: 922_000, output: 128_000 },
+  },
+  "gpt-5.4-mini": {
+    id: "gpt-5.4-mini",
+    name: "GPT-5.4 mini",
+    modalities: { input: ["text", "image"], output: ["text"] },
     limit: { context: 400_000, input: 272_000, output: 128_000 },
+  },
+  "gpt-5.3-codex-spark": {
+    id: "gpt-5.3-codex-spark",
+    name: "GPT-5.3 Codex Spark",
+    modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    limit: { context: 128_000, input: 100_000, output: 32_000 },
+  },
+  "gpt-5.5": {
+    id: "gpt-5.5",
+    name: "GPT-5.5",
+    modalities: { input: ["text", "image", "pdf"], output: ["text"] },
+    limit: { context: 1_050_000, input: 922_000, output: 128_000 },
   },
 } as const
 

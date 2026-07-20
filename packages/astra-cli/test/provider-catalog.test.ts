@@ -63,6 +63,20 @@ describe("Astra provider catalog", () => {
     expect(provider.provenance.providerContentDigest).toBe(OPEN_CODE_MODELS_DEV_SNAPSHOT_METADATA.providerContentDigest)
   })
 
+  test("keeps the Codex OAuth catalog aligned with the models accepted by the inherited OpenCode provider", () => {
+    const result = readAstraProviderCatalog()
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const provider = result.catalog.providers.find((candidate) => candidate.providerID === "openai")
+    expect(provider?.models.map((model) => model.id)).toEqual([
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
+      "gpt-5.5",
+    ])
+  })
+
   test("fails closed when a build has no embedded snapshot or metadata", async () => {
     expect((await readBuiltCatalog("undefined", "undefined")).ok).toBe(false)
     expect((await readBuiltCatalog(JSON.stringify(makeSnapshot({ "claude-text": textModel })), "undefined")).ok).toBe(
