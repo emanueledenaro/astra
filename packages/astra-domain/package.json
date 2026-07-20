@@ -23,6 +23,7 @@
     "./git-unstage-control": "./src/git-unstage-control.ts",
     "./launchpad": "./src/launchpad.ts",
     "./system-control": "./src/system-control.ts",
+    "./work-session": "./src/work-session.ts",
     "./governed-workspace-search": "./src/governed-workspace-search.ts",
     "./governed-workspace-search-control": "./src/governed-workspace-search-control.ts",
     "./host-command-control": "./src/host-command-control.ts",

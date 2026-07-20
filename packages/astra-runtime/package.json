@@ -32,7 +32,8 @@
     "./provider-turn-transport": "./src/provider-turn-transport.ts",
     "./project-parent-authority": "./src/project-parent-authority.ts",
     "./project-creation-operation-facts": "./src/project-creation-operation-facts.ts",
-    "./project-creation-verifier": "./src/project-creation-verifier.ts"
+    "./project-creation-verifier": "./src/project-creation-verifier.ts",
+    "./work-session-store": "./src/work-session-store.ts"
   },
   "scripts": {
     "test": "bun test",

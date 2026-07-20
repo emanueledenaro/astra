@@ -22,6 +22,29 @@ export * as Launchpad from "./launchpad"
 export * as ProjectCreationControl from "./project-creation-control"
 export * as ProjectCreationUi from "./project-creation-ui"
 export * as SessionAuthority from "./session-authority"
+export * as WorkSession from "./work-session"
+
+export {
+  createAstraWorkSessionEvent,
+  makeAstraWorkSessionEvent,
+  parseAstraWorkSessionEvent,
+  parseAstraWorkSessionProjection,
+  projectAstraWorkSessionEvent,
+  workSessionGenesisDigest,
+  workSessionPhases,
+} from "./work-session"
+
+export type {
+  AstraAgentProjection,
+  AstraWorkPhase,
+  AstraWorkSessionActor,
+  AstraWorkSessionDecision,
+  AstraWorkSessionEvent,
+  AstraWorkSessionEventDraft,
+  AstraWorkSessionEvidence,
+  AstraWorkSessionParseResult,
+  AstraWorkSessionProjection,
+} from "./work-session"
 
 export {
   computeGitRepositoryBaselineSnapshotDigest,

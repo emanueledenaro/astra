@@ -11,8 +11,11 @@
     "src/controlled-write-coordinator.ts",
     "src/controlled-write-verifier.ts",
     "src/controlled-write-operation-facts.ts",
+    "src/work-session-store.ts",
+    "src/work-session-store-internal.ts",
     "test/operation-ledger.test.ts",
-    "test/controlled-write-coordinator.test.ts"
+    "test/controlled-write-coordinator.test.ts",
+    "test/work-session-store.test.ts"
   ],
   "exclude": []
 }
