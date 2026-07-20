@@ -233,6 +233,34 @@ describe("provider turn Operation coordinator", () => {
     })
   })
 
+  test("accepts trusted strict SSE evidence when Codex omits content type", async () => {
+    const fixture = await operationInput()
+    const assistantText = "ASTRA-ONE"
+    const result = await executeProviderTurn(fixture.input, {
+      now: () => fixture.clock,
+      async requestApproval() {
+        return "approve"
+      },
+      trustedAdapter: trustedAdapter({
+        async execute(request) {
+          return trustedFinishEvent(request, {
+            assistantText,
+            assistantTextDigest: rawDigest(new TextEncoder().encode(assistantText)),
+            responseBodyDigest: rawDigest(new TextEncoder().encode("private raw SSE")),
+            contentType: null,
+          })
+        },
+      }),
+    })
+
+    expect(result).toMatchObject({
+      state: "completed",
+      status: "response_observed_not_verified",
+      response: { assistantText },
+    })
+    expect(await eventNames(fixture.input)).toContain("effect.completed")
+  })
+
   test("turns adapter errors and malformed events into durable uncertainty without secret leakage or retry", async () => {
     const fixture = await operationInput()
     const secret = "sk-live-provider-key-and-private-prompt"
@@ -1004,7 +1032,12 @@ function finishEvent(
 
 function trustedFinishEvent(
   request: UntrustedProviderTurnAdapterRequest,
-  input: Readonly<{ assistantText: string; assistantTextDigest: string; responseBodyDigest: string }>,
+  input: Readonly<{
+    assistantText: string
+    assistantTextDigest: string
+    responseBodyDigest: string
+    contentType?: "text/event-stream" | null
+  }>,
 ): TrustedObservedProviderTurnAdapterFinishEvent {
   return {
     type: "provider.observed-completion",
@@ -1019,7 +1052,11 @@ function trustedFinishEvent(
     },
     finalOrigin: request.expectedOrigin,
     networkEvidence: networkEvidence(request),
-    httpEvidence: { statusCode: 200, contentType: "text/event-stream", headerBytes: 64 },
+    httpEvidence: {
+      statusCode: 200,
+      contentType: "contentType" in input ? input.contentType! : "text/event-stream",
+      headerBytes: 64,
+    },
     completion: {
       status: "observed_not_verified",
       finishReason: "stop",

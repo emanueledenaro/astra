@@ -802,7 +802,10 @@ function normalizeTrustedAdapterEvent(
     requireMatchingRequestBinding(event.requestBinding, request)
     const networkEvidence = validateProviderTurnResolutionEvidence(event.networkEvidence, request.networkPolicy)
     const httpEvidence = validateProviderTurnHttpResponseEvidence(event.httpEvidence)
-    if (httpEvidence.statusCode !== 200 || httpEvidence.contentType !== "text/event-stream") {
+    if (
+      httpEvidence.statusCode !== 200 ||
+      (httpEvidence.contentType !== null && httpEvidence.contentType !== "text/event-stream")
+    ) {
       return unknownAdapterObservation("trusted_adapter_http_evidence_rejected")
     }
     const completion = exactRecord(event.completion, ["status", "finishReason", "assistantText", "evidence"])
