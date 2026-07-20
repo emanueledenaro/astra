@@ -34,6 +34,7 @@ import { createAstraMcpActivationAdapter } from "./mcp-activation-adapter"
 import { connectParentAnthropicCredential } from "./provider-connect"
 import { createAstraWorkSessionControl } from "./work-session-control"
 import { createParentProviderConversationHistory } from "./provider-conversation-history"
+import { resumeOrCreateAstraWorkSession } from "./work-session-resume"
 
 export type AstraTuiMode = "read-only" | "activate-once"
 
@@ -145,18 +146,20 @@ export function astraChildEnvironment(
 
 export async function launchAstraTui(session: OpenedWorkspace) {
   const authority = await createAstraSessionAuthorityFile(session)
-  const durableSessionID = randomUUID()
+  let durableSessionID: string
   try {
-    const { createDurableWorkSession } = await import("@astra/runtime/work-session-store")
-    await createDurableWorkSession({
-      sessionID: durableSessionID,
-      workspaceRoot: authority.authority.workspace.root,
-      workspaceIdentity: authority.authority.workspace.identity,
-      objective: null,
-      intent: { summary: "Workspace opened", next: "Awaiting an objective" },
-      observedAt: new Date().toISOString(),
-      actor: { kind: "system", actorID: "astra-parent" },
-    })
+    const store = await import("@astra/runtime/work-session-store")
+    durableSessionID = await resumeOrCreateAstraWorkSession(
+      {
+        root: authority.authority.workspace.root,
+        identity: authority.authority.workspace.identity,
+      },
+      {
+        list: store.listDurableWorkSessions,
+        load: store.loadDurableWorkSession,
+        create: store.createDurableWorkSession,
+      },
+    )
   } catch (error) {
     await rm(authority.directory, { recursive: true, force: true })
     throw error
