@@ -33,6 +33,7 @@ export type AstraWorkSessionView =
         | "backpressure_overflow"
         | "consumer_failed"
         | "timed_out"
+        | "cancelled"
     }>
 
 export type AstraWorkSessionClient = Readonly<{
@@ -90,6 +91,10 @@ export function createAstraWorkSessionClient(
       if (current.status !== "available") {
         await safelyNotify(consumer, current)
         throw errorForUnavailable(current)
+      }
+      if (subscriptionOptions.signal?.aborted) {
+        await safelyNotify(consumer, { status: "state_unavailable", reason: "cancelled" })
+        return
       }
       try {
         await exchangeSubscription(
@@ -198,6 +203,7 @@ type SubscriptionInput = Authority &
   }>
 
 function exchangeSubscription(input: SubscriptionInput, registerCancel: RegisterCancel) {
+  if (input.signal?.aborted) return Promise.reject(new AstraControlClientError("cancelled"))
   const requestId = randomUUID()
   return new Promise<void>((resolve, reject) => {
     let socket: Socket | undefined
@@ -243,6 +249,8 @@ function exchangeSubscription(input: SubscriptionInput, registerCancel: Register
         if (snapshotFrame.ok) {
           if (!accepted || snapshot) return finish("protocol_invalid")
           snapshot = true
+          if (timer) clearTimeout(timer)
+          timer = undefined
           current = snapshotFrame.value.projection
           try {
             await input.consumer({
@@ -335,6 +343,7 @@ function createExchange(
   let settled = false
   let buffered = ""
   let unregister = () => {}
+  let terminalComplete: (() => void) | undefined
   const finish = (code: AstraControlClientError["code"] | null, complete?: () => void) => {
     if (settled) return
     settled = true
@@ -362,12 +371,19 @@ function createExchange(
         const lines = buffered.split("\n")
         buffered = lines.pop() ?? ""
         for (const line of lines) {
+          if (terminalComplete) return finish("protocol_invalid")
           const value = decode(line)
           if (!value || value.requestId !== requestId) return finish("protocol_invalid")
           consume(value)
         }
+        if (terminalComplete && buffered.length > 0) finish("protocol_invalid")
       })
       socket.once("error", () => finish("transport_failed"))
+      socket.once("end", () => {
+        if (settled) return
+        if (!terminalComplete || buffered.length > 0) return finish("protocol_invalid")
+        finish(null, terminalComplete)
+      })
       socket.once("close", () => {
         if (!settled) finish("transport_failed")
       })
@@ -376,7 +392,11 @@ function createExchange(
       finish(code)
     },
     complete(complete: () => void) {
-      finish(null, complete)
+      if (terminalComplete) {
+        finish("protocol_invalid")
+        return
+      }
+      terminalComplete = complete
     },
   }
 }
@@ -391,6 +411,7 @@ function unavailableView(cause: unknown): Extract<AstraWorkSessionView, { status
 function errorForUnavailable(view: Extract<AstraWorkSessionView, { status: "state_unavailable" }>) {
   if (view.reason === "transport_failed") return new AstraControlClientError("transport_failed")
   if (view.reason === "timed_out") return new AstraControlClientError("timed_out")
+  if (view.reason === "cancelled") return new AstraControlClientError("cancelled")
   return new AstraControlClientError("protocol_invalid")
 }
 

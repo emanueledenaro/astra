@@ -55,7 +55,9 @@ test("fails closed on invalid order, digest, sequence, cross-session, and discon
   ]
 
   for (const response of cases) {
-    const fixture = await controlFixture((socket, request) => socket.end(response(request.requestId)))
+    const fixture = await controlFixture((socket, request) => {
+      socket.end(response(request.requestId))
+    })
     const client = createAstraWorkSessionClient(fixture.environment, authoritySessionID)
     const states: unknown[] = []
     try {
@@ -157,6 +159,103 @@ test("an active subscription does not block snapshot, decide, or cancel", async 
   }
 })
 
+test("keeps a valid idle subscription alive but times out a handshake with no snapshot", async () => {
+  const [initial] = chain()
+  const activeFixture = await controlFixture((socket, request) => {
+    if (request.method === "work-session.snapshot") return snapshotExchange(socket, request.requestId, initial)
+    socket.write(frame("accepted", request.requestId))
+    socket.write(snapshotFrame(request.requestId, initial))
+  })
+  const activeClient = createAstraWorkSessionClient(activeFixture.environment, authoritySessionID, { responseTimeoutMs: 20 })
+  const abort = new AbortController()
+  let ready!: () => void
+  const observed = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+  try {
+    const subscription = activeClient.subscribe((state) => {
+      if (state.status === "available") ready()
+    }, { signal: abort.signal })
+    await observed
+    await Bun.sleep(50)
+    abort.abort()
+    expect(await subscription.then(() => "open", () => "failed")).toBe("open")
+  } finally {
+    activeClient.dispose()
+    await activeFixture.close()
+  }
+
+  const stalledFixture = await controlFixture((socket, request) => {
+    if (request.method === "work-session.snapshot") return snapshotExchange(socket, request.requestId, initial)
+    socket.write(frame("accepted", request.requestId))
+  })
+  const stalledClient = createAstraWorkSessionClient(stalledFixture.environment, authoritySessionID, { responseTimeoutMs: 20 })
+  const states: unknown[] = []
+  try {
+    const failure = await stalledClient.subscribe((state) => {
+      states.push(state)
+    }).then(() => null, (error) => error)
+    expect(failure).toMatchObject({ code: "timed_out" })
+    expect(states.at(-1)).toMatchObject({ status: "state_unavailable", reason: "timed_out" })
+  } finally {
+    stalledClient.dispose()
+    await stalledFixture.close()
+  }
+})
+
+test("does not open a subscription when Abort wins during the initial snapshot", async () => {
+  const [initial] = chain()
+  const methods: string[] = []
+  let release!: () => void
+  const held = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const fixture = await controlFixture(async (socket, request) => {
+    methods.push(String(request.method))
+    socket.write(frame("accepted", request.requestId))
+    await held
+    socket.write(snapshotFrame(request.requestId, initial))
+    socket.end(terminal(request.requestId, "request_complete"))
+  })
+  const client = createAstraWorkSessionClient(fixture.environment, authoritySessionID)
+  const abort = new AbortController()
+  const states: unknown[] = []
+  try {
+    const subscription = client.subscribe((state) => {
+      states.push(state)
+    }, { signal: abort.signal })
+    await until(() => methods.length === 1)
+    abort.abort()
+    release()
+    await subscription
+    expect(methods).toEqual(["work-session.snapshot"])
+    expect(states.at(-1)).toMatchObject({ status: "state_unavailable", reason: "cancelled" })
+  } finally {
+    client.dispose()
+    await fixture.close()
+  }
+})
+
+test("rejects trailing frames after snapshot, decide, and cancel terminals", async () => {
+  const [initial] = chain()
+  const fixture = await controlFixture((socket, request) => {
+    socket.write(frame("accepted", request.requestId))
+    if (request.method === "work-session.snapshot") socket.write(snapshotFrame(request.requestId, initial))
+    socket.write(terminal(request.requestId, "request_complete"))
+    setTimeout(() => socket.end(frame("accepted", request.requestId)), 1)
+  })
+  const client = createAstraWorkSessionClient(fixture.environment, authoritySessionID)
+  try {
+    expect(await client.snapshot()).toMatchObject({ status: "state_unavailable", reason: "protocol_invalid" })
+    for (const request of [client.decide("decision-1", "approved"), client.cancel()]) {
+      expect(await request.then(() => null, (error) => error)).toMatchObject({ code: "protocol_invalid" })
+    }
+  } finally {
+    client.dispose()
+    await fixture.close()
+  }
+})
+
 function chain() {
   const created = createAstraWorkSessionEvent({
     sessionID: "work-session-1",
@@ -181,7 +280,7 @@ function chain() {
   return [initial.value, event.value, next.value] as const
 }
 
-async function controlFixture(handler: (socket: Socket, request: Record<string, unknown>) => void) {
+async function controlFixture(handler: (socket: Socket, request: Record<string, unknown>) => void | Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "astra-work-session-client-"))
   const socketPath = join(directory, "control.sock")
   let count = 0
@@ -197,7 +296,7 @@ async function controlFixture(handler: (socket: Socket, request: Record<string, 
       if (!buffered.endsWith("\n")) return
       const request: unknown = JSON.parse(buffered.slice(0, -1))
       if (typeof request !== "object" || request === null || Array.isArray(request)) return socket.destroy()
-      handler(socket, request as Record<string, unknown>)
+      void handler(socket, request as Record<string, unknown>)
     })
   })
   await listen(server, socketPath)
