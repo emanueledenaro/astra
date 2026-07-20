@@ -1,5 +1,91 @@
 # Astra Project Audit
 
+## Round 3 — 2026-07-20 (macOS verification + the cockpit line)
+
+**Context.** After the 2026-07-19 consolidation (PR #4–#7), the owner-side macOS
+verification ran and was merged (PR #8), and two new lines appeared:
+`astra-cockpit` (66 commits, ~27k lines: Launchpad/Control Center/cockpit TUI,
+OpenAI + Codex-OAuth providers, durable work-session store with resume, governed
+explicit shell, defect fixes) and `claude/slack-session-2jmcli` (1 commit:
+deterministic host-command allowlist policy).
+
+### macOS verification (merged, PR #8)
+
+Honest and valuable. Green: install, both native helpers under sanitizers, domain
+119/0, runtime 207/0, TUI 297/0, `verify:demo` PASS, and the real product flows —
+stage and commit both reached `VERIFIED` on a real PTY. Real defects found:
+(a) commit message truncated to "oke" in the PTY; (b) control socket path over the
+104-byte Unix limit on macOS; (c) missing `effect`/`@effect/sql-sqlite-bun` deps in
+astra-cli tests; (d) ledger concurrent-writer WAL race (`SQLITE_BUSY_RECOVERY`);
+(e) a git adapter test race. Chat untested only for lack of an Anthropic credential.
+
+### astra-cockpit — provider/credential/transport audit
+
+**No critical findings; all five security invariants upheld.** Verified clean:
+credentials read-only from the opencode store, never persisted/refreshed by Astra,
+never in child/preview/ledger/logs; broker one-shot discipline intact; preview→wire
+TOCTOU closed (digests re-checked at send); OpenAI/Codex egress rides the same
+pinned DNS/TLS transport (exactly two new frozen origins); streams bounded with
+truncation-cannot-become-success framing checks; conversation persistence honestly
+relabeled (`PARENT-OWNED DURABLE — VERIFIED ON LOAD`), 0600, hash-chained, outside
+the workspace; resume never auto-fires a turn; per-turn consent strengthened (A/D
+active only while the full preview is on screen). **Major (blocking):** Codex
+responses over ~64 KiB are destroyed by the 64 KiB history cap vs the 1 MiB parser
+bound — honest `reconciliation_required`, but it discards paid responses on the new
+provider's happy path. Minor: `response.done` accepted without inner status check;
+deadline expiry mislabeled as `response_framing_rejected`; catalog `sourceURL`
+overstates provenance; child-triggerable exit-86 connect handoff (parent-owned
+prompt, social-engineering surface only); Codex requests impersonate the opencode
+client to chatgpt.com (`originator: opencode`) — a ToS/product-owner question.
+
+### astra-cockpit — TUI/fixes audit
+
+Fixed properly: (c) deps declared; (d) real fix (`busy_timeout` before WAL
+conversion + honest test stabilization, assertions unweakened); (e) test timeout
+raise plus a real product fix for the same-session `baseline_stale` defect
+(parent-owned git session authority advancing only to independently verified
+snapshots, with regression tests). Deny-all child preserved (no new env, no new
+capability access, shell approve/reject deliberately not dispatchable commands);
+prompt lock intact; labels truthful throughout (`METADATA ONLY`, `NOT VERIFIED`
+literal types, `HOST FILESYSTEM/NETWORK UNRESTRICTED`); opencode touches surgical
+(one guarded line + astra-* files). **Open findings:** P1 — (b) socket-path defect
+NOT fixed in production (only a test prefix was shortened; product can still fail
+to launch on long macOS temp dirs, fail-closed); P1 evidence integrity — the two
+audit screenshots in the tip commit are byte-identical (the open-workspace evidence
+is a duplicate of the launchpad image); P2 — the recorded "no P0/P1 remains open"
+review predates three substantive tip commits; P2 — (a) "oke" truncation fix is
+plausible (single-process TTY ownership) but root cause was never proven and no
+PTY regression test types a long message.
+
+### claude/slack-session-2jmcli
+
+Sound, invariant-aligned (deterministic policy grants authority; model proposes),
+well-tested, currently dormant (no caller). **Conflicts with the cockpit line** —
+both rewrite `host-command.ts` incompatibly; must be rebased onto the cockpit's
+request/preview shapes, not merged mechanically.
+
+### Repo/process findings
+
+- **GitHub Actions has never executed on the fork** — only Copilot review runs
+  exist. The workflows are correctly wired since PR #6; Actions itself appears
+  disabled (fork default). Owner action: enable Actions in repository settings.
+- 992 upstream noise branches + ~1075 tags still pending owner deletion.
+- Session-side pending work (uncommitted, in the session worktree): the completed
+  and verified full-coverage operation-list slice (ledger `listOperations`), and
+  two partial slices (MCP tool invocation, git branch create) interrupted by
+  session limits. All three overlap files the cockpit rewrites.
+
+### Recommended order
+
+1. Codex fixes on `astra-cockpit`: the 64 KiB Codex response cap, the production
+   socket-path fallback, replace the duplicate screenshot, re-run or re-scope the
+   final review over the tip commits, add a PTY commit-message regression test.
+2. Merge `astra-cockpit` (it is close: disciplined, invariant-respecting).
+3. Rebase and land the session-side full-coverage views slice; resume the MCP tool
+   and branch-create slices on the new base.
+4. Rebase `claude/slack-session-2jmcli` onto the cockpit host-command shapes.
+5. Owner: enable GitHub Actions; delete the noise branches/tags.
+
 ## Round 2 — 2026-07-19 (after local-work recovery)
 
 **Context.** After round 1, ~65 commits of local work were recovered from the original
