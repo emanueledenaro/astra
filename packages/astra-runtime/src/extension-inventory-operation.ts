@@ -302,7 +302,7 @@ export async function executeExtensionInventory(
 
     if (await exists(input.ledgerFilename)) {
       const existing = await readDispatch(input, facts)
-      if (existing) return recoverExtensionInventory(input, dependencies)
+      if (existing?.claim) return recoverExtensionInventory(input, dependencies)
     }
 
     const now = dependencies.now ?? Date.now

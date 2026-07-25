@@ -301,30 +301,49 @@ function get(db: Database, receiptID: ReceiptID): Effect.Effect<SpoolEntry | nul
   if (!parsed.ok) {
     return Effect.fail(new ReceiptSpoolValidationError("Invalid receipt ID", parsed.issue.path, parsed.issue.reason))
   }
-  return Effect.gen(function* () {
-    yield* verifyIntegrity(db)
-    const rows = yield* readEntryRows(db, parsed.value)
-    return rows[0] ? yield* decodeEntry(rows[0]) : null
-  }).pipe(Effect.mapError(mapSpoolStorageError("Failed to read the receipt spool entry")))
+  return readSnapshotTransaction(db, (tx) =>
+    Effect.gen(function* () {
+      yield* verifyIntegrity(tx)
+      const rows = yield* readEntryRows(tx, parsed.value)
+      return rows[0] ? yield* decodeEntry(rows[0]) : null
+    }),
+  ).pipe(Effect.mapError(mapSpoolStorageError("Failed to read the receipt spool entry")))
 }
 
 function listPending(db: Database, limit: number): Effect.Effect<ReadonlyArray<SpoolEntry>, ReceiptSpoolError> {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > maximumReadReceipts) {
     return Effect.fail(new ReceiptSpoolReadLimitError(limit))
   }
-  return Effect.gen(function* () {
-    yield* verifyIntegrity(db)
-    const rows = yield* db.all<SpoolJoinRow>(sql`
-      SELECT receipt_spool.*, NULL AS ledger_event_id, NULL AS ledger_event_digest, NULL AS acknowledged_at
-      FROM receipt_spool LEFT JOIN receipt_ingestion_ack USING (receipt_id)
-      WHERE receipt_ingestion_ack.receipt_id IS NULL
-      ORDER BY receipt_spool.received_at ASC, receipt_spool.receipt_id ASC
-      LIMIT ${limit}
-    `)
-    const entries: Array<SpoolEntry> = []
-    for (const row of rows) entries.push(yield* decodeEntry(row))
-    return entries
-  }).pipe(Effect.mapError(mapSpoolStorageError("Failed to list pending receipts")))
+  return readSnapshotTransaction(db, (tx) =>
+    Effect.gen(function* () {
+      yield* verifyIntegrity(tx)
+      const rows = yield* tx.all<SpoolJoinRow>(sql`
+        SELECT receipt_spool.*, NULL AS ledger_event_id, NULL AS ledger_event_digest, NULL AS acknowledged_at
+        FROM receipt_spool LEFT JOIN receipt_ingestion_ack USING (receipt_id)
+        WHERE receipt_ingestion_ack.receipt_id IS NULL
+        ORDER BY receipt_spool.received_at ASC, receipt_spool.receipt_id ASC
+        LIMIT ${limit}
+      `)
+      const entries: Array<SpoolEntry> = []
+      for (const row of rows) entries.push(yield* decodeEntry(row))
+      return entries
+    }),
+  ).pipe(Effect.mapError(mapSpoolStorageError("Failed to list pending receipts")))
+}
+
+/**
+ * Runs paired read statements inside one deferred read transaction so they
+ * observe a single committed snapshot. Without this, a concurrent committed
+ * acknowledgement between two autocommit reads yields a false
+ * ReceiptSpoolCorruptionError.
+ */
+function readSnapshotTransaction<A>(
+  db: Database,
+  use: (tx: QueryExecutor) => Effect.Effect<A, ReceiptSpoolError>,
+): Effect.Effect<A, ReceiptSpoolError> {
+  return db
+    .transaction((tx) => use(tx), { behavior: "deferred" })
+    .pipe(Effect.mapError(mapSpoolStorageError("Failed to read a consistent receipt spool snapshot")))
 }
 
 function verifyIntegrity(db: QueryExecutor): Effect.Effect<void, ReceiptSpoolError> {

@@ -248,7 +248,7 @@ export async function executeHostCommand(
                   minimumRemainingLeaseMilliseconds: minimumEffectLeaseMilliseconds,
                 })
               }),
-            () => new Date().toISOString(),
+            () => new Date(now()).toISOString(),
           )
         : null
 

@@ -300,7 +300,7 @@ export async function executeGovernedWorkspaceSearch(
 
     if (await exists(input.ledgerFilename)) {
       const existing = await readExistingDispatch(input, facts)
-      if (existing) return recoverGovernedWorkspaceSearch(input, dependencies)
+      if (existing?.claim) return recoverGovernedWorkspaceSearch(input, dependencies)
     }
 
     const baseline = await revalidateBaseline(facts, facts.repositorySnapshotDigest)
